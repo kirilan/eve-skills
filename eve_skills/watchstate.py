@@ -13,9 +13,9 @@ witness? ``observe`` is pure; persistence wraps it with the storage primitives:
   so the same transition seen by two watchers — or by one watcher that crashed
   between appending and claiming state — is recorded exactly once.
 
-Both files live under ``$XDG_STATE_HOME/eve-skills`` (default
-``~/.local/state/eve-skills``): mutable machine-local state — not config, not
-cache. Deleting them only costs re-announcement of whatever was in flight.
+Both files live in ``paths.state_dir()`` - ``$XDG_STATE_HOME/eve-skills`` (default
+``~/.local/state/eve-skills``) on POSIX, ``%LOCALAPPDATA%\\eve-skills\\state`` on Windows: mutable
+machine-local state — not config, not cache. Deleting them only costs re-announcement of whatever was in flight.
 Readers resolve paths with ``create=False``: inspecting state never lays out
 directories.
 
@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 from typing import Mapping, Sequence
 
-from . import render, storage
+from . import paths, render, storage
 
 SCHEMA_VERSION = 1
 STATE_RETENTION_DAYS = 30    # forget characters untouched this long (logged out / removed)
@@ -70,32 +70,24 @@ STILL_OPEN = "open"                        # a history row ESI still calls open 
 
 
 # ---------------------------------------------------------------------------
-# Paths (XDG state; never created by readers)
+# Paths (the platform state directory; never created by readers)
 # ---------------------------------------------------------------------------
-
-def state_dir(create: bool = True) -> str:
-    """$XDG_STATE_HOME/eve-skills; create=False resolves the path without touching disk."""
-    root = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    path = os.path.join(root, "eve-skills")
-    if create:
-        os.makedirs(path, exist_ok=True)
-    return path
 
 
 def state_file(create: bool = True) -> str:
     """watch-state.json (queue observations); readers pass create=False."""
-    return os.path.join(state_dir(create=create), "watch-state.json")
+    return os.path.join(paths.state_dir(create=create), "watch-state.json")
 
 
 def events_file(create: bool = True) -> str:
     """events.jsonl (completion history); readers pass create=False."""
-    return os.path.join(state_dir(create=create), "events.jsonl")
+    return os.path.join(paths.state_dir(create=create), "events.jsonl")
 
 
 def _commit_lock():
     """One lock over state + history: a commit must claim transitions and append
     their records as a unit, or a racing watcher cannot tell the two apart."""
-    return storage.file_lock(os.path.join(state_dir(), "watch-state.lock"))
+    return storage.file_lock(os.path.join(paths.state_dir(), "watch-state.lock"))
 
 
 # ---------------------------------------------------------------------------

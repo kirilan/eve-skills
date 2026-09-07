@@ -1,14 +1,40 @@
 """Crash- and multi-process-safe local file writes. Standard library only.
 
-CLI commands and a long-running ``watch`` share the same $XDG_* directories, so every
-durable write goes through here: a unique temporary in the destination directory, then
-an atomic rename. A crash therefore leaves either the old file or the new one, never a
-truncated file, and two writers can never stomp on each other's temporary.
+CLI commands and a long-running ``watch`` share the same config, cache and data
+directories, so every durable write goes through here: a unique temporary in the
+destination directory, then an atomic rename. A crash therefore leaves either the old
+file or the new one, never a truncated file, and two writers can never stomp on each
+other's temporary. The rename is atomic on Windows as well; what differs there is that
+it fails outright while any other process still has the destination open, so
+``_replace`` gives that window a moment to clear instead of losing the write.
 
 Files that are updated by read-modify-write (token store, SP history, name cache)
-additionally hold ``file_lock`` around the whole read+write. The lock is advisory
-(``flock``), released by the kernel if the holding process dies, and re-entrant within
-one process so a helper that already holds it can call another that takes it too.
+additionally hold ``file_lock`` around the whole read+write. The lock is advisory on
+every platform - it serialises processes that cooperate by taking it and does not stop
+an unrelated program from opening the data file - the OS releases it when the holding
+process dies, and it is re-entrant within one process so a helper that already holds it
+can call another that takes it too.
+
+Two mechanisms implement it, selected once at import by which locking module this
+platform actually provides (never by matching ``sys.platform`` against a string):
+
+* POSIX - ``fcntl.flock(fd, LOCK_EX)`` on the lock file: whole-file, blocks until the
+  holder is gone, dropped by the kernel when the descriptor closes or the process dies.
+* Windows - ``msvcrt.locking(fd, LK_NBLCK, 1)`` on the first byte of that same file,
+  retried until granted (see ``_ByteRangeBackend``), released with ``LK_UNLCK`` and
+  dropped by the OS when the handle closes or the process dies.
+
+The one genuine difference between them is that a POSIX ``flock`` stays advisory even
+for the locked file itself, while an ``msvcrt`` byte-range lock denies other processes
+any access to the locked region. Nothing reads or writes the lock file: it is a
+zero-length sentinel sitting next to the data file precisely so the locked region can be
+empty, which keeps that difference invisible to every caller.
+
+Mode arguments (0600 for secrets, 0666 masked by umask for everything else) are honoured
+on POSIX and ignored on Windows, where a new file simply inherits the ACL of its
+directory - normally the private user profile. So the token store is protected there by
+that inherited ACL rather than by these bits; passing them anyway costs nothing and
+keeps the intent visible in the code.
 
 Never hold two different locks at the same time: nothing here needs to, and nesting
 different paths is how deadlocks get written.
@@ -16,15 +42,115 @@ different paths is how deadlocks get written.
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import json
 import os
 import secrets
 import threading
+import time
+
+try:  # POSIX. Absent on Windows, which is why this must not be a hard import.
+    import fcntl
+except ImportError:  # pragma: no cover - platform-dependent
+    fcntl = None  # type: ignore[assignment]
+
+try:  # Windows. Absent everywhere else.
+    import msvcrt
+except ImportError:  # pragma: no cover - platform-dependent
+    msvcrt = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# lock backends
+# ---------------------------------------------------------------------------
+
+# Contention on a byte-range lock is polled, not signalled: sleep this long after a
+# refusal and double it up to the ceiling. The start is short enough that the common
+# case (a peer holding the lock for milliseconds) costs little latency; the ceiling is
+# low enough that a lock held for seconds still feels immediate to a waiting CLI, while
+# costing ~4 wakeups a second instead of spinning a core. Blocking until granted is the
+# correct semantic because POSIX ``flock`` blocks and every caller relies on it.
+_LOCK_POLL_DELAY = 0.02
+_LOCK_POLL_CEILING = 0.25
+
+# Errnos meaning "someone else holds that region", as opposed to "this request can
+# never work". Only the first is worth retrying: retrying the second would turn a
+# closed descriptor into an endless loop. Windows reports contention as EDEADLOCK or
+# EACCES; EAGAIN covers platforms that spell the refusal that way.
+_LOCK_DENIED_ERRNOS = frozenset(
+    code
+    for code in (getattr(errno, name, None) for name in ("EACCES", "EAGAIN", "EDEADLOCK"))
+    if code is not None
+)
+
+
+class _FlockBackend:
+    """POSIX locking: one whole-file advisory lock per descriptor.
+
+    ``LOCK_EX`` blocks until the current holder unlocks or exits, and the kernel drops
+    the lock as soon as the descriptor closes - including when the process dies, which
+    is what makes a crashed ``watch`` unable to wedge every later command.
+    """
+
+    def acquire(self, fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def release(self, fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class _ByteRangeBackend:
+    """Windows locking: one locked byte at offset 0 of the lock file.
+
+    ``LK_NBLCK`` asks for the region once and raises when another process holds it, so
+    acquiring is a poll loop. ``LK_LOCK`` is not usable: it gives up after ten tries,
+    which would convert ordinary contention into a spurious failure. Only refusals are
+    retried - see ``_LOCK_DENIED_ERRNOS``.
+
+    ``msvcrt`` locks from the current file position, so both calls seek to 0 first
+    rather than depending on where the position happens to be.
+    """
+
+    def acquire(self, fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        delay = _LOCK_POLL_DELAY
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as err:
+                if err.errno not in _LOCK_DENIED_ERRNOS:
+                    raise
+            time.sleep(delay)
+            delay = min(delay * 2, _LOCK_POLL_CEILING)
+
+    def release(self, fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+def _select_lock_backend() -> _FlockBackend | _ByteRangeBackend:
+    """The locking mechanism this platform provides, judged by capability.
+
+    Preferring ``fcntl`` where both exist (Cygwin) is deliberate: a real kernel lock
+    beats a polled byte range. Having neither means we cannot honour the durability
+    contract at all, so say so loudly instead of locking nothing in silence.
+    """
+    if fcntl is not None:
+        return _FlockBackend()
+    if msvcrt is not None:
+        return _ByteRangeBackend()
+    raise ImportError(
+        "no supported file-locking mechanism: this platform offers neither fcntl "
+        "(POSIX) nor msvcrt (Windows)"
+    )
+
+
+_lock_backend = _select_lock_backend()
 
 
 class _LockState:
-    """Everything shared about one lock path: the in-process guard and the flock fd."""
+    """Everything shared about one lock path: the in-process guard and the OS lock fd."""
 
     __slots__ = ("guard", "depth", "fd")
 
@@ -39,7 +165,7 @@ _lock_states: dict[str, _LockState] = {}
 
 
 class _FileLock:
-    """Advisory exclusive lock: ``flock`` across processes, re-entrant within one."""
+    """Advisory exclusive lock: OS-level across processes, re-entrant within one."""
 
     def __init__(self, path: str):
         self.path = path
@@ -54,7 +180,7 @@ class _FileLock:
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
                 fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    _lock_backend.acquire(fd)
                 except BaseException:
                     os.close(fd)
                     raise
@@ -69,7 +195,7 @@ class _FileLock:
         state = self._state()
         state.depth -= 1
         if state.depth == 0 and state.fd is not None:
-            fcntl.flock(state.fd, fcntl.LOCK_UN)
+            _lock_backend.release(state.fd)
             os.close(state.fd)
             state.fd = None
         state.guard.release()
@@ -92,14 +218,44 @@ def _create_temp(path: str, private: bool) -> tuple[int, str]:
     """Open a unique temporary beside ``path``; 0600 up front when the payload is secret."""
     directory = os.path.dirname(path) or "."
     stem = os.path.basename(path)
+    # On Windows a descriptor without O_BINARY is in text mode, so every "\n" written
+    # through it becomes "\r\n": JSON survives that, events.jsonl does not, because its
+    # readers count lines. The flag exists nowhere else, hence the getattr.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     for _ in range(100):
         tmp = os.path.join(directory, f".{stem}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
         try:
             # O_EXCL makes the name collision-proof; umask still applies to shared files.
-            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666), tmp
+            return os.open(tmp, flags, 0o600 if private else 0o666), tmp
         except FileExistsError:
             continue
     raise RuntimeError(f"could not create a temporary file next to {path}")
+
+
+# ``os.replace`` is atomic on both platforms, but on Windows it raises PermissionError
+# while any other process merely holds the destination open - a reader in a second
+# eve-skills process is enough. Retry briefly before admitting defeat; POSIX has no such
+# restriction, so on POSIX this loop always takes its first iteration and the retry is
+# dead code there. The budget (8 attempts, 0.02s doubling to 0.25s) is about a second:
+# long enough for a reader or an antivirus scan to let go, short enough that a
+# genuinely wedged destination does not hang the CLI.
+_REPLACE_ATTEMPTS = 8
+_REPLACE_DELAY = 0.02
+_REPLACE_DELAY_CEILING = 0.25
+
+
+def _replace(src: str, dst: str) -> None:
+    """``os.replace``, tolerating a Windows sharing violation that clears on its own."""
+    delay = _REPLACE_DELAY
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS:
+                raise  # the original error, unwrapped: the window did not clear
+            time.sleep(delay)
+            delay = min(delay * 2, _REPLACE_DELAY_CEILING)
 
 
 def atomic_write(path: str, data: str | bytes, private: bool = False) -> None:
@@ -110,7 +266,7 @@ def atomic_write(path: str, data: str | bytes, private: bool = False) -> None:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())  # payload durable before the rename publishes it
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             os.remove(tmp)

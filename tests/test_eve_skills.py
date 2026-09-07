@@ -12,7 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
-from eve_skills import classify, cli, esi, exports, planner, snapshots, sso
+from eve_skills import classify, cli, esi, exports, paths, planner, snapshots, sso
 NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
 
 # Synthetic skill ids with synthetic caps: tests pin the logic, not the SDE.
@@ -117,7 +117,7 @@ class SnapshotTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        patcher = mock.patch.object(sso, "config_dir", return_value=self.tmp.name)
+        patcher = mock.patch.object(paths, "config_dir", return_value=self.tmp.name)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -225,7 +225,7 @@ class PlannerTests(unittest.TestCase):
     def test_calibrated_rate_needs_data(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        patcher = mock.patch.object(sso, "config_dir", return_value=tmp.name)
+        patcher = mock.patch.object(paths, "config_dir", return_value=tmp.name)
         patcher.start()
         self.addCleanup(patcher.stop)
         with self.assertRaises(RuntimeError):
@@ -351,7 +351,7 @@ class ScopeRegistryTests(unittest.TestCase):
 
 class RateGuardTests(unittest.TestCase):
     def _rate(self, first_sp, last_sp):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sso, "config_dir", return_value=tmp):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "config_dir", return_value=tmp):
             base = NOW.timestamp()
             with open(os.path.join(tmp, "sp-history.jsonl"), "w") as fh:
                 fh.write(json.dumps({"ts": base - 7200, "char_id": 1, "total_sp": first_sp}) + "\n")

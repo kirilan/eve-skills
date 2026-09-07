@@ -6,7 +6,8 @@ training plans and Skill Extractor math - and market data: live order books and 
 in any region or trade hub, your own open and closed orders, and a watch that announces the moment
 one of them fills, expires or is cancelled.
 
-- Python 3.11+, **standard library only** — no runtime dependencies.
+- Linux and Windows, Python 3.11+, **standard library only** — no runtime dependencies, nothing to
+  compile. See [Platform support](#platform-support).
 - Read-only against ESI. It never spends ISK, moves ships, trains skills or changes anything.
 - Multi-character: one login per character, every command walks all stored characters unless you
   pick one with `--char`.
@@ -54,6 +55,56 @@ problem.
 
 ## Install
 
+Python 3.11 or newer, standard library only — no runtime dependencies and nothing to compile. Linux
+and Windows are both supported; [Platform support](#platform-support) says exactly what differs.
+
+### With uv
+
+[uv](https://docs.astral.sh/uv/) is the shortest path, and it needs no pre-existing virtualenv.
+
+Try it with nothing installed:
+
+```bash
+git clone https://github.com/kirilan/eve-skills.git
+cd eve-skills
+uv run eve-skills --version                              # -> eve-skills 0.1.0; no install step
+uv run eve-skills market Tritanium --hub jita            # public prices, before any login
+uv run python -m unittest discover -s tests -t . -q      # the suite, also without installing
+```
+
+Install it as a tool on your `PATH` for daily use:
+
+```bash
+uv tool install .                                                # from this checkout
+uv tool install git+https://github.com/kirilan/eve-skills.git    # …or straight from GitHub
+uv tool list                                                     # -> eve-skills v0.1.0
+uv tool uninstall eve-skills                                     # …and take it off again
+```
+
+The console script lands in uv's own tool directory (`~/.local/bin/eve-skills` on this machine); if
+the shell cannot find `eve-skills` afterwards, `uv tool update-shell` puts that directory on `PATH`.
+
+Development means an editable install inside a uv-managed virtualenv:
+
+```bash
+uv venv                         # -> .venv (uv found CPython 3.14.4 here)
+uv pip install -e .
+```
+
+**Read that one before running it.** `uv pip install` installs into the **active** `VIRTUAL_ENV` when
+one is set — not necessarily the `.venv` beside you — so an editable install can quietly land in
+whichever environment your shell happens to have activated, leaving this checkout uninstalled. Pin the
+target explicitly, or work from a shell with nothing active:
+
+```bash
+uv pip install -e . --python .venv    # always this directory's .venv, whatever else is active
+echo "$VIRTUAL_ENV"                   # empty output = nothing active (PowerShell: echo $env:VIRTUAL_ENV)
+```
+
+### Without uv
+
+A stdlib virtualenv needs no extra tooling. POSIX shells:
+
 ```bash
 git clone https://github.com/kirilan/eve-skills.git
 cd eve-skills
@@ -62,8 +113,20 @@ python3 -m venv .venv
 .venv/bin/eve-skills --version
 ```
 
-Use the venv however you prefer — activate it, call `.venv/bin/eve-skills`, or invoke the module
-directly with no install at all:
+PowerShell — the interpreter is `python`, and console scripts are `.exe` files under `Scripts`:
+
+```powershell
+git clone https://github.com/kirilan/eve-skills.git
+cd eve-skills
+python -m venv .venv
+.\.venv\Scripts\pip install -e .
+.\.venv\Scripts\eve-skills.exe --version
+```
+
+### No install at all
+
+The package is plain stdlib Python, so from the checkout you can skip installation entirely and run
+the module — the same `main()` the console script calls:
 
 ```bash
 python -m eve_skills skills --json
@@ -75,6 +138,59 @@ To build a wheel or source distribution instead of installing from the checkout 
 version-bump, artifact-inspection, clean-install and tag procedure — see
 [RELEASE.md](RELEASE.md). Everything shipped here is GPL-3.0-only; the full text is in
 [LICENSE](LICENSE) and travels inside both artifacts.
+
+---
+
+## Platform support
+
+Linux and Windows are both supported: Python 3.11+, standard library only, no compiled dependency and
+no platform-specific package. Commands, flags, output formats and exit codes are identical. Four things
+really do differ, and each is handled rather than papered over — with a last note on how much of any of
+it has actually been run.
+
+**Locking.** A long-running `--watch` and a manual command can touch the same files, so every
+read-modify-write holds an advisory lock — on POSIX with `fcntl.flock` (whole-file, blocking, dropped
+by the kernel when the descriptor closes or the holder dies), on Windows with `msvcrt.locking` over
+the first byte of that same lock file (`LK_NBLCK` is refused rather than queued, so it is polled every
+20 ms, backing off to 250 ms until granted, then released with `LK_UNLCK`; the OS drops it when the
+handle closes). The durability guarantees are the same on both: one writer at a time, nothing wedged
+by a crashed watcher, and every durable write still a unique temporary plus an atomic rename — a crash
+leaves the old file or the new one, never a mix. Two Windows details follow from its own contracts: a
+rename fails outright while another process still has the destination open, so `os.replace` is retried
+8 times across roughly 1.05 s before the original error propagates; and temporaries are opened
+`O_BINARY`, because a text-mode handle would turn every `\n` written to `events.jsonl` into `\r\n`, and
+its readers count lines. The lock is held on a zero-length sentinel file that nobody reads or writes —
+precisely so the one real difference between the mechanisms (an `msvcrt` byte-range lock denies other
+processes access to the locked region, while `flock` stays advisory even for its own file) can never
+reach your data.
+
+**File permissions.** On POSIX secret files are created `0600`, and `doctor` checks directories for a
+group/other write bit. Windows has no such bits: a new file inherits the ACL of its directory, which
+is normally your private user profile — that inheritance is what protects `tokens.json` there, not a
+mode. So on Windows `doctor` reports `skip` for exactly the checks it cannot make (`path.config`,
+`path.cache`, `path.data`, `path.state`, `config.file`, `permissions.tokens`) and says why, instead of
+warning about the mode 666 every Windows `stat()` reports and offering a `chmod` that does not exist. A
+skip is never a blocker: skips do not change the exit code, and everything else — including a corrupt
+token store — still fails or warns as usual. To look at privacy yourself, use the folder's Security
+properties; there is nothing in this tool to configure.
+
+**Desktop notifications.** `--notify` shells out to `notify-send`, which no stock Windows installation
+ships: treat it as a Linux feature. Everything else happens everywhere — an alert rings the terminal
+bell, is printed, and is recorded in the event history either way. And rather than going quiet after a
+flag that promised a ping, the watch says once per run:
+`warning: desktop notifications need notify-send; events are still printed and recorded`.
+
+**Watch redraw.** The dashboard clears the screen between frames when stdout is a TTY. A Windows
+console ignores the escape sequence unless virtual-terminal processing is switched on, so the watcher
+turns it on once per run; a console that refuses gets a plain 72-character rule line instead of escape
+codes, with the timestamped header still separating the frames.
+
+**How much of this has been run.** No Windows machine was involved in testing: every Windows branch —
+the `msvcrt` backend, profile-folder path resolution, doctor's skips and its cmd-shaped hints, the
+virtual-terminal fallback — is covered by tests that *force* the platform (a fake `msvcrt`, an injected
+platform judgement), not by a live Windows run. See
+[Testing and verification status](#testing-and-verification-status) for what that buys and what it does
+not.
 
 ---
 
@@ -115,7 +231,11 @@ Supply the client ID once, in any of these ways (highest precedence first):
 ```bash
 eve-skills login --client-id <your-client-id>          # stored in config.json after a successful login
 export EVE_SKILLS_CLIENT_ID=<your-client-id>           # environment override, wins over config.json
-# or edit $XDG_CONFIG_HOME/eve-skills/config.json:  {"client_id": "...", "user_agent": "..."}
+# PowerShell equivalent of the same override:
+#   $env:EVE_SKILLS_CLIENT_ID = "<your-client-id>"
+# or edit config.json where your platform keeps it — ~/.config/eve-skills/ on POSIX,
+# %APPDATA%\eve-skills\ on Windows (see [where data lives](#where-data-lives-and-how-it-is-protected)):
+#   {"client_id": "...", "user_agent": "..."}
 ```
 
 `config.json` also accepts `user_agent`. The default User-Agent says `contact unset`; ESI etiquette
@@ -483,8 +603,10 @@ eve-skills orders --watch --corp   # corporation orders as well (needs corp-orde
 By default watch draws a compact status table for all stored characters — clone state, queue
 length with finished-item count, what is training now and its time left (or `blocked (no
 schedule)`), total SP, and fetch freshness. It redraws on the timer (clearing the screen only
-when stdout is a TTY); `--full` keeps the full `skills` view instead. Ctrl-C stops it and exits
-130.
+when stdout is a TTY — on a Windows console only after virtual-terminal processing has been switched
+on, with a plain rule line as the fallback for one that refuses it; see
+[Platform support](#platform-support)). `--full` keeps the full `skills` view instead. Ctrl-C stops it
+and exits 130.
 
 A character whose fetch fails keeps its last-known row marked `<age> stale`, with the error
 printed under the table — healthy data is never dropped because one sibling went quiet; a
@@ -495,10 +617,12 @@ training state, so a transient ESI outage cannot fake a "finished" event.
 Alerts fire **exactly once**: every transition a watcher witnesses — training finished, queue
 emptied, an order filled, expired or cancelled — is claimed against persisted state under a lock,
 so each event is announced once across polls, restarts and concurrent watchers — never repeated
-per poll. Announcements ring the terminal bell; `--notify`
-additionally calls `notify-send` when that binary exists (best-effort: a missing, hanging or
-failing notify-send never kills an overnight watch). The history lives in
-`$XDG_STATE_HOME/eve-skills` and survives restarts — read it with
+per poll. Announcements ring the terminal bell; `--notify` additionally calls `notify-send` when that
+binary exists, which in practice means Linux — Windows ships nothing by that name, so the watch prints
+one explanation per run rather than going quiet, and the bell, the printed line and the recorded event
+are unchanged. A missing, hanging or failing notify-send never kills an overnight watch. The history
+lives in the state directory (`$XDG_STATE_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\state` on
+Windows) and survives restarts — read it with
 [events](#events--recorded-watch-history). There is no mail/push/webhook delivery.
 
 `skills --watch` polls the order books too — the run you already leave open overnight is the one that
@@ -564,7 +688,8 @@ eve-skills update-data --build 3494416   # example: pin a known specific build
 
 Downloads the official JSONL SDE zip from `developers.eveonline.com`, extracts clone grades,
 bloodline races and the full skill catalog (name, rank, attributes and prerequisites for every
-catalogued skill), and atomically replaces three files under `$XDG_DATA_HOME/eve-skills`. That
+catalogued skill), and atomically replaces three files in the data directory
+(`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That
 user copy takes precedence over the snapshot shipped in the package, so you can refresh caps and
 the catalog without touching the checkout. `plan` is built on this catalog — without one it
 refuses with `no local skill catalog - run: eve-skills update-data`. The whole download runs
@@ -583,11 +708,12 @@ eve-skills doctor --timeout 5     # per-request timeout for the probes (default 
 
 Read-only by construction: `doctor` never writes — no token refresh, no endpoint caching, no
 migration, no directory creation — so it reports on your install exactly as the next real command
-will find it. Offline checks cover the package and Python version, XDG path permissions (including
-the state directory the watchers use), config and token-store readability, per-character login state
-(token time left, auto-refresh, granted consent — `orders` and `corp-orders` included), SDE document
-freshness and where each document resolves from, the registered callback URLs, SP-history age, and
-what the watchers have accumulated:
+will find it. Offline checks cover the package, the Python version and the OS the report was produced
+on (`versions.platform` — a pasted report may be read on a different machine than wrote it), the four
+data directories and their permissions (including the state directory the watchers use), config and
+token-store readability, per-character login state (token time left, auto-refresh, granted consent —
+`orders` and `corp-orders` included), SDE document freshness and where each document resolves from,
+the registered callback URLs, SP-history age, and what the watchers have accumulated:
 
 - `watch.state` — watched characters, order owners (split into characters and corporations), known
   open orders, and how long ago any of them was last polled. A state that only holds training data is
@@ -596,6 +722,13 @@ what the watchers have accumulated:
   is lost is the baseline, so the next watch could re-announce whatever was in flight.
 - `watch.events` — how many events are recorded, split between training and order kinds, per-kind
   counts, unreadable lines, and the age of the newest one.
+
+Checks that can only be answered from mode bits — `path.config`, `path.cache`, `path.data`,
+`path.state`, `config.file`, `permissions.tokens` — report `skip` on Windows with the reason (privacy
+comes from the ACL inherited from the user profile, and every Windows `stat()` claims mode 666), not a
+phantom warning with an unrunnable fix. Skips are counted in the summary line as `N skipped`, never as
+problems, and they never change the exit code; on POSIX the same checks stay `ok`/`warn` exactly as
+before. See [Platform support](#platform-support).
 
 `--network` adds strictly opt-in, unauthenticated, bounded probes of the public SSO discovery document
 and three public ESI documents — `/status`, `/meta/compatibility-dates`, and one real market order book
@@ -613,13 +746,18 @@ What the report contains is deliberate. Credentials never appear: character diag
 field whitelist, and every string in the report — text or JSON — passes a redactor seeded with the
 credential values found on disk, so an access token, refresh token or client secret cannot escape
 even inside an exception message (it prints as `[redacted]`). Paths are shown relative to your home
-directory — `~/.config/eve-skills/tokens.json`, not `/home/you/.config/eve-skills/tokens.json` —
-because the expanded form would carry your OS username into whatever you paste the report into; a
+directory — `~/.config/eve-skills/tokens.json`, not `/home/you/.config/eve-skills/tokens.json`, and on
+Windows `~\AppData\Roaming\eve-skills\tokens.json` rather than a profile path carrying your username —
+because the expanded form would leak that username into whatever you paste the report into; a
 location you configured explicitly outside your home is printed exactly as it is, since naming it is
-what the check is for. A path inside a hint — advice meant to be pasted into a shell — is quoted so
-it runs as printed (`chmod 755 "$HOME/.local/state/eve-skills"`), because a tilde inside single
-quotes is literal and no directory of that name exists. What the report does keep is what the
-diagnostics are about: character names and ids, versions, file modes, counts, URLs and statuses.
+what the check is for. A path inside a hint — advice meant to be pasted into a shell — is quoted in the
+form that running platform's own shell expands, so the line runs as printed: POSIX gets
+`chmod 755 "$HOME/.local/state/eve-skills"` (a tilde inside single quotes is literal, and no directory
+of that name exists), Windows gets the profile variable in its place —
+`"%USERPROFILE%\AppData\Local\eve-skills\state"` for that same directory, and
+`move "<path>" "<path>.bak"` to set a damaged file aside — since cmd knows neither `~` nor `$HOME`.
+What the report does keep is what the diagnostics are about: character names and ids, versions, file
+modes where they mean something, counts, URLs and statuses.
 
 Exit code is 1 only when something blocks the tool (unreadable/corrupt token store, an expired
 login that cannot refresh, a service unreachable with no cached fallback); everything worth
@@ -643,27 +781,48 @@ knowing but survivable is a warning, and warnings exit 0.
 
 ## Where data lives, and how it is protected
 
-| Path (default) | Contents | Sensitivity |
-|---|---|---|
-| `$XDG_CONFIG_HOME/eve-skills/tokens.json` | Access + refresh tokens per character, granted scopes, client id/secret | **Secret** — written `0600`, atomic replace, read-modify-write under `tokens.lock` so a running `--watch` and a manual command cannot corrupt each other's write |
-| `$XDG_CONFIG_HOME/eve-skills/config.json` | Client id/secret, optional `user_agent` | **Secret** when it holds a secret — written private, updated under `config.lock` |
-| `$XDG_CONFIG_HOME/eve-skills/sp-history.jsonl` | `{ts, char_id, total_sp}` rows, last 60 days | Non-secret, local-only SP history; pruned rewrites hold `sp-history.lock` |
-| `$XDG_STATE_HOME/eve-skills/watch-state.json` | Last queue observations per character, **plus the order owners being watched** under `owners` — one entry per `char:<id>` / `corp:<id>` with its open, pending and already-settled order ids (30-day retention). Both halves are what make watch alerts fire exactly once | Non-secret; deleting it only re-announces whatever was in flight |
-| `$XDG_STATE_HOME/eve-skills/events.jsonl` | Watch alert history shown by `events` — training and order kinds alike, 365-day retention | Non-secret |
-| `$XDG_CACHE_HOME/eve-skills/endpoints.json` | SSO discovery document, cached 24 h | Non-secret |
-| `$XDG_CACHE_HOME/eve-skills/names.json` | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
-| `$XDG_DATA_HOME/eve-skills/{clone_grades,bloodline_races,skill_catalog}.json` | SDE snapshot from `update-data`; overrides packaged data | Non-secret |
-| Lock files: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `watch-state.lock` (state), `update.lock` (data) | Advisory `flock` files only | inert |
+### The four roots
 
-Defaults are `~/.config`, `~/.local/state`, `~/.cache`, `~/.local/share` when the corresponding
-`XDG_*` variables are unset. Every durable write goes through one helper: a **unique temporary**
-file in the destination directory (`O_EXCL`; `0600` up front for secret payloads) followed by an
-atomic rename — a crash leaves either the old file or the new one, never a truncated mix, and two
-writers can never stomp on each other's temporary. Files updated by read-modify-write (token
-store, config, SP history, name cache, watch state) hold their advisory `flock` across the whole
-read+write, and the kernel releases it if the holder dies. Readers resolve paths with
-`create=False`, so inspecting state never lays out a directory. An older single-character
-`tokens.json` layout is migrated automatically on first load.
+One module — `eve_skills/paths.py` — decides where anything goes, and nothing else re-derives it. A
+set and non-empty `$XDG_CONFIG_HOME` / `$XDG_CACHE_HOME` / `$XDG_DATA_HOME` / `$XDG_STATE_HOME` wins
+on **every** platform, Windows included (an empty value counts as unset, and a pin is taken exactly as
+given). With none set:
+
+| Kind | POSIX default | Windows default | Why there |
+|---|---|---|---|
+| config | `~/.config/eve-skills` | `%APPDATA%\eve-skills` | Roaming **on purpose**: on a roaming profile the credentials and settings follow the user between machines |
+| cache | `~/.cache/eve-skills` | `%LOCALAPPDATA%\eve-skills\cache` | Regenerable — a roaming cache buys nothing but profile size |
+| data | `~/.local/share/eve-skills` | `%LOCALAPPDATA%\eve-skills\data` | The SDE copy can be re-downloaded by `update-data`, so it must not roam |
+| state | `~/.local/state/eve-skills` | `%LOCALAPPDATA%\eve-skills\state` | A watch state is machine-local by definition — the watchers, their baselines, their recorded alerts |
+
+A missing `%APPDATA%` / `%LOCALAPPDATA%` falls back to the documented `AppData\Roaming` /
+`AppData\Local` under the user profile; only if even the profile cannot be located does a resolver
+return the POSIX-shaped path, because naming the wrong tree beats naming nothing.
+
+### The files
+
+| File | Root | Contents | Sensitivity |
+|---|---|---|---|
+| `tokens.json` | config | Access + refresh tokens per character, granted scopes, client id/secret | **Secret — live credentials on both platforms.** Written `0600` where mode bits exist and private by inherited profile ACL on Windows; atomic replace, read-modify-write under `tokens.lock` so a running `--watch` and a manual command cannot corrupt each other's write |
+| `config.json` | config | Client id/secret, optional `user_agent` | **Secret** when it holds a secret — written private, updated under `config.lock` |
+| `sp-history.jsonl` | config | `{ts, char_id, total_sp}` rows, last 60 days | Non-secret, local-only SP history; pruned rewrites hold `sp-history.lock` |
+| `watch-state.json` | state | Last queue observations per character, **plus the order owners being watched** under `owners` — one entry per `char:<id>` / `corp:<id>` with its open, pending and already-settled order ids (30-day retention). Both halves are what make watch alerts fire exactly once | Non-secret; deleting it only re-announces whatever was in flight |
+| `events.jsonl` | state | Watch alert history shown by `events` — training and order kinds alike, 365-day retention | Non-secret; append-only JSONL, always written in binary mode so no platform can rewrite its newlines |
+| `endpoints.json` | cache | SSO discovery document, cached 24 h | Non-secret |
+| `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
+| `{clone_grades,bloodline_races,skill_catalog}.json` | data | SDE snapshot from `update-data`; overrides packaged data | Non-secret |
+| Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
+
+Every durable write goes through one helper: a **unique temporary** file in the destination directory
+(`O_EXCL`, opened binary wherever that flag exists so a JSONL file cannot quietly gain CRLF; `0600` up
+front for secret payloads) followed by an atomic rename — a crash leaves either the old file or the
+new one, never a truncated mix, and two writers can never stomp on each other's temporary. Windows
+renames atomically too, but refuses while another process still has the destination open, so the
+rename is retried through that window (8 attempts across roughly 1.05 s) rather than losing the write.
+Files updated by read-modify-write (token store, config, SP history, name cache, watch state) hold
+their advisory lock across the whole read+write, and the OS releases it if the holder dies. Readers
+resolve paths with `create=False`, so inspecting state never lays out a directory. An older
+single-character `tokens.json` layout is migrated automatically on first load.
 
 Security posture worth knowing:
 
@@ -676,8 +835,10 @@ Security posture worth knowing:
   server's `Expires`/`Cache-Control` headers plus ETag revalidation. Nothing sensitive is written to
   disk from ESI apart from public id→name mappings.
 - The tool requests read-only scopes; there is no write endpoint in the codebase.
-- Backup/erase: the whole footprint is those four XDG directories (config, state, cache, data).
-  `eve-skills logout` removes tokens locally (all of them, or one with `--char`).
+- Backup/erase: the whole footprint is those four directories — config, state, cache, data — wherever
+  your platform puts them (on Windows that is one roaming location plus three machine-local ones, so a
+  wipe has to visit both roots). `eve-skills logout` removes tokens locally (all of them, or one with
+  `--char`).
 
 Network politeness built in: pinned `X-Compatibility-Date` (`2026-08-18`), a configurable User-Agent,
 retries with backoff on 420/429/502/503 honouring `Retry-After`, and automatic pause when ESI's
@@ -687,12 +848,14 @@ retries with backoff on 420/429/502/503 honouring `Retry-After`, and automatic p
 
 ## Testing and verification status
 
-The permanent automated suite runs in 359 tests, all passing, and is deterministic: no network,
-no real credentials — every test works in a throwaway `$XDG_*` tree against fakes or fixtures.
+The permanent automated suite runs in 397 tests, all passing, and is deterministic: no network, no
+real credentials — every test works in a throwaway `$XDG_*` tree against fakes or fixtures, and those
+pins are what let the Windows branches run on a Linux host, since they win on every platform.
 
 ```bash
-cd eve-skills                                         # your checkout
-.venv/bin/python -m unittest discover -s tests -t .   # 359 tests, currently passing
+cd eve-skills                                          # your checkout
+uv run python -m unittest discover -s tests -t . -q    # 397 tests, with no install step at all
+.venv/bin/python -m unittest discover -s tests -t .    # the same suite, without uv
 ```
 
 - `tests/test_eve_skills.py` — pure-logic units: clone-state tiers, queue labels (including
@@ -704,6 +867,19 @@ cd eve-skills                                         # your checkout
   ETag revalidation;
 - `tests/test_persistence.py` — durable-write and token-lifecycle invariants: atomicity, `0600`
   permissions, lock exclusion — including real concurrent subprocesses racing the same files;
+- `tests/test_paths.py` — the layout contract on both branches: `%APPDATA%` / `%LOCALAPPDATA%` placing
+  each kind, a missing profile variable falling back to the documented `AppData\Roaming` / `Local`
+  folder, POSIX defaults unchanged, `$XDG_*` pins winning on either platform and an empty one counting
+  as unset, `create=False` never touching disk on either branch, and every artefact landing in the kind
+  its resolver names — which is also the check that no second resolver survived anywhere;
+- `tests/test_storage_platform.py` — the Windows half of persistence against an injected backend: a
+  host without `fcntl` selects `msvcrt`, a host offering both prefers `flock`, a host with neither fails
+  loudly instead of running unlocked; byte-range contention retried until granted with 20 ms backing off
+  to 250 ms, re-entrancy without taking a second OS lock, every call aimed at one byte at offset zero,
+  and an unusable descriptor not retried forever; temporaries opened in binary wherever the flag exists,
+  so what is written is byte-for-byte what comes back; a rename blocked by a sharing violation that
+  clears being retried, one that never clearing re-raising with no temporary left behind, and an
+  unrelated failure never retried at all;
 - `tests/test_cli_integration.py` + `tests/fake_esi.py` — the real command handlers end-to-end
   against a deterministic fake ESI: multi-character token isolation, current live response
   shapes, JSON/CSV output contracts, graceful per-character degradation on fetch failure or
@@ -722,12 +898,18 @@ cd eve-skills                                         # your checkout
   against synthetic catalogs, plus one check of the bundled SDE snapshot itself;
 - `tests/test_watch_events.py` — the watch transition model for both halves (training and orders:
   silent first-sight backfill, once-ever settlement, the two-day wait before an unexplained closure,
-  history-fetch failure freezing conclusions), durable exactly-once event history, and the `events`
-  command including `--kind`, `--char` and `--owner`;
+  history-fetch failure freezing conclusions), durable exactly-once event history, the `events` command
+  including `--kind`, `--char` and `--owner`, and the two console branches: a Windows console that
+  refuses virtual-terminal processing gets the plain rule line while one that accepts it still clears,
+  and `--notify` with no `notify-send` to run explains itself exactly once per process while the bells
+  keep firing;
 - `tests/test_doctor.py` — what doctor reports, its never-writes promise (the state directory included),
   the watch coverage checks, how each network failure class is classified, that nothing secret leaks
   into text or JSON, that no path is printed with the home directory expanded, and that a hint's
-  command pasted into a shell runs as printed;
+  command pasted into a shell runs as printed — plus the same report with the platform forced to
+  Windows: the six mode-dependent checks skip and name the inherited ACL instead of warning, skips never
+  block while a corrupt token store still fails with a `move` command cmd can actually run, no hint
+  contains `chmod` or `$HOME`, and the report says which OS produced it;
 - `tests/test_packaging.py` — metadata, license text, wheel/sdist contents, and a clean install
   of the built artifacts into a throwaway venv.
 
@@ -738,6 +920,21 @@ announcement has been observed on this machine** — neither stored character ho
 consent, so a real fill has never passed through the watch here. That path (fetch → observe → record →
 announce, personal and corporation) is proven by `tests/test_watch_events.py` against the fake ESI,
 not by observation, and the README says so rather than implying otherwise.
+
+And no **Windows machine was involved at all**. Nothing here has run on Windows: the `msvcrt` lock
+backend, profile-folder path resolution, doctor's skips and cmd-shaped hints, the virtual-terminal
+fallback and the notify explanation are exercised by forcing the platform — an injected fake `msvcrt`,
+an injected platform judgement — from a Linux host. That is real coverage of what those branches *do*
+(which syscall sequence, which path, which verdict, which string), and it is not evidence that Windows
+itself behaves as documented: whether `%LOCALAPPDATA%` really resolves where Microsoft says, how a
+roaming profile moves these files between machines, what ConHost accepts, and what an antivirus holding
+the token store open actually does to a rename remain untested until someone runs them there. Proven
+here with uv 0.12.6 on Linux: `uv venv`, `uv pip install -e .`, `uv run eve-skills --version`,
+`uv run python -m unittest discover -s tests -t . -q`, and `uv tool install .` / `uv tool list` /
+`uv tool uninstall eve-skills`. Not run from this tree, only read out of `uv --help`: the
+`git+https://…` tool install and `uv tool update-shell`; the other `uv run …` lines are the proven
+mechanism with different arguments. Every PowerShell line here was typed for a shell nobody on this
+machine has.
 
 Live read-only smoke evidence from this session (manual, not part of the suite): a 27-variant command
 matrix including prerequisite-expanding `plan`, the compact watch dashboard, `events`, `doctor` and
@@ -791,6 +988,7 @@ scope instead.
 | No third-party price source | Fuzzwork, EVERef and similar aggregators are deliberately not consulted — they are other people's copies of the same public books, with their own staleness, availability and terms, and no way for this tool to be told one is wrong. |
 | Vault-traded items have no book | PLEX (id 44992) trades on the account-wide vault market, which belongs to no region's order book: `GET /markets/{region}/orders?type_id=44992` answered `[]` for all 70 market regions when measured 2026-09-07, while `/markets/prices` carried the type the same minute (`average_price` 4,574,918.36, `adjusted_price` 0.0). ESI publishes no global order-book endpoint, so there is nothing wider to ask; `market` says so for that id and shows the published reference rather than leaving a row of dashes to be read as a broken tool. No other type id has been measured across the cluster, so no other empty book is given that explanation — it gets the wider scope that is still unasked instead. |
 | ESI/SSO availability | Discovery (cached 24 h), token exchange, ESI routes and the SDE download are all remote services; failures surface as `error: network error ...` or `error: HTTP <code> ...`. |
+| Desktop notifications are Linux-only in practice | `--notify` shells out to `notify-send`, which no stock Windows installation ships; there the watch says so once per run and relies on the terminal bell. Alerts are printed and recorded on both platforms, so nothing is lost but the ping. |
 
 ---
 
@@ -809,12 +1007,14 @@ eve_skills/
   planner.py     rank-based SP costs, prerequisite expansion, rate calibration, extractor math
   snapshots.py   local SP history (60-day JSONL)
   watchstate.py  watch observations, exactly-once transitions, durable event history
-  storage.py     unique-temp atomic writes + advisory file locks shared by all durable writers
+  storage.py     unique-temp atomic writes + advisory file locks (flock on POSIX, byte-range on Windows)
+  paths.py       the only resolver of the config / cache / data / state directories, on either platform
   exports.py     standings / jobs / inventory / travel / implants views + consent hints
   render.py      timestamps, SP/duration formatting, plain-text tables
   data/          packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog)
-tests/           unittest suite: pure units, ESI transport, persistence concurrency, fake-ESI
-                 command integration, planner catalog, market, orders, watch/events, doctor, packaging
+tests/           unittest suite: pure units, ESI transport, persistence concurrency + the injected
+                 Windows lock backend, path layout on both branches, fake-ESI command integration,
+                 planner catalog, market, orders, watch/events, doctor (POSIX + forced Windows), packaging
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 
@@ -824,4 +1024,6 @@ function, so both paths must stay equivalent. New commands belong in `cli.py` (c
 (consent-gated views), take `--char` with the shared semantics, and degrade per character rather than
 aborting a multi-character run. Optional consent always goes through `sso.OPTIONAL_SCOPES` +
 `exports.targets()` so a missing grant stays a hint. Keep parser help text, this README and the scope
-table in sync when adding a feature name.
+table in sync when adding a feature name. A new OS difference belongs in `paths.py` (where a directory
+lives) or `storage.py` (how a file is locked and replaced), chosen by capability — module availability,
+not a version guess — so command handlers never learn the platform at all.

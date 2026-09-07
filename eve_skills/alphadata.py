@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import storage
+from . import paths, storage
 
 PACKAGE_DATA_DIR = Path(__file__).resolve().parent / "data"
 SDE_BASE = "https://developers.eveonline.com/static-data/tranquility"
@@ -40,22 +40,13 @@ ATTR_RANK = 275           # skillTimeConstant == the training time multiplier ("
 PREREQUISITE_ATTRS = ((182, 277), (183, 278), (184, 279))
 
 
-def user_data_dir(create: bool = True) -> Path:
-    """$XDG_DATA_HOME/eve-skills; create=False resolves the path without touching disk."""
-    root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    path = Path(root) / "eve-skills"
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _read(name: str) -> dict:
-    for base in (user_data_dir(), PACKAGE_DATA_DIR):
+    for base in (Path(paths.data_dir()), PACKAGE_DATA_DIR):
         candidate = base / name
         if candidate.is_file():
             with open(candidate) as fh:
                 return json.load(fh)
-    raise FileNotFoundError(f"{name} not found in {user_data_dir()} or {PACKAGE_DATA_DIR}")
+    raise FileNotFoundError(f"{name} not found in {paths.data_dir()} or {PACKAGE_DATA_DIR}")
 
 
 def load() -> dict:
@@ -199,7 +190,7 @@ def update(build: int | None = None) -> dict:
     ~100 MB and interleave, leaving the three files describing different builds (and
     fighting over one fixed `.tmp` name). Each file is replaced atomically, so a reader
     never sees a half-written snapshot; the set as a whole switches build file by file."""
-    dest = user_data_dir()
+    dest = Path(paths.data_dir())
     with storage.file_lock(str(dest / "update.lock")):
         build = build or latest_build()
         src = f"eve-online-static-data-{build}-jsonl.zip"

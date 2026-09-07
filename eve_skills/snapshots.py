@@ -9,12 +9,12 @@ import json
 import os
 import time
 
-from . import sso, storage
+from . import paths, storage
 
 
 def history_file(create: bool = True) -> str:
     """The SP-history JSONL; create=False resolves the path without touching disk."""
-    return os.path.join(sso.config_dir(create=create), "sp-history.jsonl")
+    return os.path.join(paths.config_dir(create=create), "sp-history.jsonl")
 
 
 RETENTION_DAYS = 60  # generous over the 7-day consumers; keeps watch-mode history from growing forever
@@ -36,7 +36,7 @@ def record(character_id: int, total_sp: int):
     path = history_file()
     row = json.dumps({"ts": round(time.time()), "char_id": int(character_id), "total_sp": int(total_sp)}) + "\n"
     cutoff = time.time() - RETENTION_DAYS * 86400
-    with storage.file_lock(os.path.join(sso.config_dir(), "sp-history.lock")):
+    with storage.file_lock(os.path.join(paths.config_dir(), "sp-history.lock")):
         try:
             with open(path) as fh:
                 kept = [ln for ln in fh if _recent(ln, cutoff)]

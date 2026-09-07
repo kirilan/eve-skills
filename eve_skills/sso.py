@@ -1,6 +1,7 @@
 """EVE SSO: OAuth2 authorization-code flow with PKCE (native app) plus token storage.
 
-Tokens and config live under $XDG_CONFIG_HOME/eve-skills (default ~/.config/eve-skills).
+Tokens and config live in ``paths.config_dir()`` - ``$XDG_CONFIG_HOME/eve-skills``
+(default ``~/.config/eve-skills``) on POSIX, ``%APPDATA%\\eve-skills`` on Windows.
 Register your application at https://developers.eveonline.com/applications with
 redirect URL http://localhost:8635/callback and the scopes below.
 """
@@ -19,7 +20,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
-from . import storage
+from . import paths, storage
 
 WELL_KNOWN = "https://login.eveonline.com/.well-known/oauth-authorization-server"
 SCOPES = [
@@ -63,24 +64,6 @@ REDIRECT_PORTS = (8635, 8636, 8637)
 REFRESH_LEEWAY = 60  # a token this close to expiry is refreshed before it is used
 
 
-def config_dir(create: bool = True) -> str:
-    """$XDG_CONFIG_HOME/eve-skills; create=False resolves the path without touching disk."""
-    root = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    path = os.path.join(root, "eve-skills")
-    if create:
-        os.makedirs(path, exist_ok=True)
-    return path
-
-
-def cache_dir(create: bool = True) -> str:
-    """$XDG_CACHE_HOME/eve-skills; create=False resolves the path without touching disk."""
-    root = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    path = os.path.join(root, "eve-skills")
-    if create:
-        os.makedirs(path, exist_ok=True)
-    return path
-
-
 def _load_json(path: str):
     try:
         with open(path) as fh:
@@ -91,17 +74,17 @@ def _load_json(path: str):
 
 def config_file(create: bool = True) -> str:
     """config.json (client id/secret, user agent); readers pass create=False."""
-    return os.path.join(config_dir(create=create), "config.json")
+    return os.path.join(paths.config_dir(create=create), "config.json")
 
 
 def token_store_file(create: bool = True) -> str:
     """tokens.json (the multi-character token store); readers pass create=False."""
-    return os.path.join(config_dir(create=create), "tokens.json")
+    return os.path.join(paths.config_dir(create=create), "tokens.json")
 
 
 def endpoints_cache_file(create: bool = True) -> str:
     """Cached SSO discovery document written by _discover(); readers pass create=False."""
-    return os.path.join(cache_dir(create=create), "endpoints.json")
+    return os.path.join(paths.cache_dir(create=create), "endpoints.json")
 
 
 def load_config() -> dict:
@@ -151,13 +134,13 @@ def save_config(cfg: dict):
     """Save config.json under its own lock, merged over whatever another process saved
     meanwhile. Every writer here sets specific keys (client id/secret, user_agent); none
     intends to erase the other's, so a concurrent login must not lose unrelated settings."""
-    with storage.file_lock(os.path.join(config_dir(), "config.lock")):
+    with storage.file_lock(os.path.join(paths.config_dir(), "config.lock")):
         storage.atomic_write_json(config_file(), {**_load_json(config_file()), **cfg}, private=True)
 
 
 def _store_lock():
     """Lock serialising every tokens.json read-modify-write (watch + manual commands race)."""
-    return storage.file_lock(os.path.join(config_dir(), "tokens.lock"))
+    return storage.file_lock(os.path.join(paths.config_dir(), "tokens.lock"))
 
 
 def load_store() -> dict:

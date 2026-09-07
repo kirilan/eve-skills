@@ -4,7 +4,7 @@ Three promises shape everything here:
 
 * **Nothing is written.** Files are read through the ``peek_*`` accessors and the
   ``create=False`` path resolvers, so doctor never migrates the token store, caches SSO
-  endpoints, refreshes a token, updates the SDE or creates an XDG directory. It reports on
+  endpoints, refreshes a token, updates the SDE or creates a state directory. It reports on
   an install exactly as the next real command will find it.
 * **Nothing secret is printed.** Character diagnostics are built from a field whitelist, and
   every string in the report passes a :class:`Redactor` seeded with the credential values
@@ -44,7 +44,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import (__version__, alphadata, esi as esi_mod, market, render, snapshots, sso,
+from . import (__version__, alphadata, esi as esi_mod, market, paths, render, snapshots, sso,
                watchstate)
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
@@ -162,10 +162,21 @@ def _shell_path(path: str | None) -> str | None:
     The readable form begins with `~/`, and no POSIX shell expands a tilde inside single quotes -
     `chmod 755 '~/.local/state'` goes looking for a directory literally named `~`. Double quotes do
     expand `$HOME` and still tolerate spaces, so the home-relative form is quoted as
-    `"$HOME/<rest>"`; a path outside home needs no expansion at all and keeps single quotes."""
+    `"$HOME/<rest>"`; a path outside home needs no expansion at all and keeps single quotes.
+
+    On Windows neither tilde nor `$HOME` means anything to cmd - `%USERPROFILE%` does - so the same
+    two forms become `"%USERPROFILE%"` and `"%USERPROFILE\\<rest>"`, double-quoted for spaces; a path
+    outside the profile keeps its absolute form in double quotes, since Windows has no single-quote
+    quoting at all."""
     shown = _display_path(path)
     if not isinstance(shown, str) or not shown:
         return shown
+    if paths.is_windows():
+        if shown == "~":
+            return '"%USERPROFILE%"'
+        if shown.startswith("~") and shown[1:2] in (os.sep, os.altsep):
+            return '"%USERPROFILE%' + shown[1:] + '"'
+        return f'"{shown}"'
     if shown == "~":
         return '"$HOME"'
     if shown.startswith("~") and shown[1:2] in (os.sep, os.altsep):
@@ -264,13 +275,19 @@ def _duration(seconds: float) -> str:
     return render.format_duration(seconds)
 
 
+def _os_label() -> str:
+    """Which OS produced this report - the reader of a pasted report may not be its author,
+    and half these checks (paths, ACLs, shells) mean different things on different ones."""
+    return f"{platform.system()} {platform.release()} ({platform.machine()})"
+
+
 # ---------------------------------------------------------------------------
 # offline checks
 # ---------------------------------------------------------------------------
 
 def _check_package() -> list[dict]:
     python = platform.python_version()
-    fields = {"package_version": __version__, "python_version": python,
+    fields = {"package_version": __version__, "python_version": python, "platform": _os_label(),
               "executable": _display_path(sys.executable) or "(unknown)",
               "module_dir": _display_path(os.path.dirname(os.path.abspath(__file__)))}
     if sys.version_info < (3, 11):
@@ -280,13 +297,13 @@ def _check_package() -> list[dict]:
 
 
 PATH_TARGETS = (
-    ("path.config", "config directory", lambda: sso.config_dir(create=False),
+    ("path.config", "config directory", lambda: paths.config_dir(create=False),
      "client configuration, token store and SP history", FAIL),
-    ("path.cache", "cache directory", lambda: sso.cache_dir(create=False),
+    ("path.cache", "cache directory", lambda: paths.cache_dir(create=False),
      "cached SSO endpoints and id-to-name lookups", WARN),
-    ("path.data", "data directory", lambda: str(alphadata.user_data_dir(create=False)),
+    ("path.data", "data directory", lambda: paths.data_dir(create=False),
      "downloaded SDE alpha-cap data", WARN),
-    ("path.state", "state directory", lambda: watchstate.state_dir(create=False),
+    ("path.state", "state directory", lambda: paths.state_dir(create=False),
      "watch state and recorded events (machine-local, not secret)", WARN),
 )
 
@@ -302,12 +319,22 @@ def _check_paths() -> list[dict]:
         if not state["exists"]:
             checks.append(_check(name, OK, f"{label} does not exist yet - it is created on the first write", **fields))
         elif state.get("error") or not state["readable"]:
-            checks.append(_check(name, FAIL, f"{label} {shown} cannot be read",
-                                 hint=f"restore read access: chmod u+rX {shell}", **fields))
+            hint = (f"grant yourself Read & execute on {shell} through its Windows Security properties"
+                    if paths.is_windows() else f"restore read access: chmod u+rX {shell}")
+            checks.append(_check(name, FAIL, f"{label} {shown} cannot be read", hint=hint, **fields))
         elif not state["writable"]:
+            advice = ("grant yourself Modify on {shell}" if paths.is_windows()
+                      else "restore write access: chmod u+w {shell}")
             checks.append(_check(name, unwritable, f"{label} {shown} is not writable by this user",
-                                 hint=f"restore write access: chmod u+w {shell} "
-                                      "(login, token refresh and history need to write here)", **fields))
+                                 hint=advice.format(shell=shell) +
+                                      " (login, token refresh and history need to write here)", **fields))
+        elif paths.is_windows():
+            # No group/other bit exists to judge: a file created here inherits the ACL of the
+            # user profile, which is precisely what keeps it private. Every Windows stat() reports
+            # mode 666; warning about it would be a phantom problem with an unrunnable fix.
+            checks.append(_check(name, SKIP,
+                                 f"{label} {shown} exists; privacy comes from the ACL inherited from the "
+                                 "Windows user profile, and mode bits carry no meaning here", **fields))
         elif state["mode"] and int(state["mode"], 8) & 0o022:
             checks.append(_check(name, WARN, f"{label} {shown} can be written by group/other (mode {state['mode']})",
                                  hint=f"chmod 755 {shell}, or 700 to hide its contents as well", **fields))
@@ -340,6 +367,15 @@ def _check_config(cfg: dict, records: list[dict]) -> list[dict]:
 
     if cfg["problem"] == "missing":
         checks.append(_check("config.file", OK, "no config.json yet - defaults and environment variables apply", **fields))
+    elif paths.is_windows():
+        # Nothing here is judgable from mode bits, and a secret-bearing file must not be told to
+        # `chmod 600` a platform that has no such bit: it inherits the user profile's ACL instead.
+        if cfg["client_secret"]:
+            checks.append(_check("config.file", SKIP,
+                                 "config.json holds a client secret; on Windows its privacy comes from the "
+                                 "ACL inherited from the user profile, and mode bits carry no meaning here", **fields))
+        else:
+            checks.append(_check("config.file", OK, "config.json is readable and holds no client secret", **fields))
     elif cfg["client_secret"] and state["mode"] and int(state["mode"], 8) & 0o077:
         checks.append(_check("config.file", WARN,
                              f"config.json is readable beyond its owner (mode {state['mode']}) and stores a client secret",
@@ -360,16 +396,31 @@ def _check_config(cfg: dict, records: list[dict]) -> list[dict]:
 
 
 STORE_LOGIN_HINT = "run: eve-skills login"
-STORE_MOVE_HINT = 'move it aside and log in again: mv {file} {backup}, then run: eve-skills login'
+# The move is the running platform's own verb over its own shell quoting, filled in at use time.
+STORE_MOVE_HINT = 'move it aside and log in again: {move}, then run: eve-skills login'
 
 STORE_PROBLEMS = {
-    # problem -> (status, detail, hint template with {file}/{backup} placeholders)
+    # problem -> (status, detail, hint template; a {move} placeholder is resolved by _store_hint)
     "missing": (WARN, "no token store yet", STORE_LOGIN_HINT),
     "unreadable": (FAIL, "the token store exists but cannot be read", STORE_MOVE_HINT),
     "corrupt": (FAIL, "the token store is not valid JSON", STORE_MOVE_HINT),
     "legacy": (WARN, "old single-character token file - the next eve-skills command migrates it in place, tightening it to 0600", None),
     "legacy-unusable": (FAIL, "legacy token file has no character_id, so it cannot be migrated", STORE_LOGIN_HINT),
 }
+
+
+def _move_command(path: str) -> str:
+    """`mv src src.bak` - or `move "src" "src.bak"` on Windows, where cmd knows neither mv nor
+    the POSIX quoting :func:`_shell_path` would otherwise apply."""
+    verb = "move" if paths.is_windows() else "mv"
+    return f"{verb} {_shell_path(path)} {_shell_path(f'{path}.bak')}"
+
+
+def _store_hint(problem: str, file: str) -> str | None:
+    hint = STORE_PROBLEMS[problem][2]
+    if hint is None:
+        return None
+    return hint.format(move=_move_command(file)) if "{move}" in hint else hint
 
 
 def _check_store(store: dict) -> list[dict]:
@@ -381,15 +432,17 @@ def _check_store(store: dict) -> list[dict]:
                   else "the token store holds no characters")
         checks = [_check("tokens.store", OK, detail, **fields)]
     else:
-        status, detail, hint = STORE_PROBLEMS[problem]
+        status, detail, _template = STORE_PROBLEMS[problem]
         checks = [_check("tokens.store", status, detail,
-                         hint=(hint.format(file=_shell_path(store["file"]),
-                                           backup=_shell_path(f"{store['file']}.bak"))
-                               if hint else None), **fields)]
+                         hint=_store_hint(problem, store["file"]), **fields)]
     state = _file_state(store["file"])
     perm_fields = {"path": shown, "mode": state["mode"]}
     if not state["exists"]:
         checks.append(_check("permissions.tokens", OK, "no token file to check permissions on", **perm_fields))
+    elif paths.is_windows():
+        checks.append(_check("permissions.tokens", SKIP,
+                             "the token store's privacy comes from the ACL inherited from the Windows user "
+                             "profile; mode bits carry no meaning there", **perm_fields))
     elif state["mode"] and int(state["mode"], 8) & 0o077:
         checks.append(_check("permissions.tokens", WARN,
                              f"the token store is readable beyond its owner (mode {state['mode']})",
@@ -495,12 +548,13 @@ def _check_characters(store: dict, now: float) -> list[dict]:
 def _data_documents() -> list[dict]:
     """Where each SDE document actually resolves from, mirroring alphadata._read's order."""
     entries = []
-    user_dir = alphadata.user_data_dir(create=False)
+    user_dir = paths.data_dir(create=False)
     for name in alphadata.DATA_FILES:
         chosen, origin = None, None
-        for candidate, label in ((user_dir / name, "user data"), (alphadata.PACKAGE_DATA_DIR / name, "bundled package")):
-            if candidate.is_file():
-                chosen, origin = str(candidate), label
+        for candidate, label in ((os.path.join(user_dir, name), "user data"),
+                                 (str(alphadata.PACKAGE_DATA_DIR / name), "bundled package")):
+            if os.path.isfile(candidate):
+                chosen, origin = candidate, label
                 break
         entry = {"name": name, "present": chosen is not None, "origin": origin, "path": _display_path(chosen),
                  "build": None, "fetched": None, "problem": None}
@@ -642,8 +696,7 @@ def _check_watch_state(now: float) -> dict:
         # load_state() reads an unreadable file as an empty one, so nothing is blocked; what is lost
         # is the baseline, and with it every transition that happened since the last good poll.
         return _check("watch.state", WARN, f"the watch state file is {problem}",
-                      hint=f"move it aside and let the next watch rebuild it: "
-                           f"mv {_shell_path(path)} {_shell_path(f'{path}.bak')} "
+                      hint=f"move it aside and let the next watch rebuild it: {_move_command(path)} "
                            "(transitions since the last readable poll will not be announced)", **fields)
 
     characters, owners = _section(doc, "characters"), _section(doc, "owners")
@@ -975,6 +1028,7 @@ def collect(network: bool = False, timeout: float = NET_TIMEOUT, now: float | No
         "read_only": True,
         "network": bool(network),
         "versions": {"package": __version__, "python": platform.python_version(),
+                     "platform": _os_label(),
                      "executable": _display_path(sys.executable)},
         "checks": checks,
         "summary": summary,

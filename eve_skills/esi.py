@@ -50,9 +50,9 @@ def _read_name_cache(path: str) -> dict[int, str]:
 def resolve_names(client: "Esi", ids: set[int], cache_dir: str | None = None) -> dict[int, str]:
     """Resolve any universe ids (skills, stations, structures, systems, item types) to names.
     Cached on disk - these never change."""
-    from . import sso, storage
+    from . import paths, storage
 
-    path = os.path.join(cache_dir or sso.cache_dir(), "names.json")
+    path = os.path.join(cache_dir or paths.cache_dir(), "names.json")
     cache = _read_name_cache(path)
     missing = sorted(i for i in ids if i not in cache)
     resolved: dict[int, str] = {}

@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import shutil
 import socket
 import stat
@@ -1087,6 +1088,76 @@ class CliSurfaceTest(DoctorTestCase):
         # every probe honours --timeout, including the order book added later
         self.assertEqual([3.0] * len(transport.urls), [t for _, _, t in transport.calls])
         self.assertIn(doctor.esi_mod.BASE + doctor.MARKET_PROBE_PATH, transport.urls)
+
+
+class WindowsDoctorTest(DoctorTestCase):
+    """The same report with the platform inputs forced to Windows, on a Linux host.
+
+    No Windows machine is involved: the fixture's XDG pins stay (they win on every platform), and
+    ``paths.is_windows`` supplies the rest of the OS contract - mode bits that mean nothing, cmd
+    instead of sh, privacy from the user-profile ACL. What goes untested here goes untested until
+    a Windows user hits it, which is why the branch is driven by injection rather than skipped."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(doctor.paths, "is_windows", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def seed_everywhere(self) -> None:
+        self.seed_config(client_secret=CLIENT_SECRET, mode=0o644)   # as a fresh install inherits it
+        self.seed_store(make_record(ADA, "Ada Vane"), mode=0o644)
+        self.seed_sde()
+        for home in (self.cache_dir, self.state_dir):
+            os.makedirs(home, exist_ok=True)
+
+    def test_mode_dependent_checks_skip_and_explain_the_acl(self):
+        # Every one of these is a POSIX WARN with a chmod fix on the same loose seeds...
+        self.seed_everywhere()
+        report = self.report()
+        for name in ("path.config", "path.cache", "path.data", "path.state",
+                     "permissions.tokens", "config.file"):
+            check = self.check(report, name)
+            self.assertEqual("skip", check["status"], f"{name}: {check['detail']}")
+            self.assertIn("ACL", check["detail"], name)
+            self.assertIn("mode bits", check["detail"], name)
+            self.assertNotIn("hint", check, f"{name} must not hand out an unrunnable fix")
+        # ...and skipping them is not a problem: nothing here may block the tool.
+        self.assertEqual(0, report["exit_code"])
+        self.assertEqual(0, report["summary"]["fail"])
+        self.assertEqual(6, report["summary"]["skip"])   # exactly the mode-dependent checks
+        rendered = doctor.render_text(report)
+        self.assertNotIn("chmod", rendered)
+
+    def test_a_broken_store_still_fails_with_a_move_cmd_can_run(self):
+        path = self.seed_store(make_record(ADA, "Ada Vane"))
+        with open(path, "w") as fh:
+            fh.write('{"characters": {"1": ')                    # truncated: not valid JSON
+        state = self.seed_watch_state("this is not JSON either")
+        report = self.report()
+        self.assertEqual(1, report["exit_code"])                 # a real problem still blocks
+        self.assertIn(f'move "{path}" "{path}.bak"', self.check(report, "tokens.store")["hint"])
+        self.assertIn(f'move "{state}" "{state}.bak"', self.check(report, "watch.state")["hint"])
+        for check in report["checks"]:
+            hint = check.get("hint", "")
+            self.assertNotIn("chmod", hint)
+            self.assertNotIn("$HOME", hint)                      # cmd has no such variable
+            self.assertFalse(hint.startswith("mv "), f"{check['name']} suggests a POSIX verb")
+
+    def test_the_shell_form_names_what_cmd_expands(self):
+        with mock.patch.dict(os.environ, {"HOME": "/tmp/x/home"}):
+            self.assertEqual('"%USERPROFILE%"', doctor._shell_path("/tmp/x/home"))
+            self.assertEqual('"%USERPROFILE%/.config/eve-skills/tokens.json"',
+                             doctor._shell_path("/tmp/x/home/.config/eve-skills/tokens.json"))
+        # Outside the profile there is nothing to expand, and Windows has no single-quote quoting.
+        self.assertEqual('"/srv/eve config/tokens.json"', doctor._shell_path("/srv/eve config/tokens.json"))
+
+    def test_the_report_says_which_os_it_ran_on(self):
+        # A pasted report may be read on a different platform than it was written on.
+        self.seed_healthy()
+        report = self.report()
+        self.assertIn(platform.system(), report["versions"]["platform"])
+        self.assertEqual(report["versions"]["platform"], self.check(report, "package")["platform"])
 
 
 if __name__ == "__main__":

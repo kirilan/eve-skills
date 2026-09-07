@@ -15,7 +15,7 @@ from datetime import timedelta
 from dataclasses import dataclass, field
 
 
-from . import __version__, alphadata, classify, doctor as doctor_mod, esi as esi_mod, exports, market, orders, planner, render, snapshots, sso, watchstate
+from . import __version__, alphadata, classify, doctor as doctor_mod, esi as esi_mod, exports, market, orders, paths, planner, render, snapshots, sso, watchstate
 
 
 def gather(args, client: esi_mod.Esi | None = None) -> dict:
@@ -397,6 +397,11 @@ def notify_desktop(text: str) -> None:
         pass
 
 
+# Shipped by nothing on Windows; the watch says this once per run rather than going quiet.
+NOTIFY_ABSENT_NOTICE = "desktop notifications need notify-send; events are still printed and recorded"
+_notify_warned = False
+
+
 def render_watch_status(ctxs, failures, last_good: dict[int, dict]) -> str:
     """Compact multi-character status table. A character whose fetch failed keeps
     its last-known row, marked stale, with the error under the table - healthy
@@ -477,6 +482,44 @@ def warn_once(seen: set, key: str, text: str) -> list[str]:
     return [text]
 
 
+CLEAR_SCREEN = "\x1b[H\x1b[2J"   # home + clear: every POSIX terminal, and a Windows console
+                                  # only after virtual-terminal processing has been switched on
+_vt_processing: bool | None = None  # cached verdict of _enable_vt_processing(), one attempt per run
+
+
+def _enable_vt_processing() -> bool:
+    """Ask a Windows console to interpret ANSI escapes instead of printing them.
+
+    ConHost hands bytes to the screen buffer verbatim unless ENABLE_VIRTUAL_TERMINAL_PROCESSING is
+    set, and older builds never grew the mode at all - there `\\x1b[H` renders as garbage. On every
+    other OS ``ctypes.windll`` does not exist in the first place, and a redirected stdout has no
+    console mode to set; both are honest False answers, not errors."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32          # AttributeError off Windows
+        handle = kernel32.GetStdHandle(-11)         # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False                           # no console behind stdout (pipe, file)
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def watch_clear() -> str:
+    """The bytes a --watch frame starts with on a tty.
+
+    POSIX terminals - and Windows consoles that accepted virtual-terminal processing - get the real
+    clear, exactly as always. One that did not gets a rule line instead of escape-code litter; the
+    timestamped header under it still separates the frames."""
+    global _vt_processing
+    if not paths.is_windows():
+        return CLEAR_SCREEN
+    if _vt_processing is None:
+        _vt_processing = _enable_vt_processing()
+    return CLEAR_SCREEN if _vt_processing else "-" * 72 + "\n"
+
+
 def watch_loop(args, poll) -> int:
     """The shared --watch skeleton: poll, claim the transitions once, announce, render, sleep.
 
@@ -485,8 +528,14 @@ def watch_loop(args, poll) -> int:
     raises and only Ctrl-C ends it. Claiming is one locked commit over both documents, so a crash
     between appending events and writing state replays to the same ids instead of announcing twice.
     """
+    global _notify_warned
     interval = max(args.watch, 1) * 60
     notify = args.notify and shutil.which("notify-send")
+    if args.notify and not notify and not _notify_warned:
+        # Windows ships no notify-send; silence after a flag that promised a ping is worse than one
+        # honest line. The \a bells still fire, so this only explains the missing pop-up - once per run.
+        _notify_warned = True
+        print(f"warning: {NOTIFY_ABSENT_NOTICE}", file=sys.stderr)
     try:
         while True:
             cycle = poll()
@@ -499,7 +548,7 @@ def watch_loop(args, poll) -> int:
             events = (watchstate.commit(cycle.observations, cycle.order_observations)
                       if (cycle.observations or cycle.order_observations) else [])
             if sys.stdout.isatty():
-                print("\x1b[H\x1b[2J", end="")
+                print(watch_clear(), end="")
             print(f"eve-skills {cycle.title} - {time.strftime('%Y-%m-%d %H:%M:%S')} (every {args.watch}m, Ctrl-C to stop)")
             for ev in events:
                 if ev.data.get("backfill"):

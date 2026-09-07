@@ -8,6 +8,7 @@ notify-send is always mocked, never executed."""
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -18,6 +19,7 @@ import tempfile
 import textwrap
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest import mock
 
 from eve_skills import cli, orders, watchstate
@@ -631,15 +633,21 @@ class WatchCliTestCase(WatchLoopMixin, unittest.TestCase):
             self.run_watch(1, argv)                               # restart: still silent
             self.assertEqual(later, [])
 
-    def test_notify_absent_is_silent_but_bells_still_fire(self):
+    def test_notify_without_a_backend_explains_itself_once_but_bells_still_fire(self):
+        # Silence after --notify promised a ping is the failure this guards: absent notify-send,
+        # the loop says so once per process - not once per poll, never twice across restarts in
+        # one process - runs nothing, and keeps ringing the terminal's own \a bell everywhere.
         argv = ["skills", "--watch", "1", "--notify"]
         with mock.patch("shutil.which", return_value=None), \
+                mock.patch.object(cli, "_notify_warned", False), \
                 mock.patch("subprocess.run", side_effect=AssertionError("must not run")):
-            self.run_watch(1, argv)
+            _code, _out, first = self.run_watch(1, argv)
             self.complete_navigation()
-            code, out, _ = self.run_watch(1, argv)
+            code, out, second = self.run_watch(1, argv)
         self.assertEqual(code, 130)
         self.assertIn("\aAda Vane: Navigation to L2 - finished training", out)
+        self.assertEqual(1, (first + second).count("notify-send"))
+        self.assertIn("events are still printed and recorded", first + second)
 
     def test_notify_failure_never_kills_watch(self):
         argv = ["skills", "--watch", "1", "--notify"]
@@ -651,6 +659,63 @@ class WatchCliTestCase(WatchLoopMixin, unittest.TestCase):
         self.assertEqual(code, 130)
         self.assertIn("\aAda Vane: Navigation to L2 - finished training", out)
         self.assertNotIn("Traceback", err)
+
+
+class WatchClearTests(unittest.TestCase):
+    """What a --watch frame opens with on a terminal: real ANSI where it works, a rule line where
+    an old Windows console would print escape-code litter instead. The loop is driven directly with
+    an injected poll - empty cycles claim nothing, so no disk, ESI, clock or desktop is involved."""
+
+    def frames(self, cycles: int, tty: bool, *patches) -> str:
+        state = {"n": 0}
+
+        def poll():
+            state["n"] += 1
+            if state["n"] >= cycles:
+                raise KeyboardInterrupt()
+            return cli.WatchCycle(title="skills", body="Ada Vane: Navigation to L2")
+
+        class Out(io.StringIO):
+            def isatty(self):
+                return tty
+
+        out, err = Out(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(mock.patch("time.sleep"))
+            stack.enter_context(mock.patch("sys.stdout", out))
+            stack.enter_context(mock.patch("sys.stderr", err))
+            code = cli.watch_loop(SimpleNamespace(watch=1, notify=False), poll)
+        self.assertEqual(130, code)
+        return out.getvalue()
+
+    def test_posix_terminal_gets_the_real_clear(self):
+        text = self.frames(2, tty=True)
+        self.assertIn("\x1b[H\x1b[2J", text)
+        self.assertNotIn("-" * 72, text)
+
+    def test_a_redirected_frame_opens_with_nothing_decorative(self):
+        text = self.frames(2, tty=False)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("-" * 72, text)
+
+    def test_windows_console_without_virtual_terminal_falls_back_to_a_rule_line(self):
+        # Forced Windows on a host that has no ctypes.windll: enabling cannot succeed, so the
+        # frame must contain no escape at all - printing one is exactly the litter being avoided.
+        text = self.frames(2, True,
+                           mock.patch.object(cli.paths, "is_windows", return_value=True),
+                           mock.patch.object(cli, "_vt_processing", None))
+        self.assertNotIn("\x1b", text)
+        self.assertIn("-" * 72, text)
+
+    def test_windows_console_with_virtual_terminal_still_clears(self):
+        text = self.frames(2, True,
+                           mock.patch.object(cli.paths, "is_windows", return_value=True),
+                           mock.patch.object(cli, "_vt_processing", None),
+                           mock.patch.object(cli, "_enable_vt_processing", return_value=True))
+        self.assertIn("\x1b[H\x1b[2J", text)
+        self.assertNotIn("-" * 72, text)
 
 
 class OrderWatchCliTests(WatchLoopMixin, unittest.TestCase):
