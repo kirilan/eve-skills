@@ -1,0 +1,70 @@
+[build-system]
+# SPDX license expressions and `license-files` need setuptools >= 77 (PEP 639).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eve-skills"
+description = "EVE Online CLI for skill queues, clone state, live market prices and your own orders"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+# PEP 639: the SPDX expression above replaces the old `License ::` trove classifiers,
+# and setuptools refuses both at once - keep this list free of License entries.
+license-files = ["LICENSE"]
+dynamic = ["version"]
+# GitHub's noreply address: the package is published, the maintainer's mailbox is not.
+authors = [{ name = "kirilan", email = "kirilan@users.noreply.github.com" }]
+keywords = [
+    "eve-online",
+    "skill-queue",
+    "training-queue",
+    "alpha-clone",
+    "omega-clone",
+    "esi",
+    "sde",
+    "cli",
+    "market-orders",
+    "market-prices",
+    "order-watch",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Games/Entertainment :: Role-Playing",
+    "Topic :: Utilities",
+]
+# Runtime is standard library only; adding a dependency here is a deliberate decision.
+dependencies = []
+
+# Tooling for cutting a release (see RELEASE.md). Never required at runtime, and never
+# imported by eve_skills itself.
+[project.optional-dependencies]
+release = ["build>=1.2", "twine>=5"]
+
+[project.scripts]
+eve-skills = "eve_skills.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kirilan/eve-skills"
+Repository = "https://github.com/kirilan/eve-skills"
+Issues = "https://github.com/kirilan/eve-skills/issues"
+
+[tool.setuptools.packages.find]
+include = ["eve_skills*"]
+
+[tool.setuptools.package-data]
+# The SDE snapshot the CLI falls back to when $XDG_DATA_HOME has nothing newer.
+eve_skills = ["data/*.json"]
+
+[tool.setuptools.dynamic]
+# Single source of truth: `eve-skills --version` and the shipped metadata cannot drift.
+version = { attr = "eve_skills.__version__" }

@@ -1,0 +1,62 @@
+# Bytecode / test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Release artifacts (see RELEASE.md) - rebuildable, never committed
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+sdist/
+wheels/
+pip-wheel-metadata/
+# Left behind when both PEP 517 hooks run in one interpreter (see RELEASE.md step 3)
+bdist_wheel/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Runtime data this tool writes under $XDG_* - root-anchored so a same-named file packaged
+# inside eve_skills/data/ can never be masked by these rules. Nothing here belongs in a
+# public repository: config.json carries the EVE application client id and secret,
+# tokens.json carries live access and refresh tokens for every logged-in character, and the
+# state documents name real characters, corporations, orders and prices. A contributor who
+# copies one next to the source to reproduce a bug must not be able to commit it.
+/config.json
+/tokens.json
+/endpoints.json
+/watch-state.json
+/events.jsonl
+/sp-history.jsonl
+/doctor.json
+
+# Credentials by convention: EVE_SKILLS_CLIENT_ID lives here when it is not in config.json
+.env
+.env.*
+
+# Exports README tells users to redirect into the working directory (events.csv, skills.csv)
+*.csv
+
+# Local scratch: character roster used during development - real names, ids and skill sheets
+chars.txt
+
+# Private agent-harness policy for this workstation: local guidance, not project documentation
+AGENTS.md
+
+# Editor and OS droppings
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
