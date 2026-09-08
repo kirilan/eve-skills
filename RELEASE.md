@@ -30,8 +30,14 @@ eve_skills/__init__.py -> __version__ = "0.1.0"
 
 The public surface a bump has to respect is what a user or script observes: command names,
 flags, the `--json` documents, the CSV headers, exit codes, and the on-disk layout — the `$XDG_*`
-tree on POSIX and the `%APPDATA%` / `%LOCALAPPDATA%\eve-skills` tree on Windows. Moving or renaming a
-file in either of them is a breaking change for anyone who backs one up.
+tree on POSIX and the `%LOCALAPPDATA%\eve-skills` tree on Windows. Moving or renaming a
+file in either of them is a breaking change for anyone who backs one up. The documents that live
+there are `tokens.json`, `config.json` and `sp-history.jsonl` (config), `watch-state.json` and
+`events.jsonl` (state), `endpoints.json`, `names.json`, `types.json` and `quotes.json` (cache), and
+the three bundled SDE documents under `eve_skills/data/`. The two newest cache documents —
+`types.json`, the type/group/category catalogue `inventory` builds, and `quotes.json`, the order-book
+figures behind `inventory --value-at` — are `version`-tagged inside, so a user may delete either to
+force a refetch; that is not a breaking change. A release moving or renaming one of them is.
 
 | Change | While `0.y.z` (now) | From `1.0.0` |
 |---|---|---|
@@ -46,7 +52,7 @@ With uv, no environment to make first:
 ```bash
 cd eve-skills                                              # your checkout
 git status --short                    # clean tree apart from what you intend to release
-uv run python -m unittest discover -s tests -t . -q         # the suite — read the next paragraph first
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # the whole suite: 462 tests
 uv run eve-skills doctor                                   # version, data freshness, config
 ```
 

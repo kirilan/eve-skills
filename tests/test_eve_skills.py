@@ -412,25 +412,6 @@ class ExportLogicTests(unittest.TestCase):
             ("npc corp", 2, "Corp Two", -1.25),
         ])
 
-    def test_inventory_csv_accepts_esi_type_id(self):
-        class Client:
-            def get_all(self, _path, token):
-                self.token = token
-                return [{"item_id": 10, "type_id": 34, "quantity": 7, "is_singleton": False,
-                         "location_id": 60003760, "flag": "Hangar"}]
-
-        client = Client()
-        args = SimpleNamespace(corp=False, items=False, csv=True, char=None)
-        chars = [({"character_id": 7, "access_token": "token"}, {"name": "Pilot"})]
-        with (
-            mock.patch.object(exports, "targets", return_value=(client, chars, [])),
-            mock.patch.object(esi, "resolve_names", return_value={34: "Tritanium", 60003760: "Jita"}),
-            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
-        ):
-            exports.cmd_inventory(args)
-        row = next(csv.DictReader(io.StringIO(stdout.getvalue())))
-        self.assertEqual((row["type_id"], row["item_name"], row["location_name"]), ("34", "Tritanium", "Jita"))
-
     def test_job_rows_status_runs_and_activity(self):
         jobs = [
             {"activity": 1, "status": "active", "output_type_id": 34, "installed_in": 60003760,

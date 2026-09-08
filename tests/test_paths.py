@@ -41,18 +41,20 @@ class WindowsLayoutTest(unittest.TestCase):
         roaming = os.path.join(self.tmp.name, "Roaming")
         local = os.path.join(self.tmp.name, "Local")
         config, cache, data, state = self.resolve_all(APPDATA=roaming, LOCALAPPDATA=local)
-        # Credentials roam on purpose; everything regenerable or machine-local must not.
-        self.assertEqual(config, os.path.join(roaming, "eve-skills"))
+        # Nothing roams. The config directory holds tokens.json - live refresh tokens and an
+        # optional client secret - and %APPDATA% is what domain profile sync and OneDrive
+        # Known Folder Move replicate, so credentials would leave the machine with it.
+        self.assertEqual(config, os.path.join(local, "eve-skills", "config"))
         self.assertEqual(cache, os.path.join(local, "eve-skills", "cache"))
         self.assertEqual(data, os.path.join(local, "eve-skills", "data"))
         self.assertEqual(state, os.path.join(local, "eve-skills", "state"))
+        self.assertNotIn(roaming, config)
 
     def test_missing_variables_fall_back_to_the_documented_profile_folders(self):
         # Windows without %APPDATA%/%LOCALAPPDATA% (odd service contexts) still has a profile.
         config, cache, data, state = self.resolve_all()
-        roaming = os.path.join(self.home, "AppData", "Roaming")
         local = os.path.join(self.home, "AppData", "Local")
-        self.assertEqual(config, os.path.join(roaming, "eve-skills"))
+        self.assertEqual(config, os.path.join(local, "eve-skills", "config"))
         self.assertEqual(cache, os.path.join(local, "eve-skills", "cache"))
         self.assertEqual(data, os.path.join(local, "eve-skills", "data"))
         self.assertEqual(state, os.path.join(local, "eve-skills", "state"))

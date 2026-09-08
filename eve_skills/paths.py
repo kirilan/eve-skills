@@ -9,13 +9,18 @@ Four kinds of state, four directories, resolved by one rule on every platform:
 2. On POSIX the XDG defaults apply: ``~/.config``, ``~/.cache``, ``~/.local/share``
    and ``~/.local/state``, each with the ``eve-skills`` leaf appended.
 3. On Windows those variables have no meaning, so the platform's own profile
-   folders do: config under ``%APPDATA%\\eve-skills`` - roaming, deliberately, so a
-   user's credentials and settings follow them between machines - while cache, data
-   and state live under ``%LOCALAPPDATA%\\eve-skills\\<kind>``, because a cache or a
-   machine-local watch state that roams is only a liability. A missing variable
-   falls back to the documented ``<profile>\\AppData\\Roaming`` / ``Local`` location,
-   and if even the user profile cannot be located the POSIX-shaped path is returned
-   as a last resort: a resolver here can name the wrong tree, but never nothing.
+   folders do: everything lives under ``%LOCALAPPDATA%\\eve-skills\\<kind>``,
+   config included. Roaming was the obvious home for settings until you notice what
+   the config directory actually holds - ``tokens.json``, with a live refresh token
+   per character, and an optional OAuth client secret. ``%APPDATA%`` is replicated
+   by domain profile sync and OneDrive Known Folder Move, so roaming it would copy
+   working credentials onto file servers and cloud storage the user never chose to
+   trust with them. Caches, SDE downloads and watch state stay local for the duller
+   reason that replicating regenerable or machine-specific files is only a
+   liability. A missing variable falls back to the documented
+   ``<profile>\\AppData\\Local`` location, and if even the user profile cannot be
+   located the POSIX-shaped path is returned as a last resort: a resolver here can
+   name the wrong tree, but never nothing.
 
 Every resolver keeps the same ``create`` contract: ``create=False`` resolves without
 touching disk, which is what every reader - and the read-only ``doctor`` - relies on.
@@ -43,7 +48,7 @@ def is_windows() -> bool:
 # kind -> (XDG variable, POSIX default under ~, leaf under the Windows root,
 #          Windows profile variable, its documented fallback under the profile)
 _KINDS = {
-    "config": ("XDG_CONFIG_HOME", ".config", (), "APPDATA", ("AppData", "Roaming")),
+    "config": ("XDG_CONFIG_HOME", ".config", ("config",), "LOCALAPPDATA", ("AppData", "Local")),
     "cache": ("XDG_CACHE_HOME", ".cache", ("cache",), "LOCALAPPDATA", ("AppData", "Local")),
     "data": ("XDG_DATA_HOME", ".local/share", ("data",), "LOCALAPPDATA", ("AppData", "Local")),
     "state": ("XDG_STATE_HOME", ".local/state", ("state",), "LOCALAPPDATA", ("AppData", "Local")),
@@ -85,7 +90,8 @@ def _resolve(kind: str, create: bool) -> str:
 
 def config_dir(create: bool = True) -> str:
     """Client config, token store and SP history: ``$XDG_CONFIG_HOME/eve-skills`` on
-    POSIX, ``%APPDATA%\\eve-skills`` on Windows - credentials may roam with the user."""
+    POSIX, ``%LOCALAPPDATA%\\eve-skills\\config`` on Windows - local, never roaming,
+    because this directory holds live refresh tokens and an optional client secret."""
     return _resolve("config", create)
 
 

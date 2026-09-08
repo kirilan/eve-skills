@@ -1,10 +1,10 @@
 # eve-skills
 
 Command line tool for EVE Online characters: skills, training queue and alpha/omega clone state,
-plus opt-in views for standings, industry jobs, asset inventory, location/jump clones, implants,
-training plans and Skill Extractor math - and market data: live order books and prices for any item
-in any region or trade hub, your own open and closed orders, and a watch that announces the moment
-one of them fills, expires or is cancelled.
+plus opt-in views for standings, industry jobs, asset inventory (named, placed and valued), location/jump
+clones, implants, training plans and Skill Extractor math - and market data: live order books and prices
+for any item in any region or trade hub, your own open and closed orders, and a watch that announces the
+moment one of them fills, expires or is cancelled.
 
 - Linux and Windows, Python 3.11+, **standard library only** — no runtime dependencies, nothing to
   compile. See [Platform support](#platform-support).
@@ -37,7 +37,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
 | `jobs` | Personal or `--corp` industry jobs | `--scopes jobs` |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
-| `inventory` | Assets: per-location summary, `--items`, or full `--csv` | `--scopes assets` |
+| `inventory` | Assets named, placed and valued: per-location summary with subtotals, the same table turned round with `--by category`, one row per item with `--items`, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player-owned structures |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |
 | `implants` | Implants fitted in the active clone | `--scopes clones` |
 | `plan` | Ordered, priced training path to target levels incl. auto-added prerequisites | no — needs the SDE skill catalog (`update-data`) |
@@ -69,7 +69,19 @@ git clone https://github.com/kirilan/eve-skills.git
 cd eve-skills
 uv run eve-skills --version                              # -> eve-skills 0.1.0; no install step
 uv run eve-skills market Tritanium --hub jita            # public prices, before any login
-uv run python -m unittest discover -s tests -t . -q      # the suite, also without installing
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # the whole suite
+```
+
+`--with setuptools` is not decoration: the packaging tier builds a real wheel and sdist to inspect,
+so without a build backend its two build-and-install classes skip their seven tests and the run
+reports 455 instead of 462.
+
+Keep a project environment in sync with the lockfile — this is the install and update path:
+
+```bash
+uv sync                            # creates .venv and installs the project (and updates it later)
+uv sync --extra release            # …plus the build/twine tooling RELEASE.md uses
+uv run eve-skills chars            # runs against that environment
 ```
 
 Install it as a tool on your `PATH` for daily use:
@@ -220,6 +232,7 @@ first login:
    | `clones` | `esi-clones.read_clones.v1`, `esi-clones.read_implants.v1` |
    | `orders` | `esi-markets.read_character_orders.v1` |
    | `corp-orders` | `esi-markets.read_corporation_orders.v1`, `esi-characters.read_corporation_roles.v1` |
+   | `structures` | `esi-universe.read_structures.v1` |
 
    Requesting a scope the application is not registered for makes SSO refuse the login.
 4. Register it as a native/public application (no secret). Confidential registrations work too —
@@ -234,7 +247,7 @@ export EVE_SKILLS_CLIENT_ID=<your-client-id>           # environment override, w
 # PowerShell equivalent of the same override:
 #   $env:EVE_SKILLS_CLIENT_ID = "<your-client-id>"
 # or edit config.json where your platform keeps it — ~/.config/eve-skills/ on POSIX,
-# %APPDATA%\eve-skills\ on Windows (see [where data lives](#where-data-lives-and-how-it-is-protected)):
+# %LOCALAPPDATA%\eve-skills\config\ on Windows (see [where data lives](#where-data-lives-and-how-it-is-protected)):
 #   {"client_id": "...", "user_agent": "..."}
 ```
 
@@ -310,10 +323,16 @@ into in the browser, so run one `login` per character.
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
+- **Structure names are optional on top of `assets`.** `inventory` reads your holdings with the assets
+  consent alone. Naming a player-owned citadel or engineering site is `/universe/structures`' job, and
+  that needs `esi-universe.read_structures.v1`: without it those cells read `structure <id>` and the run
+  prints the fix once (`eve-skills login --scopes structures`). A token that provably lacks the scope is
+  never sent probing at all — every refusal costs ESI error-window budget that throttles the rest of the
+  run.
 - **Market prices need no consent at all** — `market` reads the public order books, so it works on a
   fresh install with nothing configured. Only *your own* orders are private: `orders` needs the
   `orders` consent, and `orders --corp` additionally needs `corp-orders` plus the in-game Accountant
@@ -377,23 +396,184 @@ PER/INT/MEM/CHR/WIL, remaps available, last remap date, and accelerator days rem
 No extra consent is needed; a character whose stored consent somehow lacks the skills scope gets a
 hint line instead of data.
 
-### `standings`, `jobs`, `inventory`, `travel`, `implants`
+### `standings`, `jobs`, `travel`, `implants`
 
 ```bash
 eve-skills standings --csv > standings.csv
 eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
-eve-skills inventory                  # per-location/flag summary: types, units, singletons
-eve-skills inventory --items          # every asset row
-eve-skills inventory --csv            # always per-item, incl. item_id/type_id/location_id
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
 
-All five accept `--char` and `--csv`. In CSV mode any consent hint is written to **stderr** so stdout
+All four accept `--char` and `--csv`. In CSV mode any consent hint is written to **stderr** so stdout
 stays machine-readable. Corporation variants (`jobs --corp`, `inventory --corp`) additionally need
 the matching director / Account-Manager role on that character; without it ESI refuses and the tool
 prints a per-character warning rather than failing the whole command.
+
+### `inventory` — what you own, where it is, what it is worth
+
+```bash
+eve-skills login --scopes assets,structures   # once, per character, in the browser
+eve-skills inventory                          # summary grouped by where the items are
+eve-skills inventory --by category            # the same numbers, turned the other way round
+eve-skills inventory --items                  # one row per item, most valuable first
+eve-skills inventory --value-at jita          # value at the richest standing buy order there
+eve-skills inventory --value-at "The Forge"   # …or across a whole region, not one station
+eve-skills inventory --corp                   # corporation assets (director / Account-Manager role)
+eve-skills inventory --json > holdings.json
+eve-skills inventory --csv > holdings.csv     # footnotes go to stderr, so the pipe stays clean
+```
+
+ESI's asset rows are numbers — a `type_id`, a `location_id`, a `location_type` — and nothing else. This
+command turns them into what each item is (name, group, category), where it actually sits, and what it
+is worth on one of two labelled bases. Each owner gets a heading (`<name> (<N> asset rows)`), one table,
+and a grand total under it; a character with nothing in their holdings gets `(inventory empty)` instead
+of an invented zero.
+
+**Three views.** The columns, exactly as printed:
+
+```text
+--by location (default)   location | category | types | units | value
+--by category             category | location | types | units | value
+--items                   item | group | category | qty | location | unit price | value
+```
+
+- **`--by location`** (the default) opens a section per root place — the station, player structure or
+  open system that everything in it folds up into — and breaks that down by category. Each section ends
+  with a `subtotal <place>` row; the table ends with the grand total.
+- **`--by category`** is the same aggregation transposed: sections by category with a
+  `subtotal <category>` row each, rows by place. The location cell carries the full nested path here, so
+  a row reads on its own whichever way round the table is turned — and the TOTAL line comes out identical,
+  because it is the same money.
+- **`--items`** drops the grouping: one row per asset, most valuable first, with every unpriced row
+  behind every priced one and names breaking the ties.
+
+**Where an item really is.** A `location_id` can name a station, somebody's citadel, open space, or
+another item — so the view walks the parent chain and prints it root-first:
+
+```text
+Jita - Mradd > My Freighter > Cargo Hold
+```
+
+That is a module in a container in a ship docked at a station, and each view reads a different slice of
+it. The default `location` column and its section heading are the **first** cell — the place everything
+under it folds into, which is why an item two levels inside a docked ship counts in that station's
+subtotal. The location column of `--items` and of `--by category` is the **whole chain**. CSV's legacy
+`location_name` stays the **last** cell — the container the item is physically in — with the full chain
+beside it in `location_path`. Kinds are `station`, `structure`, `system` (loose in space), `container`,
+`ship`, `other`. A structure this token may not see keeps a stable `structure <id>` cell and the run says
+so once with the command that fixes it — a label that names the id, never a bare number.
+
+**Names its owner chose.** A player-named singleton shows both halves — what they call it and what it is:
+
+```text
+Morning Bell (Rifter)
+```
+
+ESI answers `assets/names` with the literal string `"None"` for an item nobody ever named (measured: 18
+of one character's 23 singleton rows), so that placeholder is dropped and the type name wins. Otherwise
+most of a hangar would read `None (<Type>)`; only a player who really typed *None* as a ship name gives
+anything up by that rule.
+
+**`--json`** is one document: `generated`, `owner_kind`, `grouped_by`, the whole `value_basis` (key,
+label, short label, scope, requests, priced and unpriced types, failed books, freshness, the alternative
+listing figure, cached figures), `hints`, `warnings`, and per character its `character_id`, `name`,
+`asset_rows`, `totals`, `groups` (the grouped view, subtotals included) and `items`. Every item carries
+ids and names together — `item_id`, `type_id` + `type_name` + `name` (the display name), `custom_name`,
+`group_name`, `category_name`, `quantity`, `singleton`, `flag`, `location_id`, `location_kind`,
+`unit_price`, `value`, and `location_path` as objects with `id` / `name` / `kind` — so a reader never has
+to resolve anything afterwards, or guess which of two names it is looking at. Prose stays off stdout:
+hints and warnings are fields here, not lines.
+
+**`--csv`** is always per-item and carries 19 columns. The nine this command has always published keep
+their exact positions and meanings, and everything new is appended behind them — so a spreadsheet that
+read the old header still reads the same thing out of the same column:
+
+```text
+character,item_id,type_id,item_name,quantity,singleton,flag,location_id,location_name,
+group_name,category_name,custom_name,location_path,location_kind,price_basis,price_scope,unit_price,value,unpriced_types
+```
+
+`item_name` still means the name of `type_id`; a player's own label gets its own `custom_name` column
+rather than quietly replacing it. `unpriced_types` is that owner's count of types this basis could not
+price, repeated on each of their rows. An unpriced row leaves `unit_price` and `value` empty rather than
+writing `0`.
+
+**Two bases, because they answer different questions.** The money column always says which one produced
+it.
+
+- **Default — `ESI reference`.** One `GET /markets/prices` request prices every distinct type held:
+  *"ESI's published reference price - a figure CCP publishes about an item, not an order anybody will
+  fill"*. It uses `average_price`, falling back to CCP's industry `adjusted_price` only for rows with no
+  average. **A reference price is not a quote**: nothing can be bought or sold at it, and it does not
+  move when the market moves.
+- **`--value-at HUB|REGION` — `max buy @ <scope>`.** *"the richest standing buy order at {scope} - what
+  dumping the holding there pays right now"*. A hub (`jita`, `amarr`, `dodixie`, `rens`, `hek`) reads
+  that station's orders only, because money you cannot reach is not a valuation; naming a region (exact
+  name or id) widens past it. This costs one order-book request per distinct type the cache cannot
+  answer, and the scope is resolved before any asset page is fetched — a mistyped hub should cost one
+  lookup, not a haul. **`max buy` is what dumping pays, not what listing would raise**: from the very
+  same rows the run also prints the free alternative — `listing the same holdings at <scope>'s cheapest
+  standing ask would raise <X> ISK over <N> types` — so both figures are on screen and neither gets
+  mistaken for the other.
+
+**Unpriced is not worthless.** `-` in a money cell means this basis has no figure for that type; `0.00`
+means ESI published zero, which is a price. Unpriced types are excluded from every total — row, subtotal
+and grand total — counted out loud (`priced 4 of 5 distinct types held (…)`) and named there
+(`no price on this basis, excluded from every total above (1): <Type Name>`). A book that never answered
+is a third statement: `N of those books did not answer; their types are counted as unpriced above, not as
+worthless`. The grand total therefore quotes only the units it actually priced, with the basis inside its
+own label (numbers below are illustrative):
+
+```text
+TOTAL (max buy @ Jita 4-4): 1,234,567.00 ISK over 987 units of 42 distinct types; 3 more types held, none priced
+```
+
+When nothing on this basis has a figure it says `nothing priced on this basis (N distinct types held)`
+rather than printing `0`.
+
+**What it costs.** Two fan-outs hide behind this command, and telling them apart is the difference
+between a slow tool and a broken one.
+
+- **The type catalogue — paid once per new type, ever.** The first time this machine meets a type it
+  fetches `/universe/types/{id}`, then one request per distinct group those types name, then one per
+  distinct category those groups name. Measured on a real holding of 518 distinct types: **518 + 168 +
+  18 requests ≈ 125 s cold**, and the same holding warm in **9 requests ≈ 3 s**. Types, groups,
+  categories, station and system names never change, so they come off disk forever — a newly met type in
+  an already-known group costs exactly one request. What is re-read every run is the personal half (the
+  asset rows themselves, custom item names, token-visible structures), because those change the moment a
+  ship is renamed or a citadel repacked.
+- **`--value-at` — one order book per distinct type.** Measured on that same 518-type holding: cold
+  **100.6 s / 518 requests**; an immediate repeat **14.1 s / 63 requests** (455 types answered from
+  disk); `--items` straight after that **4.0 s / 18 requests** (500 cached). Books go through eight
+  workers at roughly five a second, so the wait scales with how many distinct *types* you hold, not with
+  how many items.
+
+**The wait says what it is buying.** Before a book fan-out starts, stderr gets counts rather than a
+progress bar:
+
+```text
+pricing 518 distinct types held: 518 order books to read, one per type; about 1m 38s at this size
+```
+
+with `(455 already priced from the last run)` inserted when part of it is cached — and, when nothing
+needs fetching at all, `pricing 518 distinct types held: every figure already in the local quote cache,
+so no order book is read`. The duration is quoted only above ten seconds: below that the wait needs no
+explaining, and a notice about nothing teaches you to stop reading notices. `--json` drops it — those
+counts are already fields in `value_basis` — while `--csv` still prints it on stderr, where every other
+footnote for that mode lands too.
+
+**The quote cache.** `--value-at` writes `quotes.json` in the cache directory: for each (region,
+station/system filter, type) just the reduction of that book — `min_sell`, `max_buy` — plus the
+response's own `Last-Modified` and `Expires`. Never the order rows themselves; about 85 KB for 518 types.
+An entry is served only while its own stated `Expires` is still in the future, so a warm run never prints
+a figure ESI has already disowned — and a figure reused from disk keeps the stamp ESI gave it: **a printed
+total is stamped with the oldest contributing `Last-Modified`, cached or fetched**, so it can never be
+described as fresher than its stalest input. The default reference basis does not go through this cache:
+it is one document for the whole cluster, left to the transport's own `Expires`/ETag handling. Writes
+merge under a lock and drop expired records, so two characters valued from two shells cannot lose each
+other's figures, and a half-written or hand-edited file costs a refetch rather than a wrong price.
 
 ### `orders` — open and closed market orders
 
@@ -747,7 +927,7 @@ field whitelist, and every string in the report — text or JSON — passes a re
 credential values found on disk, so an access token, refresh token or client secret cannot escape
 even inside an exception message (it prints as `[redacted]`). Paths are shown relative to your home
 directory — `~/.config/eve-skills/tokens.json`, not `/home/you/.config/eve-skills/tokens.json`, and on
-Windows `~\AppData\Roaming\eve-skills\tokens.json` rather than a profile path carrying your username —
+Windows `~\AppData\Local\eve-skills\config\tokens.json` rather than a profile path carrying your username —
 because the expanded form would leak that username into whatever you paste the report into; a
 location you configured explicitly outside your home is printed exactly as it is, since naming it is
 what the check is for. A path inside a hint — advice meant to be pasted into a shell — is quoted in the
@@ -790,14 +970,14 @@ given). With none set:
 
 | Kind | POSIX default | Windows default | Why there |
 |---|---|---|---|
-| config | `~/.config/eve-skills` | `%APPDATA%\eve-skills` | Roaming **on purpose**: on a roaming profile the credentials and settings follow the user between machines |
+| config | `~/.config/eve-skills` | `%LOCALAPPDATA%\eve-skills\config` | Local **on purpose**: this is where `tokens.json` keeps live refresh tokens and an optional client secret, and `%APPDATA%` is what domain profile sync and OneDrive Known Folder Move replicate — credentials must not leave the machine that way |
 | cache | `~/.cache/eve-skills` | `%LOCALAPPDATA%\eve-skills\cache` | Regenerable — a roaming cache buys nothing but profile size |
 | data | `~/.local/share/eve-skills` | `%LOCALAPPDATA%\eve-skills\data` | The SDE copy can be re-downloaded by `update-data`, so it must not roam |
 | state | `~/.local/state/eve-skills` | `%LOCALAPPDATA%\eve-skills\state` | A watch state is machine-local by definition — the watchers, their baselines, their recorded alerts |
 
-A missing `%APPDATA%` / `%LOCALAPPDATA%` falls back to the documented `AppData\Roaming` /
-`AppData\Local` under the user profile; only if even the profile cannot be located does a resolver
-return the POSIX-shaped path, because naming the wrong tree beats naming nothing.
+A missing `%LOCALAPPDATA%` falls back to the documented `AppData\Local` under the user profile;
+only if even the profile cannot be located does a resolver return the POSIX-shaped path, because
+naming the wrong tree beats naming nothing.
 
 ### The files
 
@@ -810,8 +990,10 @@ return the POSIX-shaped path, because naming the wrong tree beats naming nothing
 | `events.jsonl` | state | Watch alert history shown by `events` — training and order kinds alike, 365-day retention | Non-secret; append-only JSONL, always written in binary mode so no platform can rewrite its newlines |
 | `endpoints.json` | cache | SSO discovery document, cached 24 h | Non-secret |
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
+| `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
+| `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
 | `{clone_grades,bloodline_races,skill_catalog}.json` | data | SDE snapshot from `update-data`; overrides packaged data | Non-secret |
-| Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
+| Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
 (`O_EXCL`, opened binary wherever that flag exists so a JSONL file cannot quietly gain CRLF; `0600` up
@@ -848,14 +1030,15 @@ retries with backoff on 420/429/502/503 honouring `Retry-After`, and automatic p
 
 ## Testing and verification status
 
-The permanent automated suite runs in 397 tests, all passing, and is deterministic: no network, no
+The permanent automated suite runs in 462 tests, all passing, and is deterministic: no network, no
 real credentials — every test works in a throwaway `$XDG_*` tree against fakes or fixtures, and those
 pins are what let the Windows branches run on a Linux host, since they win on every platform.
 
 ```bash
 cd eve-skills                                          # your checkout
-uv run python -m unittest discover -s tests -t . -q    # 397 tests, with no install step at all
-.venv/bin/python -m unittest discover -s tests -t .    # the same suite, without uv
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # 462 tests, no install
+uv run python -m unittest discover -s tests -t . -q                     # 455: packaging tier skips
+.venv/bin/python -m unittest discover -s tests -t .                     # the same suite, without uv
 ```
 
 - `tests/test_eve_skills.py` — pure-logic units: clone-state tiers, queue labels (including
@@ -867,9 +1050,10 @@ uv run python -m unittest discover -s tests -t . -q    # 397 tests, with no inst
   ETag revalidation;
 - `tests/test_persistence.py` — durable-write and token-lifecycle invariants: atomicity, `0600`
   permissions, lock exclusion — including real concurrent subprocesses racing the same files;
-- `tests/test_paths.py` — the layout contract on both branches: `%APPDATA%` / `%LOCALAPPDATA%` placing
-  each kind, a missing profile variable falling back to the documented `AppData\Roaming` / `Local`
-  folder, POSIX defaults unchanged, `$XDG_*` pins winning on either platform and an empty one counting
+- `tests/test_paths.py` — the layout contract on both branches: `%LOCALAPPDATA%` placing each kind
+  (config included: it holds live refresh tokens, so it must not follow a roaming profile onto a
+  file server), a missing profile variable falling back to the documented `AppData\Local` folder,
+  POSIX defaults unchanged, `$XDG_*` pins winning on either platform and an empty one counting
   as unset, `create=False` never touching disk on either branch, and every artefact landing in the kind
   its resolver names — which is also the check that no second resolver survived anywhere;
 - `tests/test_storage_platform.py` — the Windows half of persistence against an injected backend: a
@@ -883,14 +1067,34 @@ uv run python -m unittest discover -s tests -t . -q    # 397 tests, with no inst
 - `tests/test_cli_integration.py` + `tests/fake_esi.py` — the real command handlers end-to-end
   against a deterministic fake ESI: multi-character token isolation, current live response
   shapes, JSON/CSV output contracts, graceful per-character degradation on fetch failure or
-  missing consent;
+  missing consent. The `inventory` half pins the rewritten surface rather than its plumbing: all
+  three views with their subtotal rows and labelled TOTAL, `--by category` coming out as the same
+  money transposed, every row named although container ids overflow int32, nested items rendering the
+  whole path, unpriced rows last and `-` rather than free, a hub priced at its own station and a region
+  widened past it, the refused structure degrading to one labelled cell plus the fix command, the JSON
+  document carrying ids beside names, CSV keeping stdout footnote-free, and an owner ESI refuses
+  reported as that owner's problem instead of failing the run;
+- `tests/test_universe.py` — the catalogue and location resolver behind `inventory`, against a fake ESI
+  that answers exactly as the live one does: the three waves in their real order with each wave keyed by
+  what the previous one said, groups/categories cached so a new type costs one request, a warm run silent
+  on universe routes while the personal half is still re-read, two runs merging under the lock so neither
+  loses an id or a name, ids outside ESI's int32 range never posted to `/universe/names` (a location id
+  there fails every *other* name in the batch), chains that cycle or run past their depth limit cut at a
+  stable label instead of hanging, a refused structure degrading to one labelled cell without poisoning
+  the names beside it, ESI's `"None"` placeholder dropped so an unnamed item shows its type, and custom
+  names asked for in chunks because ESI caps the ids per request;
 - `tests/test_market.py` — type/scope resolution by name or id, quote maths (spread, margin, listed
   volume, empty side), the published reference price and its zero-versus-absent keys, the cluster scan
   and its partial-failure accounting, and the `market` command's text/JSON/CSV output including one
   freshness line per scope plus which of the four empty-book footnotes the run's coverage earns —
   station, region, whole-cluster scan or measured vault type — including that a hub book alone neither
   borrows PLEX's explanation nor quotes a figure, and that `/markets/prices` is requested exactly when a
-  footnote will quote it, in every output format;
+  footnote will quote it, in every output format. It also covers the quote cache behind
+  `inventory --value-at`: keys that carry the scope so a hub figure can never answer a region question,
+  records served only while ESI's own `Expires` vouches for them, expired entries dropped on the next
+  write, two runs publishing to one file without losing each other's types, a cached figure printed at
+  the age ESI stamped rather than the moment it was read, and the run's pre-flight notice — what it
+  counts, when it quotes a duration, and the all-cached form that promises no book is read;
 - `tests/test_orders.py` — order normalisation from malformed and partial ESI rows (escrow optional,
   derived closed state), character + corporation fetching with its role diagnosis, and the `orders`
   command's table, totals and footnotes;
@@ -921,20 +1125,26 @@ consent, so a real fill has never passed through the watch here. That path (fetc
 announce, personal and corporation) is proven by `tests/test_watch_events.py` against the fake ESI,
 not by observation, and the README says so rather than implying otherwise.
 
-And no **Windows machine was involved at all**. Nothing here has run on Windows: the `msvcrt` lock
-backend, profile-folder path resolution, doctor's skips and cmd-shaped hints, the virtual-terminal
-fallback and the notify explanation are exercised by forcing the platform — an injected fake `msvcrt`,
-an injected platform judgement — from a Linux host. That is real coverage of what those branches *do*
-(which syscall sequence, which path, which verdict, which string), and it is not evidence that Windows
-itself behaves as documented: whether `%LOCALAPPDATA%` really resolves where Microsoft says, how a
-roaming profile moves these files between machines, what ConHost accepts, and what an antivirus holding
-the token store open actually does to a rename remain untested until someone runs them there. Proven
-here with uv 0.12.6 on Linux: `uv venv`, `uv pip install -e .`, `uv run eve-skills --version`,
-`uv run python -m unittest discover -s tests -t . -q`, and `uv tool install .` / `uv tool list` /
-`uv tool uninstall eve-skills`. Not run from this tree, only read out of `uv --help`: the
-`git+https://…` tool install and `uv tool update-shell`; the other `uv run …` lines are the proven
-mechanism with different arguments. Every PowerShell line here was typed for a shell nobody on this
-machine has.
+Nothing here has run on Windows **on this machine**: the `msvcrt` lock backend, profile-folder path
+resolution, doctor's skips and cmd-shaped hints, the virtual-terminal fallback and the notify
+explanation are exercised by forcing the platform — an injected fake `msvcrt`, an injected platform
+judgement — from a Linux host. That is real coverage of what those branches *do* (which syscall
+sequence, which path, which verdict, which string) and no evidence that Windows itself behaves as
+documented. `.github/workflows/ci.yml` is where that gap closes: the same suite runs on
+`windows-latest` and `ubuntu-latest` against Python 3.11 and 3.14, installs the package, and runs
+both entry points and `doctor` there. Until that workflow has gone green on a push, treat every
+Windows claim in this document as derived from Microsoft's documented contracts rather than
+observed — in particular whether `%LOCALAPPDATA%` resolves where it should, what ConHost accepts,
+and what an antivirus holding the token store open does to a rename.
+
+Proven here with uv 0.12.6 on Linux: `uv sync`, `uv run eve-skills --version`,
+`uv run --with setuptools python -m unittest discover -s tests -t . -q` (462 tests) and the same
+line without `--with setuptools` (455, packaging tier skipped — the reason the flag is documented),
+`uv venv`, `uv pip install -e .`, `uv build`, and `uv tool install .` / `uv tool list` /
+`uv tool uninstall eve-skills`. The suite also passes under Python 3.11, the floor
+`requires-python` promises. Not run from this tree, only read out of `uv --help`: the
+`git+https://…` tool install and `uv tool update-shell`. Every PowerShell line here was typed for a
+shell nobody on this machine has.
 
 Live read-only smoke evidence from this session (manual, not part of the suite): a 27-variant command
 matrix including prerequisite-expanding `plan`, the compact watch dashboard, `events`, `doctor` and
@@ -962,6 +1172,15 @@ rather than per run even when one type has earned a figure: `market PLEX "Mystic
 PLEX its vault explanation and number, and Mystic XL — two orders in Heimatar, none at Rens — the wider
 scope instead.
 
+The rewritten `inventory` paths were measured live on one real holding of 518 distinct types, with the
+requests and durations recorded rather than remembered: the type catalogue cold (518 + 168 + 18 requests
+≈ 125 s) against the same holding warm (9 requests ≈ 3 s), and `--value-at` cold at 100.6 s / 518
+requests, an immediate repeat at 14.1 s / 63 requests with 455 types served from the quote cache, then an
+`--items` run straight after at 4.0 s / 18 requests with 500 cached — the figures quoted in
+[inventory](#inventory--what-you-own-where-it-is-what-it-is-worth). Only counts and durations left that
+machine, which is why they are here: what a run *listed* is somebody's holdings, and none of it belongs in
+a public repository.
+
 ---
 
 ## Limitations you should know
@@ -974,7 +1193,11 @@ scope instead.
 | ESI lags finished training | A completed queue item can stay visible until the character logs in. The tool overlays the completed level and marks it pending (`*`) rather than pretending nothing happened. |
 | Data freshness matters | Alpha caps warn after 90 days; extractor rules are dated constants that warn after ~180 days. Both warnings name the remedy or the verification date. |
 | Pagination is capped | Paginated GETs follow at most 100 pages, so an enormous corp asset list would be truncated rather than loop forever. |
-| Name resolution degrades | Private structures and unresolvable ids stay as `id 1234567890`; ESI name failures never fail the command. |
+| Name resolution degrades | A structure this token may not see stays a labelled `structure <id>`, an id whose parent chain ESI never completes stays `location <id>`; name failures never fail the command. |
+| `/universe/names` fails as a whole batch | ESI validates `ids` as int32 and answers **400 for the entire request** when one id overflows (verified live 2026-09-08) — and container, ship and structure ids are all far above that bound. So one citadel in a batch would cost every station name beside it: `inventory` sends type ids to `/universe/types` and location ids to their own resolvers, and never posts a location id to `/universe/names`. The fake ESI reproduces the whole-batch 400, which is what makes "every row is named" a real pin instead of luck. |
+| Structure names need consent *and* access | `/universe/structures` answers only with `esi-universe.read_structures.v1`, and only for structures ESI lets this character see; anything else keeps its `structure <id>` cell, and the run prints `login --scopes structures` once. A token that provably lacks the scope is not probed at all — refusals spend error-window budget that throttles the rest of the run. |
+| The reference price is not a quote | The default basis is CCP's published figure for an item: nothing can be bought or sold at it, and it does not move with the market. `--value-at` answers the tradable question — the richest standing buy at one scope — and even that is what *dumping* pays; what *listing* would raise is printed beside it from the same rows, never merged into the money column. |
+| `--value-at` costs one order book per distinct type | ~0.19 s a type through eight workers measured, so a 518-type holding is 518 requests and a minute and a half cold. The run says so on stderr before it starts; the quote cache then re-serves each figure only while ESI's own `Expires` vouches for it, which is what makes a second look nearly free. |
 | Consent is opt-in | A missing optional scope prints `no <feature> consent - run: eve-skills login --scopes <feature>` for that character and exits 0. Granting consent always requires your click in a browser; the tool will not do it for you. |
 | Corp access is role-bound | Corporation jobs/assets need director / Account-Manager rights; ESI refusal becomes a per-character warning. |
 | SP history is local and short | 60 days, best-effort, one row per successful fetch, written only when the write succeeds (a failed history write never breaks `skills`). A fresh install honestly reports "no baseline yet" for `--week`. |
@@ -1000,6 +1223,7 @@ eve_skills/
   doctor.py      read-only installation diagnostics (never writes, redacts secrets)
   sso.py         OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
   esi.py         stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
+  universe.py    asset identities: disk-cached type/group/category catalogue + nested location resolver
   market.py      public order books: type/scope resolution, quote maths, cluster scan, freshness + history
   orders.py      character/corporation order fetching, normalisation, access (consent vs role) diagnosis
   classify.py    alpha-cap lookup, per-skill classification, clone-state inference
@@ -1009,12 +1233,13 @@ eve_skills/
   watchstate.py  watch observations, exactly-once transitions, durable event history
   storage.py     unique-temp atomic writes + advisory file locks (flock on POSIX, byte-range on Windows)
   paths.py       the only resolver of the config / cache / data / state directories, on either platform
-  exports.py     standings / jobs / inventory / travel / implants views + consent hints
+  exports.py     standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py      timestamps, SP/duration formatting, plain-text tables
   data/          packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog)
 tests/           unittest suite: pure units, ESI transport, persistence concurrency + the injected
                  Windows lock backend, path layout on both branches, fake-ESI command integration,
-                 planner catalog, market, orders, watch/events, doctor (POSIX + forced Windows), packaging
+                 planner catalog, market (+ quote cache), universe catalogue/locations, orders,
+                 watch/events, doctor (POSIX + forced Windows), packaging
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 

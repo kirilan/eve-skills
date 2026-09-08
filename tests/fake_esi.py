@@ -304,7 +304,6 @@ NAMES: dict[int, str] = {
     60003760: "Jita - Mradd",
     30000142: "The Forge",
     60015129: "Rens - Datauri",
-    1048236548577: "Keepstar Outpost",
     3019840: "Agent Six",
     1000125: "Science and Trade Institute",
     MARKET_FORGE: "The Forge",
@@ -317,6 +316,54 @@ NAMES: dict[int, str] = {
     91000002: "Vela Krinn",
     91000003: "Mira Solen",
 }
+
+
+# Inventory universe, invented like everything above except the two ore types. `universe.type_info`
+# needs a type -> group -> category chain per held type, so all five records are served here. Two
+# types exist only for this view: a Rifter that carries a freight container (the only nesting live
+# asset rows express) and a blueprint ESI's price document has no row for at all.
+INV_TYPE_SHIP, INV_TYPE_CONTAINER = 587, 21078
+INV_GROUP_ORE, INV_GROUP_FRIGATE = 18, 420
+INV_GROUP_BLUEPRINT, INV_GROUP_CONTAINER = 96, 303
+INV_CATEGORY_MATERIAL, INV_CATEGORY_SHIP = 5, 7      # exactly `Ship` is what makes an item a ship
+INV_CATEGORY_BLUEPRINT, INV_CATEGORY_CONTAINER = 9, 20
+INVENTORY_TYPES = {
+    34: {"type_id": 34, "name": "Tritanium", "group_id": INV_GROUP_ORE, "volume": 0.02},
+    36: {"type_id": 36, "name": "Pyerite", "group_id": INV_GROUP_ORE, "volume": 0.02},
+    590: {"type_id": 590, "name": "Caldari Ship Blueprint", "group_id": INV_GROUP_BLUEPRINT,
+          "volume": 1.0},
+    INV_TYPE_SHIP: {"type_id": INV_TYPE_SHIP, "name": "Rifter", "group_id": INV_GROUP_FRIGATE,
+                    "volume": 2500.0, "packaged_volume": 780.0},
+    INV_TYPE_CONTAINER: {"type_id": INV_TYPE_CONTAINER, "name": "Freight Container",
+                         "group_id": INV_GROUP_CONTAINER, "volume": 25000.0},
+}
+INVENTORY_GROUPS = {
+    INV_GROUP_ORE: {"group_id": INV_GROUP_ORE, "name": "Ore", "category_id": INV_CATEGORY_MATERIAL},
+    INV_GROUP_FRIGATE: {"group_id": INV_GROUP_FRIGATE, "name": "Frigate",
+                        "category_id": INV_CATEGORY_SHIP},
+    INV_GROUP_BLUEPRINT: {"group_id": INV_GROUP_BLUEPRINT, "name": "Ship Blueprint",
+                          "category_id": INV_CATEGORY_BLUEPRINT},
+    INV_GROUP_CONTAINER: {"group_id": INV_GROUP_CONTAINER, "name": "Container",
+                          "category_id": INV_CATEGORY_CONTAINER},
+}
+INVENTORY_CATEGORIES = {INV_CATEGORY_MATERIAL: "Material", INV_CATEGORY_SHIP: "Ship",
+                        INV_CATEGORY_BLUEPRINT: "Blueprint", INV_CATEGORY_CONTAINER: "Container"}
+
+# Item-sized location ids, all above int32 like real ones. Two player structures: ESI names the
+# first to Ada's token and refuses the second with 403, which is exactly how live ESI answers a
+# character that never consented `esi-universe.read_structures.v1`. Neither id may ever be asked of
+# /universe/names - see `_names_handler` - so any name for them can only come from the right place.
+INV_SHIP_ITEM, INV_CONTAINER_ITEM = 90000001, 90000002
+INV_CITADEL_SEEN, INV_CITADEL_BLIND = 1048236548577, 1048248887257
+INV_CUSTOM_NAMES = {INV_SHIP_ITEM: "Nightwatch", INV_CONTAINER_ITEM: "Second Shift"}
+CORP_CUSTOM_NAMES = {2002: "Ledger Runner"}
+
+# `/markets/prices` for inventory runs: the market document plus a ship that only has CCP's industry
+# figure (so the average-missing fallback is exercised) and a container published at 0.0 - a
+# published value, which counts as priced, unlike type 590, whose row does not exist. The three
+# statements an inventory footnote has to keep apart.
+INVENTORY_PRICES = MARKET_PRICES + [{"type_id": INV_TYPE_SHIP, "adjusted_price": 12_000_000.0},
+                                    {"type_id": INV_TYPE_CONTAINER, "adjusted_price": 0.0}]
 
 
 @dataclass(frozen=True)
@@ -558,6 +605,13 @@ class FakeEsiEnv:
         })
 
     def _names_handler(self, call: Call):
+        """`/universe/names` with live ESI's sharpest edge: one id above int32 fails the *whole*
+        batch with 400, so every station name in it goes with it. Answering the resolvable subset
+        instead would let the bug `cmd_inventory` used to have pass here forever."""
+        overflow = [ident for ident in call.json or []
+                    if isinstance(ident, int) and not -2**31 <= ident <= 2**31 - 1]
+        if overflow:
+            raise http_error(call.url, 400, {"error": f"id out of int32 range: {overflow[0]}"})
         return [{"id": i, "name": self.names[i]} for i in call.json if i in self.names]
 
     def install_standings(self):
@@ -577,15 +631,59 @@ class FakeEsiEnv:
         ])
 
     def install_inventory(self):
+        """Ada's holdings, reported the way live ESI reports them.
+
+        Nine rows over two pages, one per shape an inventory view has to render: plain quantities in
+        two NPC stations and loose in a system, a named ship carrying a named cargo container (the
+        nesting live rows express, via `location_type: "item"`), a player structure this token may
+        name, and one it may not - the difference that makes the consent notice assertable. The type
+        catalogue and the price document come with it, because a run reads both before it renders.
+        """
+        self.install_market()
+        # Republished rather than extended in place: market tests read `MARKET_PRICES` as served,
+        # and that document has no business carrying inventory-only rows.
+        self.server.get("/markets/prices", doc=INVENTORY_PRICES,
+                        headers={"Last-Modified": http_date(-MARKET_PRICES_AGE)})
+        for type_id, doc in INVENTORY_TYPES.items():
+            self.server.get(f"/universe/types/{type_id}", doc=doc)
+        for group_id, doc in INVENTORY_GROUPS.items():
+            self.server.get(f"/universe/groups/{group_id}", doc=doc)
+        for category_id, name in INVENTORY_CATEGORIES.items():
+            self.server.get(f"/universe/categories/{category_id}",
+                            doc={"category_id": category_id, "name": name, "published": True})
+        self.server.get(f"/universe/structures/{INV_CITADEL_SEEN}", token=ADA.token,
+                        doc={"name": "Keepstar Outpost", "solar_system_id": SYSTEM_FORGE,
+                             "type_id": 35893, "owner_id": CORP_SHARED})
+        self.server.get(f"/universe/structures/{INV_CITADEL_BLIND}", token=ADA.token,
+                        error=(403, {"error": "Forbidden"}))
+
+        def asset_names(call: Call):
+            return [{"item_id": i, "name": INV_CUSTOM_NAMES[i]} for i in call.json
+                    if i in INV_CUSTOM_NAMES]
+
+        self.server.post(f"/characters/{ADA.character_id}/assets/names", token=ADA.token,
+                         handler=asset_names)
+
+        def row(item_id, type_id, quantity, location_id, location_type, *, singleton=False,
+                flag="Hangar"):
+            """One asset row with every key a location decision reads, `location_type` included."""
+            return {"item_id": item_id, "type_id": type_id, "quantity": quantity,
+                    "is_singleton": singleton, "location_id": location_id,
+                    "location_flag": flag, "location_type": location_type}
+
         page1 = [
-            {"item_id": 1001, "type_id": 34, "quantity": 500, "is_singleton": False,
-             "location_id": 60003760, "flag": "Hangar"},
-            {"item_id": 1002, "type_id": 590, "quantity": 1, "is_singleton": True,
-             "location_id": 60003760, "flag": "Hangar"},
+            row(1001, 34, 500, STATION_JITA, "station"),
+            row(1002, 590, 1, STATION_JITA, "station", singleton=True),
+            row(INV_SHIP_ITEM, INV_TYPE_SHIP, 1, STATION_JITA, "station", singleton=True),
+            row(INV_CONTAINER_ITEM, INV_TYPE_CONTAINER, 1, INV_SHIP_ITEM, "item", singleton=True,
+                flag="Cargo"),
         ]
         page2 = [
-            {"item_id": 1003, "type_id": 36, "quantity": 40, "is_singleton": False,
-             "location_id": 1048236548577, "flag": "Hangar"},
+            row(1003, 34, 1200, INV_CONTAINER_ITEM, "item", flag="Cargo"),
+            row(1004, 36, 40, 60015129, "station"),
+            row(1005, 36, 25, SYSTEM_FORGE, "solar_system", flag="Drop"),
+            row(1006, 34, 700, INV_CITADEL_SEEN, "station"),
+            row(1007, 36, 90, INV_CITADEL_BLIND, "station"),
         ]
 
         def assets(call: Call):
@@ -593,6 +691,28 @@ class FakeEsiEnv:
             return doc, {"X-Pages": "2"}
 
         self.server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token, handler=assets)
+
+    def install_corp_inventory(self):
+        """Corporation assets for Ada's corp, on top of the personal fixture.
+
+        Same shapes, different owner: a corporation run must ask `/corporations/{corp}/assets/names`
+        about the corporation's items. Reusing the character endpoint would 404 on live ESI and cost
+        every custom name in the batch, so the two routes are registered separately here and the
+        test can see which one was called."""
+        self.install_inventory()
+        self.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=[
+            {"item_id": 2001, "type_id": 34, "quantity": 5000, "is_singleton": False,
+             "location_id": STATION_JITA, "location_flag": "Hangar", "location_type": "station"},
+            {"item_id": 2002, "type_id": INV_TYPE_SHIP, "quantity": 1, "is_singleton": True,
+             "location_id": INV_CITADEL_SEEN, "location_flag": "Hangar", "location_type": "station"},
+        ])
+
+        def corp_asset_names(call: Call):
+            return [{"item_id": i, "name": CORP_CUSTOM_NAMES[i]} for i in call.json
+                    if i in CORP_CUSTOM_NAMES]
+
+        self.server.post(f"/corporations/{CORP_SHARED}/assets/names", token=ADA.token,
+                         handler=corp_asset_names)
 
     def install_travel(self):
         self.server.get(f"/characters/{ADA.character_id}/location", token=ADA.token,

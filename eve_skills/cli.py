@@ -1637,7 +1637,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--port", type=int, help="exact loopback callback port (must match the registered redirect URL; default tries 8635-8637)")
     p_login.add_argument("--manual", action="store_true", help="paste the localhost callback URL manually (for remote hosts reached over ssh)")
     p_login.add_argument("--attributes", action="store_true", help="include character attributes (already covered by the standard skills consent)")
-    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,all (each re-authenticates the chosen character only)")
+    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,all (each re-authenticates the chosen character only)")
 
     p_logout = sub.add_parser("logout", help="remove stored tokens")
     p_logout.add_argument("--char", help="only this character (name or id); default removes all")
@@ -1685,11 +1685,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--completed", action="store_true", help="include finished and cancelled jobs")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
 
-    p_inv = sub.add_parser("inventory", help="asset inventory, per-location summary by default (needs login --scopes assets)")
+    p_inv = sub.add_parser("inventory", help="asset inventory with real item names, grouped by location or category and valued (needs login --scopes assets)")
     p_inv.add_argument("--char", help="stored character name or id (default: every stored character)")
     p_inv.add_argument("--corp", action="store_true", help="corporation assets instead of personal (needs the matching director/Account-Manager role)")
-    p_inv.add_argument("--items", action="store_true", help="list every item row instead of the per-location summary")
-    p_inv.add_argument("--csv", action="store_true", help="full CSV rows on stdout (always per-item)")
+    p_inv.add_argument("--by", choices=["location", "category"], default="location",
+                       help="group the summary by where the items are (default) or by what they are")
+    p_inv.add_argument("--items", action="store_true", help="list every item row instead of the grouped summary, most valuable first")
+    p_inv.add_argument("--value-at", dest="value_at", metavar="HUB|REGION",
+                       help=f"value holdings at the richest standing buy order there instead of "
+                            f"ESI's published reference price; a hub reads that station only: "
+                            f"{', '.join(market.HUBS)}, or a region by exact name or id")
+    p_inv.add_argument("--json", action="store_true", help="machine-readable output: ids and names together, with the valuation basis")
+    p_inv.add_argument("--csv", action="store_true", help="full CSV rows on stdout (always per-item); the valuation footnotes go to stderr")
 
     p_travel = sub.add_parser("travel", help="current location, home and jump clones with implants (needs login --scopes location / clones)")
     p_travel.add_argument("--char", help="stored character name or id (default: every stored character)")

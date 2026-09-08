@@ -1,0 +1,56 @@
+# The Windows support in this package was written on Linux: every Windows branch is covered by
+# tests that inject the platform (a fake msvcrt backend, a forced `paths.is_windows`), which proves
+# our own logic and nothing about the OS. This workflow is where that gap closes - the same suite
+# runs on a real windows-latest runner, so an import-time `fcntl`, a byte-range lock that never
+# unlocks, or a rename that trips over Windows file sharing fails here rather than on a user's
+# machine.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # a Windows-only failure must not hide a Linux-only one, or the reverse
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.14"]   # the floor `requires-python` promises, and the newest we develop on
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The runtime has no dependencies; setuptools and build are what the packaging tier needs to
+      # produce the real wheel and sdist it inspects. Without them those tests skip, and a skipped
+      # packaging tier is exactly the thing this matrix exists to catch.
+      - name: Install the packaging tier's build backend
+        run: python -m pip install --upgrade pip "setuptools>=77" build
+
+      - name: Run the suite
+        run: python -m unittest discover -s tests -t . -v
+
+      # Proves the console script and the module entry point agree once actually installed, on both
+      # platforms' script directories (bin vs Scripts) - the packaging tests assert that layout,
+      # this asserts it runs.
+      - name: Install and smoke the entry points
+        run: |
+          python -m pip install .
+          eve-skills --version
+          python -m eve_skills --version
+
+      # Read-only, offline, no credentials. A runner has never logged in, so `doctor` legitimately
+      # exits 1 (no client id, no character): accept that, and fail on anything else - a traceback,
+      # an unhandled platform branch, or a crash resolving the profile directories.
+      - name: doctor on a machine with no login
+        run: python -c "import sys; from eve_skills.cli import main; code = main(['doctor']); sys.exit(0 if code in (0, 1) else 'doctor exited %r' % code)"

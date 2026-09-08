@@ -8,11 +8,13 @@ day behind. Printing either without its age would present a cached answer as liv
 
 from __future__ import annotations
 
+import json
+import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from . import esi as esi_mod
+from . import esi as esi_mod, paths, storage
 
 # ESI rebuilds the regional book on this cadence (its `Expires` is 300s later); quoted in every
 # freshness line so a reader can tell "just refreshed" from "about to move".
@@ -40,6 +42,13 @@ MARKET_REGION_MAX = 11_000_000
 # is the only one the tool may explain that way: an empty book for any other type says nothing more
 # than that the books which were read are empty.
 VAULT_TRADED_TYPE_IDS: frozenset[int] = frozenset({44_992})   # PLEX
+
+# Shape version of quotes.json - the reduced order-book figures this module is willing to reuse.
+# Bump it when the record layout below changes: a reader that does not recognise the document
+# discards it wholesale rather than mis-reading an old field as a new one.
+QUOTE_CACHE_VERSION = 1
+QUOTE_DOC_NAME = "quotes.json"
+QUOTE_LOCK_NAME = "quotes.lock"
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,63 @@ class Quote:
             return None
         return (self.min_sell - self.max_buy) / self.max_buy * 100.0
 
+
+@dataclass(frozen=True)
+class CachedFigure:
+    """One scope's two extreme prices for one type, with the stamps that license believing them.
+
+    Only what a valuation reads is kept - never the orders themselves. Five hundred types of raw
+    regional book is megabytes; this reduction is tens of kilobytes and is the same answer the rows
+    would give until ESI says the book moves again, which the response states as `expires`.
+    """
+
+    min_sell: float | None
+    max_buy: float | None
+    last_modified: float | None   # when ESI generated the book these figures came from
+    expires: float                # ESI's own `Expires`: the end of that claim
+
+    @property
+    def meta(self) -> esi_mod.Meta:
+        """The stamps as a Meta, so a cached figure folds with a freshly read one identically."""
+        return esi_mod.Meta(expires=self.expires, last_modified=self.last_modified)
+
+    def live_at(self, now: float) -> bool:
+        """True while ESI's stated expiry still vouches for these figures. Past it the entry is not
+        merely old - it is unusable, and the caller has to read the book again."""
+        return self.expires > now
+
+
+@dataclass(frozen=True)
+class Preflight:
+    """What a valuation is about to cost, known before any of it is fetched.
+
+    Handed to the caller at the one moment it can still be said out loud: a minute without output
+    reads as a hang, and "518 types, 518 books" turns it into an understood wait."""
+
+    types: int      # distinct types to price
+    cached: int     # figures the local cache still vouches for
+    fetches: int    # order books that still have to be read
+
+
+@dataclass(frozen=True)
+class BookFigures:
+    """Cheapest ask and richest bid per type at one scope, and what reading them cost this run.
+
+    `meta` describes every figure in the maps together - their oldest `Last-Modified`, so a total is
+    never described as fresher than its stalest input, whether that input came off disk or off ESI.
+    A type absent from both maps is not worth zero; it is worth nothing ESI would say."""
+
+    min_sell: dict[int, float] = field(default_factory=dict)
+    max_buy: dict[int, float] = field(default_factory=dict)
+    meta: esi_mod.Meta = field(default_factory=esi_mod.Meta)
+    fetched: int = 0     # books this run asked ESI for, whether they answered or not
+    cached: int = 0      # types priced from the local cache instead of a request
+    failed: int = 0      # books that did not answer; their types stay unpriced and uncached
+
+    @property
+    def answered(self) -> int:
+        """Books that spoke, on disk or on the wire. An empty one still said something."""
+        return self.cached + self.fetched - self.failed
 
 @dataclass(frozen=True)
 class HistoryStats:
@@ -245,6 +311,38 @@ def _reduce(label: str, rows: Sequence[tuple[int | None, dict]], meta: esi_mod.M
     )
 
 
+def _scope_rows(rows: Sequence[dict], scope: Scope) -> list[dict]:
+    """The orders physically inside one scope.
+
+    ESI only ever answers per region, so `location_id`/`system_id` are filters applied here rather
+    than endpoints: the same regional rows have to read as "the price at Jita 4-4" or as "The Forge"
+    depending on what was asked. A station filter beats a system one because a hub scope carries both
+    ids and the narrower question is the one the user typed."""
+    if scope.location_id is not None:
+        return [row for row in rows if _id(row.get("location_id")) == scope.location_id]
+    if scope.system_id is not None:
+        return [row for row in rows if _id(row.get("system_id")) == scope.system_id]
+    return list(rows)
+
+
+def book_sides(rows: Sequence[dict]) -> tuple[float | None, float | None]:
+    """Cheapest ask and richest bid in one book.
+
+    A side with no orders stays None rather than 0.0: a missing sell side printed as zero reads as
+    "somebody is selling it for nothing", which is a different and very wrong statement."""
+    min_sell = max_buy = None
+    for row in rows:
+        price = _price(row.get("price")) if isinstance(row, dict) else None
+        if price is None:
+            continue
+        if row.get("is_buy_order"):
+            if max_buy is None or price > max_buy:
+                max_buy = price
+        elif min_sell is None or price < min_sell:
+            min_sell = price
+    return min_sell, max_buy
+
+
 def quote(client: esi_mod.Esi, type_id: int, scope: Scope) -> Quote:
     """One scope's book.
 
@@ -255,11 +353,7 @@ def quote(client: esi_mod.Esi, type_id: int, scope: Scope) -> Quote:
     filed at the scope, which is the honest reading of "the price at Jita 4-4".
     """
     rows, meta = client.get_meta(book_path(scope.region_id, type_id))
-    picked = rows
-    if scope.location_id is not None:
-        picked = [o for o in rows if _id(o.get("location_id")) == scope.location_id]
-    elif scope.system_id is not None:
-        picked = [o for o in rows if _id(o.get("system_id")) == scope.system_id]
+    picked = _scope_rows(rows, scope)
     return _reduce(scope.label, [(scope.region_id, o) for o in picked], meta)
 
 
@@ -381,6 +475,176 @@ def resolve_type(client: esi_mod.Esi, spec) -> tuple[int, str]:
 def resolve_region(client: esi_mod.Esi, spec) -> tuple[int, str]:
     """Region as (id, name) from a region id or an exact region name."""
     return _resolve(client, spec, "regions", "region")
+
+
+# ---------------------------------------------------------------------------
+# quote cache: what ESI's own expiry licenses believing
+# ---------------------------------------------------------------------------
+
+def figure_key(scope: Scope, type_id: int) -> str:
+    """The cache key for one figure: the scope's filter *and* the type.
+
+    Position carries the meaning - region, station, system, type - and `-` marks "this scope does
+    not filter on that". A hub scope reads one station's orders while a region scope reads the whole
+    region, so a Jita figure must never answer an Amarr question, nor a region-wide figure a station
+    one. Keying on the type alone would do exactly that."""
+    return ":".join(str(value) if value is not None else "-" for value in
+                    (scope.region_id, scope.location_id, scope.system_id, type_id))
+
+
+def quote_doc_path(cache_dir: str | None = None) -> str:
+    """Where the quote cache lives: `quotes.json` beside `names.json` and `types.json`."""
+    return os.path.join(cache_dir or paths.cache_dir(), QUOTE_DOC_NAME)
+
+
+def _stamp(value) -> float | None:
+    """An epoch stamp read back from a record; a bool is not a timestamp, and neither is text."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _parse_figure(value) -> CachedFigure | None:
+    """A cached record, or None when it is not one.
+
+    A record with no stated expiry is discarded rather than served: without `Expires` nothing says
+    how long its figures may still be called current, and "we hope it is fresh" is the one sentence
+    this tool never prints."""
+    if not isinstance(value, dict):
+        return None
+    expires = _stamp(value.get("expires"))
+    if expires is None:
+        return None
+    return CachedFigure(min_sell=_price(value.get("min_sell")), max_buy=_price(value.get("max_buy")),
+                        last_modified=_stamp(value.get("last_modified")), expires=expires)
+
+
+def _figure_record(figure: CachedFigure) -> dict:
+    """A record as written to disk - the same four fields `_parse_figure` accepts back."""
+    return {"min_sell": figure.min_sell, "max_buy": figure.max_buy,
+            "last_modified": figure.last_modified, "expires": figure.expires}
+
+
+def read_quote_cache(cache_dir: str | None = None) -> dict[str, CachedFigure]:
+    """quotes.json as key -> figure; unreadable, foreign or corrupt reads as empty.
+
+    Every record goes through `_parse_figure`, the same judgement a live payload gets, so a
+    half-written or hand-edited file costs a refetch of the affected keys instead of an
+    AttributeError in the middle of a valuation."""
+    try:
+        with open(quote_doc_path(cache_dir)) as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}     # absent, unreadable and unparseable are one thing here: nothing cached
+    if not isinstance(raw, dict) or raw.get("version") != QUOTE_CACHE_VERSION:
+        return {}
+    entries = raw.get("figures")
+    if not isinstance(entries, dict):
+        return {}
+    out: dict[str, CachedFigure] = {}
+    for key, value in entries.items():      # json gives back str keys, always
+        figure = _parse_figure(value)
+        if figure is not None:
+            out[key] = figure
+    return out
+
+
+def publish_figures(entries: Mapping[str, CachedFigure], cache_dir: str | None = None,
+                    now: float | None = None) -> None:
+    """Add this run's figures to quotes.json without losing anybody else's.
+
+    The re-read happens inside the lock on purpose, exactly as in `universe._publish`: a second
+    process valuing a different character may have cached other scopes since this one read the file,
+    and publishing our own view of the document would silently drop them. Anything already past its
+    stated expiry is dropped here instead of written back - it can never be served again, so keeping
+    it would only grow the file. Nothing is written when there is nothing to add."""
+    if not entries:
+        return
+    moment = time.time() if now is None else now
+    path = quote_doc_path(cache_dir)
+    with storage.file_lock(os.path.join(os.path.dirname(path) or ".", QUOTE_LOCK_NAME)):
+        stored = read_quote_cache(cache_dir)
+        stored.update(entries)
+        storage.atomic_write_json(path, {
+            "version": QUOTE_CACHE_VERSION,
+            "figures": {key: _figure_record(figure)
+                        for key, figure in stored.items() if figure.live_at(moment)},
+        })
+
+
+def _read_books(client: esi_mod.Esi, type_ids: Sequence[int], scope: Scope) -> dict[int, object]:
+    """One fan-out of regional books keyed by type id: `(rows, Meta)`, or that book's Exception.
+
+    A type missing from the answer reads as a failure rather than as an empty book - "nobody has
+    ordered it here" and "we never got an answer" are different statements, and only the first is
+    allowed to be cached."""
+    if not type_ids:
+        return {}
+    path_of = {type_id: book_path(scope.region_id, type_id) for type_id in type_ids}
+    answers = client.get_many_meta(list(path_of.values()))
+    return {type_id: answers.get(path_of[type_id]) for type_id in type_ids}
+
+
+def book_figures(client: esi_mod.Esi, type_ids: Iterable[int], scope: Scope, *,
+                 cache_dir: str | None = None, preflight=None,
+                 now: float | None = None) -> BookFigures:
+    """Cheapest ask and richest bid per type at one scope, reading only what disk cannot answer.
+
+    ESI regenerates a regional book on `BOOK_REFRESH_SECONDS`' cadence and says so in the response's
+    own `Expires`, so reusing the reduction until that stated moment is not staleness - it is the
+    freshness contract the endpoint publishes. Past it the entry is refetched, and those ids only,
+    which is what makes a second look at the same holding instant without ever showing a figure ESI
+    has already disowned.
+
+    A book that fails to answer leaves its type unpriced and out of the cache, so one timeout costs
+    a retry on the next run rather than five minutes of silence. Expiry is judged against the local
+    clock, exactly as `esi.Esi` judges its own in-process cache."""
+    wanted = sorted({int(ident) for ident in type_ids})
+    moment = time.time() if now is None else now
+    stored = read_quote_cache(cache_dir)
+    hits: dict[int, CachedFigure] = {}
+    misses: list[int] = []
+    for type_id in wanted:
+        entry = stored.get(figure_key(scope, type_id))
+        if entry is not None and entry.live_at(moment):
+            hits[type_id] = entry
+        else:
+            misses.append(type_id)
+    if preflight is not None:
+        preflight(Preflight(types=len(wanted), cached=len(hits), fetches=len(misses)))
+
+    min_sell: dict[int, float] = {}
+    max_buy: dict[int, float] = {}
+    for type_id, hit in hits.items():
+        if hit.min_sell is not None:
+            min_sell[type_id] = hit.min_sell
+        if hit.max_buy is not None:
+            max_buy[type_id] = hit.max_buy
+
+    metas = [hit.meta for hit in hits.values()]
+    learned: dict[str, CachedFigure] = {}
+    failed = 0
+    for type_id, answer in _read_books(client, misses, scope).items():
+        if not isinstance(answer, tuple):
+            failed += 1     # the Exception, or no answer at all: unpriced, and never cached
+            continue
+        payload, meta = answer
+        if not isinstance(payload, list):
+            failed += 1     # not the list of orders asked for, so no statement about the book
+            continue
+        low, high = book_sides(_scope_rows(payload, scope))
+        metas.append(meta)
+        if low is not None:
+            min_sell[type_id] = low
+        if high is not None:
+            max_buy[type_id] = high
+        if meta.expires is not None and meta.expires > moment:
+            learned[figure_key(scope, type_id)] = CachedFigure(
+                min_sell=low, max_buy=high, last_modified=meta.last_modified, expires=meta.expires)
+
+    publish_figures(learned, cache_dir=cache_dir, now=moment)
+    return BookFigures(min_sell=min_sell, max_buy=max_buy, meta=esi_mod.fold_meta(metas),
+                       fetched=len(misses), cached=len(hits), failed=failed)
 
 
 def format_age(seconds: float) -> str:

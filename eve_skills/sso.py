@@ -1,7 +1,8 @@
 """EVE SSO: OAuth2 authorization-code flow with PKCE (native app) plus token storage.
 
 Tokens and config live in ``paths.config_dir()`` - ``$XDG_CONFIG_HOME/eve-skills``
-(default ``~/.config/eve-skills``) on POSIX, ``%APPDATA%\\eve-skills`` on Windows.
+(default ``~/.config/eve-skills``) on POSIX, ``%LOCALAPPDATA%\\eve-skills\\config`` on
+Windows, which is deliberately local: a roaming profile would replicate live tokens.
 Register your application at https://developers.eveonline.com/applications with
 redirect URL http://localhost:8635/callback and the scopes below.
 """
@@ -43,6 +44,9 @@ OPTIONAL_SCOPES = {
     # say "your character lacks the Accountant/Trader role" instead of surfacing a bare 403.
     "corp-orders": ["esi-markets.read_corporation_orders.v1",
                     "esi-characters.read_corporation_roles.v1"],
+    # Not an asset scope, but inventory needs it: /universe/structures is the only way to name a
+    # citadel or engineering site, and without it a player's holdings sit in `structure <id>`.
+    "structures": ["esi-universe.read_structures.v1"],
 }
 
 
