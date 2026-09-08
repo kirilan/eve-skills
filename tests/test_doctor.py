@@ -11,7 +11,6 @@ import io
 import json
 import os
 import platform
-import shutil
 import socket
 import stat
 import subprocess
@@ -26,6 +25,8 @@ from pathlib import Path
 from unittest import mock
 
 from eve_skills import alphadata, cli, doctor, sso
+
+from tests.platform_contract import home_variables, posix_only
 
 ADA, VELA = 91000001, 91000002
 NOW = 1_800_000_000.0          # fixed clock: expiry and data age must not drift with reality
@@ -145,7 +146,9 @@ class DoctorTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = os.path.join(self.tmp.name, "home")   # fake, and below the throwaway tree
         patcher = mock.patch.dict(os.environ, {
-            "HOME": self.home,       # never a real home: no assertion can depend on who runs this
+            # HOME on POSIX, USERPROFILE on Windows - `expanduser` reads only one of them, so both
+            # are pinned or the runner's real profile leaks into every path and every `~` collapse.
+            **home_variables(self.home),   # never a real home: no assertion may depend on who runs this
             "XDG_CONFIG_HOME": os.path.join(self.tmp.name, "config"),
             "XDG_CACHE_HOME": os.path.join(self.tmp.name, "cache"),
             "XDG_DATA_HOME": os.path.join(self.tmp.name, "data"),
@@ -189,7 +192,7 @@ class DoctorTestCase(unittest.TestCase):
 
     def write_json(self, path: str, payload, mode: int = 0o600) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
         os.chmod(path, mode)
         return path
@@ -198,7 +201,7 @@ class DoctorTestCase(unittest.TestCase):
         """`watch-state.json` as the watchers write it; `doc` may be any text for a damaged file."""
         path = os.path.join(self.state_dir, "watch-state.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(doc if isinstance(doc, str) else json.dumps(doc))
         os.chmod(path, mode)
         return path
@@ -207,7 +210,7 @@ class DoctorTestCase(unittest.TestCase):
         """`events.jsonl`; a row that is not a dict is written verbatim as a damaged line."""
         path = os.path.join(self.state_dir, "events.jsonl")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(row if isinstance(row, str) else json.dumps(row))
                 fh.write("\n")
@@ -276,7 +279,17 @@ class OfflineReportTest(DoctorTestCase):
         report = self.report()
         self.assertEqual(0, report["exit_code"])
         self.assertEqual(0, report["summary"]["fail"])
-        self.assertEqual(0, report["summary"]["skip"])
+        skipped = sorted(c["name"] for c in report["checks"] if c["status"] == doctor.SKIP)
+        if doctor.paths.is_windows():
+            # Nothing about privacy is judgable from mode bits there, so the honest verdict is a
+            # SKIP that names the inherited ACL; `WindowsDoctorTest` pins that wording exactly.
+            self.assertEqual(["path.config", "path.data", "permissions.tokens"], skipped)
+            for name in skipped:
+                detail = self.check(report, name)["detail"]
+                self.assertIn("ACL", detail, name)
+                self.assertIn("mode bits", detail, name)
+        else:
+            self.assertEqual([], skipped)
         self.assertEqual("ok", self.check(report, "characters")["status"])
         self.assertEqual("ok", self.check(report, "config.client_id")["status"])
         self.assertEqual("ok", self.check(report, "data.alpha_caps")["status"])
@@ -298,14 +311,19 @@ class OfflineReportTest(DoctorTestCase):
         self.seed_sde(age_days=int(alphadata.STALE_DAYS) + 30, with_catalog=False)
         report = self.report()
         self.assertEqual(0, report["exit_code"])
-        self.assertEqual("warn", self.check(report, "permissions.tokens")["status"])
+        # A group-readable token store is only a warning where mode bits exist; on Windows the same
+        # file gets the documented ACL SKIP (`WindowsDoctorTest` pins its wording). Either way it
+        # must not turn the run into a failure. Judged by the branch under test, not by this host -
+        # `WindowsDoctorTest` runs these very checks with Windows injected on a POSIX machine.
+        self.assertEqual(doctor.SKIP if doctor.paths.is_windows() else "warn",
+                         self.check(report, "permissions.tokens")["status"])
         self.assertEqual("warn", self.check(report, "data.alpha_caps")["status"])
         self.assertIn("update-data", self.check(report, "data.alpha_caps")["hint"])
         self.assertEqual("warn", self.check(report, "data.skill_catalog")["status"])
 
     def test_corrupt_token_store_fails_without_echoing_the_file(self):
         path = self.write_json(os.path.join(self.config_dir, "tokens.json"), {})
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write('{"characters": {"1": {"access_token": "' + ACCESS_ADA + '"')  # truncated JSON
         report = self.report()
         self.assertEqual(1, report["exit_code"])
@@ -313,6 +331,9 @@ class OfflineReportTest(DoctorTestCase):
         self.assertEqual("fail", self.check(report, "characters")["status"])
         self.assertNotIn(ACCESS_ADA, doctor.render_text(report))
 
+    @posix_only("denying a read of the token store needs POSIX permission bits: chmod(0o000) on "
+                "Windows only sets the read-only attribute, so the file stays readable and the "
+                "unreadable verdict cannot be provoked there")
     def test_unreadable_token_store_fails(self):
         path = self.seed_store(make_record(ADA, "Ada Vane"))
         os.chmod(path, 0o000)
@@ -343,7 +364,7 @@ class OfflineReportTest(DoctorTestCase):
         self.seed_config()
         self.seed_store(make_record(ADA, "Ada Vane"))
         self.seed_sde()
-        with open(os.path.join(self.config_dir, "sp-history.jsonl"), "w") as fh:
+        with open(os.path.join(self.config_dir, "sp-history.jsonl"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": NOW - 3600, "char_id": ADA, "total_sp": 1000}) + "\n")
             fh.write("not a json row\n")
             fh.write(json.dumps({"ts": NOW - 60, "char_id": VELA, "total_sp": 2000}) + "\n")
@@ -454,14 +475,22 @@ class OfflineReportTest(DoctorTestCase):
         self.seed_store(make_record(ADA, "Ada Vane"), mode=0o644)
         self.seed_sde()
         report = self.report()
-        self.assertEqual("warn", self.check(report, "permissions.tokens")["status"])
-        self.assertEqual("warn", self.check(report, "config.file")["status"])
+        if doctor.paths.is_windows():
+            # There is nothing loose to warn about where the bits do not exist - the honest verdict
+            # is the documented ACL SKIP, and it still must not fail the run. `WindowsDoctorTest`
+            # owns the full wording; this keeps the invariant ("a file the OS cannot judge is never
+            # a blocker") true on both platforms instead of leaving a hole here.
+            for name in ("permissions.tokens", "config.file"):
+                self.assertEqual(doctor.SKIP, self.check(report, name)["status"], name)
+        else:
+            self.assertEqual("warn", self.check(report, "permissions.tokens")["status"])
+            self.assertEqual("warn", self.check(report, "config.file")["status"])
         self.assertEqual(0, report["exit_code"])
 
     def test_corrupt_config_file_fails(self):
         path = os.path.join(self.config_dir, "config.json")
         os.makedirs(self.config_dir, exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         self.seed_store(make_record(ADA, "Ada Vane"))
         report = self.report()
@@ -508,7 +537,7 @@ class OfflineReportTest(DoctorTestCase):
         # The default `now=None` path is what the CLI uses; ageing history against it
         # must produce a real check, not a crashed diagnostic.
         self.seed_healthy()
-        with open(os.path.join(self.config_dir, "sp-history.jsonl"), "w") as fh:
+        with open(os.path.join(self.config_dir, "sp-history.jsonl"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": time.time() - 86400, "char_id": ADA, "total_sp": 5_000_000}) + "\n")
         with contextlib.redirect_stdout(io.StringIO()):
             report = doctor.collect()
@@ -586,7 +615,9 @@ class WatchCoverageTest(DoctorTestCase):
         state = self.check(report, "watch.state")
         self.assertEqual("warn", state["status"])
         self.assertIn("corrupt", state["detail"])
-        self.assertIn("mv '", state["hint"])
+        # The move verb and its quoting are the running platform's own - `WindowsDoctorTest` pins
+        # the cmd form above - and what is fixed here is that a damaged state file gets a runnable one.
+        self.assertIn('move "' if doctor.paths.is_windows() else "mv '", state["hint"])
         self.assertEqual(0, report["exit_code"])
 
     def test_event_history_is_split_between_training_and_orders(self):
@@ -886,6 +917,13 @@ class HomePathTest(DoctorTestCase):
 
     def setUp(self):
         super().setUp()
+        # This class is the POSIX fallback layout - `$XDG_*` unset, everything under `~` - and the
+        # wording it pins (`~/.config`, `"$HOME/..."`, `mv`) is POSIX shell wording. It is driven
+        # through the product's own platform seam rather than skipped off-POSIX, so every assertion
+        # below still runs on every host; the Windows layout and cmd quoting are `WindowsDoctorTest`.
+        branch = mock.patch.object(doctor.paths, "is_windows", return_value=False)
+        branch.start()
+        self.addCleanup(branch.stop)
         patcher = mock.patch.dict(os.environ, {          # unset in the way the code reads it
             "XDG_CONFIG_HOME": "", "XDG_CACHE_HOME": "",
             "XDG_DATA_HOME": "", "XDG_STATE_HOME": "",
@@ -901,7 +939,7 @@ class HomePathTest(DoctorTestCase):
     def seed_corrupt_store(self) -> str:
         path = os.path.join(self.config_dir, "tokens.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write('{"characters": {"1": ')            # truncated: the store is corrupt
         return path
 
@@ -913,9 +951,13 @@ class HomePathTest(DoctorTestCase):
             self.assertNotIn(self.home, value)
         for rendered in (doctor.render_text(report), doctor.render_json(report)):
             self.assertNotIn(self.home, rendered)
-        self.assertIn("~/.config/eve-skills", doctor.render_text(report))
-        self.assertIn('"~/.config/eve-skills/tokens.json"', doctor.render_json(report))
-        self.assertIn('"~/.local/state/eve-skills/watch-state.json"', doctor.render_json(report))
+        # Built from separators, because the collapsed form follows the host's own: `~/.config/...`
+        # here, `~\.config\...` there - and JSON escapes a backslash, hence json.dumps.
+        self.assertIn(os.path.join("~", ".config", "eve-skills"), doctor.render_text(report))
+        self.assertIn(json.dumps(os.path.join("~", ".config", "eve-skills", "tokens.json")),
+                      doctor.render_json(report))
+        self.assertIn(json.dumps(os.path.join("~", ".local", "state", "eve-skills", "watch-state.json")),
+                      doctor.render_json(report))
 
     def test_a_configured_location_outside_the_home_is_printed_as_it_is(self):
         outside = os.path.join(self.tmp.name, "srv", "eve-config")   # the operator's own choice
@@ -925,7 +967,10 @@ class HomePathTest(DoctorTestCase):
         self.assertEqual(os.path.join(outside, "eve-skills"), self.check(report, "path.config")["path"])
         self.assertEqual(os.path.join(outside, "eve-skills", "tokens.json"),
                          self.check(report, "tokens.store")["path"])
-        self.assertNotIn('"~/.config/eve-skills', doctor.render_json(report))
+        # The pinned config location is the operator's own choice, so it may not be collapsed into
+        # `~` even though the other three homes still are. Spelled with this host's separator.
+        self.assertEqual([], [p for key, p in strings(report)
+                              if key == "path" and p.startswith(os.path.join("~", ".config"))])
 
     def test_a_directory_beside_the_home_is_not_collapsed_into_it(self):
         sibling = os.path.join(self.tmp.name, "home2", "config")     # $HOME is <tmp>/home
@@ -935,13 +980,13 @@ class HomePathTest(DoctorTestCase):
         self.assertNotIn("~2", doctor.render_json(report))
 
     def test_home_itself_and_an_unresolvable_or_root_home(self):
-        with mock.patch.dict(os.environ, {"HOME": "/tmp/x/home"}):
+        with mock.patch.dict(os.environ, home_variables("/tmp/x/home")):
             self.assertEqual("~", doctor._display_path("/tmp/x/home"))
             self.assertEqual("~/.config/eve-skills/tokens.json",
                              doctor._display_path("/tmp/x/home/.config/eve-skills/tokens.json"))
             self.assertEqual("/tmp/x/home2/tokens.json", doctor._display_path("/tmp/x/home2/tokens.json"))
         for unusable in ("/", "", "~"):   # no home, or one that would rewrite every absolute path
-            with mock.patch.dict(os.environ, {"HOME": unusable}):
+            with mock.patch.dict(os.environ, home_variables(unusable)):
                 self.assertEqual("/tmp/x/home/tokens.json",
                                  doctor._display_path("/tmp/x/home/tokens.json"))
                 self.assertNotIn("~", str(doctor._mask_home(["/tmp/x/home/tokens.json"])))
@@ -953,7 +998,8 @@ class HomePathTest(DoctorTestCase):
                               env={**os.environ, "HOME": self.home})
         self.assertEqual(0, done.returncode, f"{command}\n{done.stderr}")
 
-    @unittest.skipUnless(shutil.which("bash"), "needs a POSIX shell to paste the hint into")
+    @posix_only("the hint is executed by bash, and a POSIX `$HOME/...` command means nothing to "
+                "cmd; Git for Windows puts a bash on PATH, so `which bash` is not a sufficient guard")
     def test_a_hint_can_be_pasted_into_a_shell_and_actually_runs(self):
         path = self.seed_corrupt_store()
         self.seed_watch_state("{not json")
@@ -972,13 +1018,15 @@ class HomePathTest(DoctorTestCase):
         self.assertFalse(os.path.exists(path))
         self.assertTrue(os.path.exists(f"{path}.bak"))
 
-    @unittest.skipUnless(shutil.which("bash"), "needs a POSIX shell to paste the hint into")
+    @posix_only("the hint is executed by bash, and a POSIX single-quoted absolute path means "
+                "nothing to cmd; Git for Windows puts a bash on PATH, so `which bash` is not a "
+                "sufficient guard")
     def test_a_hint_for_a_location_outside_the_home_keeps_the_runnable_absolute_form(self):
         outside = os.path.join(self.tmp.name, "srv", "eve-config")
         path = os.path.join(outside, "eve-skills", "tokens.json")
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": outside}):
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 fh.write('{"characters": {"1": ')
             report = self.report()
         hint = self.check(report, "tokens.store")["hint"]
@@ -987,7 +1035,7 @@ class HomePathTest(DoctorTestCase):
         self.assertTrue(os.path.exists(f"{path}.bak"))
 
     def test_the_shell_form_expands_home_and_leaves_anything_else_alone(self):
-        with mock.patch.dict(os.environ, {"HOME": "/tmp/x/home"}):
+        with mock.patch.dict(os.environ, home_variables("/tmp/x/home")):
             self.assertEqual('"$HOME"', doctor._shell_path("/tmp/x/home"))
             self.assertEqual('"$HOME/.config/eve-skills/tokens.json"',
                              doctor._shell_path("/tmp/x/home/.config/eve-skills/tokens.json"))
@@ -1006,7 +1054,7 @@ class HomePathTest(DoctorTestCase):
                 self.assertNotIn(secret, rendered)
         self.assertIn(doctor.REDACTED, doctor.render_text(report))
         paths = [value for key, value in strings(report) if key == "path" and isinstance(value, str)]
-        self.assertTrue([p for p in paths if p.startswith("~/")], "expected tilde-relative paths")
+        self.assertTrue([p for p in paths if p.startswith("~" + os.sep)], "expected tilde-relative paths")
         self.assertEqual([], [p for p in paths if doctor.REDACTED in p])
 
 
@@ -1052,7 +1100,7 @@ class ReadOnlyTest(DoctorTestCase):
         code, _ = self.cli("doctor")
         self.assertEqual(0, code)
         self.assertEqual(before, self.snapshot())
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             self.assertNotIn("characters", json.load(fh))  # still the single-record layout
 
 
@@ -1063,8 +1111,13 @@ class CliSurfaceTest(DoctorTestCase):
         self.assertEqual(0, code)
         self.assertEqual(0, json.loads(text)["exit_code"])
 
+    @posix_only("an unreadable token store is a POSIX mode-bit condition: chmod(0o000) on Windows "
+                "only sets the read-only attribute, so the store stays readable and no failing "
+                "report can be provoked that way")
+    def test_json_exit_code_follows_an_unreadable_store(self):
+        self.seed_healthy()
         os.chmod(os.path.join(self.config_dir, "tokens.json"), 0o000)
-        if os.geteuid() != 0:
+        if os.geteuid() != 0:      # root reads anything, so there would be nothing to observe
             code, text = self.cli("doctor", "--json")
             self.assertEqual(1, code)
             self.assertEqual(1, json.loads(text)["exit_code"])
@@ -1131,7 +1184,7 @@ class WindowsDoctorTest(DoctorTestCase):
 
     def test_a_broken_store_still_fails_with_a_move_cmd_can_run(self):
         path = self.seed_store(make_record(ADA, "Ada Vane"))
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write('{"characters": {"1": ')                    # truncated: not valid JSON
         state = self.seed_watch_state("this is not JSON either")
         report = self.report()
@@ -1145,7 +1198,7 @@ class WindowsDoctorTest(DoctorTestCase):
             self.assertFalse(hint.startswith("mv "), f"{check['name']} suggests a POSIX verb")
 
     def test_the_shell_form_names_what_cmd_expands(self):
-        with mock.patch.dict(os.environ, {"HOME": "/tmp/x/home"}):
+        with mock.patch.dict(os.environ, home_variables("/tmp/x/home")):
             self.assertEqual('"%USERPROFILE%"', doctor._shell_path("/tmp/x/home"))
             self.assertEqual('"%USERPROFILE%/.config/eve-skills/tokens.json"',
                              doctor._shell_path("/tmp/x/home/.config/eve-skills/tokens.json"))

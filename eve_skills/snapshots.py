@@ -38,7 +38,7 @@ def record(character_id: int, total_sp: int):
     cutoff = time.time() - RETENTION_DAYS * 86400
     with storage.file_lock(os.path.join(paths.config_dir(), "sp-history.lock")):
         try:
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 kept = [ln for ln in fh if _recent(ln, cutoff)]
         except FileNotFoundError:
             kept = []
@@ -49,7 +49,7 @@ def record(character_id: int, total_sp: int):
 def load() -> list[dict]:
     rows = []
     try:
-        with open(history_file(create=False)) as fh:
+        with open(history_file(create=False), encoding="utf-8") as fh:
             for line in fh:
                 try:
                     row = json.loads(line)

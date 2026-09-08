@@ -465,10 +465,10 @@ class QuoteCacheTestCase(QuoteCacheFixture, MarketTestCase):
         """Rewrite one record as one ESI has already disowned - the state a warm cache reaches five
         minutes later, and the reason a second run cannot simply trust whatever it finds."""
         path = market.quote_doc_path(self.cache)
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
         doc["figures"][market.figure_key(scope, type_id)]["expires"] = self.now() - 1.0
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)
 
     def test_a_warm_run_reads_no_book_and_reports_the_same_figures(self):
@@ -567,13 +567,13 @@ class QuoteCacheTestCase(QuoteCacheFixture, MarketTestCase):
                   '{"version": 1, "figures": {"k": {"min_sell": 1.0}}}']
         for body in bodies:
             with self.subTest(body=body):
-                with open(market.quote_doc_path(self.cache), "w") as fh:
+                with open(market.quote_doc_path(self.cache), "w", encoding="utf-8") as fh:
                     fh.write(body)
                 figures = market.book_figures(self.process(), [34], scope, cache_dir=self.cache)
                 self.assertEqual((figures.fetched, figures.cached), (1, 0))
                 self.assertAlmostEqual(figures.max_buy[34], 4.30, places=9)
         # Publishing over a broken document leaves a readable one behind rather than joining it.
-        with open(market.quote_doc_path(self.cache)) as fh:
+        with open(market.quote_doc_path(self.cache), encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["version"], market.QUOTE_CACHE_VERSION)
 
     def test_a_figure_with_no_stated_expiry_is_never_served(self):
@@ -582,7 +582,7 @@ class QuoteCacheTestCase(QuoteCacheFixture, MarketTestCase):
         self.serve_books_with_expiry()
         scope = market.Scope(MARKET_FORGE, "The Forge")
         key = market.figure_key(scope, 34)
-        with open(market.quote_doc_path(self.cache), "w") as fh:
+        with open(market.quote_doc_path(self.cache), "w", encoding="utf-8") as fh:
             json.dump({"version": market.QUOTE_CACHE_VERSION,
                        "figures": {key: {"min_sell": 1.0, "max_buy": 99.0}}}, fh)
         figures = market.book_figures(self.process(), [34], scope, cache_dir=self.cache)
@@ -597,7 +597,7 @@ class QuoteCacheTestCase(QuoteCacheFixture, MarketTestCase):
         self.seed(scope, 36, age=1000, ttl=-60.0)      # already expired when this run starts
         self.seed(scope, MARKET_UNTRADED, age=5)       # somebody else's live figure
         market.book_figures(self.process(), [34], scope, cache_dir=self.cache)
-        with open(market.quote_doc_path(self.cache)) as fh:
+        with open(market.quote_doc_path(self.cache), encoding="utf-8") as fh:
             figures = json.load(fh)["figures"]
         self.assertNotIn(market.figure_key(scope, 36), figures)
         self.assertIn(market.figure_key(scope, MARKET_UNTRADED), figures)
@@ -697,10 +697,10 @@ class InventoryQuoteCacheTests(QuoteCacheFixture, MarketTestCase):
         self.assertEqual((code, len(self.book_calls())), (0, 5))
         scope = self.hub_scope()
         path = market.quote_doc_path()
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
         doc["figures"][market.figure_key(scope, 34)]["expires"] = self.now() - 1.0
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)
         code, _out, err = self.env.run(["inventory", "--value-at", "jita"])
         self.assertEqual(code, 0)

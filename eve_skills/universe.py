@@ -173,7 +173,7 @@ def read_doc(cache_dir: str | None = None) -> dict:
     doc = _empty_doc()
     path = doc_path(cache_dir)
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except (FileNotFoundError, ValueError):
         return doc

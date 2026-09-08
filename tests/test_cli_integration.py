@@ -11,6 +11,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from eve_skills import cli, sso
@@ -20,6 +24,8 @@ from tests.fake_esi import (
     INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY, SKILL_UNSTARTED, SKILL_WIDE,
     FakeEsiEnv,
 )
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class CommandTestCase(unittest.TestCase):
@@ -567,6 +573,46 @@ class DispatchSurfaceTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(SystemExit) as caught:
                 cli.main([command, "--help"])
             self.assertEqual(caught.exception.code, 0)
+
+
+class ConsoleEncodingTests(unittest.TestCase):
+    """A redirected stdout is not a console, and on Windows it encodes with the ANSI code page.
+
+    Everything this tool writes is UTF-8 - the same bytes its files hold - so a character name
+    outside cp1252 has to print anyway rather than abort the command after all its work was done.
+    The condition is forced with ``PYTHONIOENCODING`` instead of skipped: cp1252 is available on
+    every platform, and this is precisely what ``eve-skills events > out.txt`` is on Windows."""
+
+    NAME = "ジェーガー・Ölvsson"     # invented; the CJK half has no byte in cp1252 at all
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="eve-skills-console-")
+        self.addCleanup(self.tmp.cleanup)
+        self.state_home = os.path.join(self.tmp.name, "state")
+        state_dir = os.path.join(self.state_home, "eve-skills")
+        os.makedirs(state_dir, exist_ok=True)
+        row = {"id": "evt-1", "ts": 1_800_000_000.0, "kind": "training_finished",
+               "character_id": ADA.character_id, "character_name": self.NAME,
+               "skill_id": SKILL_NAV, "skill_name": "Navigation", "finished_level": 5}
+        with open(os.path.join(state_dir, "events.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+    def run_cli(self, *args: str, io_encoding: str | None = None):
+        env = {**os.environ, "PYTHONPATH": REPO_ROOT, "XDG_STATE_HOME": self.state_home,
+               "XDG_CONFIG_HOME": os.path.join(self.tmp.name, "config")}
+        for var in ("PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONIOENCODING"):
+            env.pop(var, None)       # the child answers for its own default encoding
+        if io_encoding:
+            env["PYTHONIOENCODING"] = io_encoding
+        return subprocess.run([sys.executable, "-m", "eve_skills", *args], env=env,
+                              capture_output=True, timeout=120)
+
+    def test_a_name_outside_the_console_code_page_still_prints(self):
+        proc = self.run_cli("events", io_encoding="cp1252")
+        self.assertEqual(0, proc.returncode, proc.stderr.decode("utf-8", "replace"))
+        # Decodes as UTF-8 and still names the character: no crash, no lossy replacement.
+        self.assertIn(self.NAME, proc.stdout.decode("utf-8"))
+        self.assertNotIn("\ufffd", proc.stdout.decode("utf-8"))
 
 
 if __name__ == "__main__":

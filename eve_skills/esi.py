@@ -41,7 +41,7 @@ class EsiError(RuntimeError):
 
 def _read_name_cache(path: str) -> dict[int, str]:
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return {int(k): v for k, v in json.load(fh).items()}
     except (FileNotFoundError, ValueError):
         return {}

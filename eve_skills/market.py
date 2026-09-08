@@ -532,7 +532,7 @@ def read_quote_cache(cache_dir: str | None = None) -> dict[str, CachedFigure]:
     half-written or hand-edited file costs a refetch of the affected keys instead of an
     AttributeError in the middle of a valuation."""
     try:
-        with open(quote_doc_path(cache_dir)) as fh:
+        with open(quote_doc_path(cache_dir), encoding="utf-8") as fh:
             raw = json.load(fh)
     except (OSError, ValueError):
         return {}     # absent, unreadable and unparseable are one thing here: nothing cached

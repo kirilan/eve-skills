@@ -122,7 +122,7 @@ class SnapshotTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def write_rows(self, rows):
-        with open(os.path.join(self.tmp.name, "sp-history.jsonl"), "a") as fh:
+        with open(os.path.join(self.tmp.name, "sp-history.jsonl"), "a", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row) + "\n")
 
@@ -145,7 +145,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_corrupt_lines_are_skipped(self):
         path = os.path.join(self.tmp.name, "sp-history.jsonl")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("not json\n")
             fh.write('{"ts": 1}\n')  # missing keys
             fh.write(json.dumps({"ts": 5.0, "char_id": 3, "total_sp": 77}) + "\n")
@@ -353,7 +353,7 @@ class RateGuardTests(unittest.TestCase):
     def _rate(self, first_sp, last_sp):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "config_dir", return_value=tmp):
             base = NOW.timestamp()
-            with open(os.path.join(tmp, "sp-history.jsonl"), "w") as fh:
+            with open(os.path.join(tmp, "sp-history.jsonl"), "w", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": base - 7200, "char_id": 1, "total_sp": first_sp}) + "\n")
                 fh.write(json.dumps({"ts": base - 3600, "char_id": 1, "total_sp": last_sp}) + "\n")
             ctx = {"now": NOW, "token": {"character_id": 1}, "queue": []}
@@ -395,7 +395,7 @@ class NameCacheReuseTests(unittest.TestCase):
             esi.resolve_names(first, {1}, cache_dir=tmp)
             second = Client()
             self.assertEqual(esi.resolve_names(second, {1, 2}, cache_dir=tmp), {1: "name 1", 2: "name 2"})
-            with open(os.path.join(tmp, "names.json")) as fh:
+            with open(os.path.join(tmp, "names.json"), encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh), {"1": "name 1", "2": "name 2"})
         self.assertEqual(first.fetched, [[1]])   # the cached id was never re-resolved
 

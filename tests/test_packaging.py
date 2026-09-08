@@ -35,6 +35,8 @@ from pathlib import Path
 
 from eve_skills import __version__, alphadata
 
+from tests.platform_contract import home_variables
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 LICENSE_PATH = REPO_ROOT / "LICENSE"
@@ -57,6 +59,17 @@ SOURCE_MODULES = sorted(p.name for p in (REPO_ROOT / "eve_skills").glob("*.py"))
 SDE_DATA_FILES = list(alphadata.DATA_FILES)
 
 SCRIPTS_DIR = "Scripts" if os.name == "nt" else "bin"
+
+
+def _exe(name: str) -> str:
+    """The file name of a virtualenv entry point here.
+
+    A POSIX venv installs ``bin/eve-skills`` as a script; Windows installs ``Scripts\\eve-skills.exe``,
+    a real launcher binary, because the OS will not run a shebang line. Naming it is not cosmetic:
+    passing an extension-less path happens to work because CreateProcess appends ``.exe`` itself, so
+    a missing launcher on Windows would surface as 'command not found' for a name that does not exist
+    rather than as this test failing to find what the wheel installed."""
+    return name + (".exe" if os.name == "nt" else "")
 
 
 def _subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -137,7 +150,7 @@ def _installed_venv() -> Path:
                             capture_output=True, text=True, timeout=900)
     if create.returncode != 0:
         raise unittest.SkipTest(f"cannot create a virtualenv here: {create.stderr.strip()}")
-    install = subprocess.run([str(root / SCRIPTS_DIR / "python"), "-m", "pip", "install",
+    install = subprocess.run([str(root / SCRIPTS_DIR / _exe("python")), "-m", "pip", "install",
                               "--no-index", "--no-deps", "--disable-pip-version-check", str(wheel)],
                              env=_subprocess_env(), capture_output=True, text=True, timeout=900)
     if install.returncode != 0:
@@ -170,7 +183,7 @@ class MetadataTests(unittest.TestCase):
     def test_readme_is_declared_and_present(self):
         readme = REPO_ROOT / PROJECT["readme"]
         self.assertTrue(readme.is_file(), f"declared readme {readme.name} is missing")
-        self.assertIn(f"# {DIST_NAME}", readme.read_text())
+        self.assertIn(f"# {DIST_NAME}", readme.read_text(encoding="utf-8"))
 
     def test_version_has_one_source_of_truth(self):
         # A second version literal here would ship metadata disagreeing with `eve-skills --version`.
@@ -289,33 +302,43 @@ class InstalledEntrypointTests(unittest.TestCase):
         cls.cwd = _workdir() / "outside"
         cls.cwd.mkdir(parents=True, exist_ok=True)
         cls.env = _subprocess_env({
-            "HOME": str(home),
+            **home_variables(str(home)),
             "XDG_CONFIG_HOME": str(home / "config"),
             "XDG_CACHE_HOME": str(home / "cache"),
             "XDG_DATA_HOME": str(home / "data"),
+            "XDG_STATE_HOME": str(home / "state"),
+            # The XDG pins win on every platform, but a Windows runner also has a real APPDATA and
+            # LOCALAPPDATA for the CI account; pinning them keeps an installed run out of it even if
+            # resolution changes.
+            "APPDATA": str(home / "roaming"),
+            "LOCALAPPDATA": str(home / "local"),
         })
 
     def run_installed(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        # The CLI's own output is UTF-8 on every platform (see cli._use_utf8_streams), so the reader
+        # says so instead of trusting the console code page.
         return subprocess.run(args, cwd=self.cwd, env=self.env, capture_output=True,
-                              text=True, timeout=300)
+                              text=True, encoding="utf-8", timeout=300)
 
     def test_console_script_and_module_entrypoint_report_the_same_version(self):
-        script = self.run_installed([str(self.venv / SCRIPTS_DIR / CONSOLE_SCRIPT), "--version"])
-        module = self.run_installed([str(self.venv / SCRIPTS_DIR / "python"), "-m", "eve_skills", "--version"])
+        script = self.run_installed([str(self.venv / SCRIPTS_DIR / _exe(CONSOLE_SCRIPT)), "--version"])
+        module = self.run_installed([str(self.venv / SCRIPTS_DIR / _exe("python")), "-m", "eve_skills",
+                                     "--version"])
         self.assertEqual((script.returncode, module.returncode), (0, 0),
                          f"console script: {script.stderr}\nmodule: {module.stderr}")
         self.assertEqual(script.stdout, module.stdout)
         self.assertEqual(script.stdout.strip(), f"{DIST_NAME} {__version__}")
 
     def test_console_script_and_module_entrypoint_share_the_help_surface(self):
-        script = self.run_installed([str(self.venv / SCRIPTS_DIR / CONSOLE_SCRIPT), "--help"])
-        module = self.run_installed([str(self.venv / SCRIPTS_DIR / "python"), "-m", "eve_skills", "--help"])
+        script = self.run_installed([str(self.venv / SCRIPTS_DIR / _exe(CONSOLE_SCRIPT)), "--help"])
+        module = self.run_installed([str(self.venv / SCRIPTS_DIR / _exe("python")), "-m", "eve_skills",
+                                     "--help"])
         self.assertEqual((script.returncode, module.returncode), (0, 0))
         self.assertEqual(script.stdout, module.stdout)
         self.assertIn("usage: eve-skills", script.stdout)
 
     def test_installed_copy_serves_the_bundled_sde_data(self):
-        proc = self.run_installed([str(self.venv / SCRIPTS_DIR / CONSOLE_SCRIPT), "doctor", "--json"])
+        proc = self.run_installed([str(self.venv / SCRIPTS_DIR / _exe(CONSOLE_SCRIPT)), "doctor", "--json"])
         report = json.loads(proc.stdout)
         self.assertEqual(report["versions"]["package"], __version__)
 

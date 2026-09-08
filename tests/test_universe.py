@@ -136,13 +136,13 @@ class UniverseTestCase(unittest.TestCase):
         return [requested for _, requested in out]
 
     def doc(self) -> dict:
-        with open(universe.doc_path()) as fh:
+        with open(universe.doc_path(), encoding="utf-8") as fh:
             return json.load(fh)
 
     def write_doc(self, payload) -> None:
         path = universe.doc_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(payload if isinstance(payload, str) else json.dumps(payload))
 
 
@@ -409,7 +409,7 @@ class PlaceKindTests(UniverseTestCase):
         for batch in self.names_batches():
             self.assertNotIn(CITADEL, batch)
             self.assertTrue(all(i <= universe.INT32_MAX for i in batch), batch)
-        with open(os.path.join(os.path.dirname(universe.doc_path()), "names.json")) as fh:
+        with open(os.path.join(os.path.dirname(universe.doc_path()), "names.json"), encoding="utf-8") as fh:
             self.assertNotIn(str(CITADEL), json.load(fh))
 
     def test_readable_structure_names_itself_and_carries_its_system(self):

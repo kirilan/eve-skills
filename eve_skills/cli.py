@@ -1769,7 +1769,33 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars, "summa
             "events": cmd_events, "market": cmd_market, "orders": cmd_orders}
 
 
+def _use_utf8_streams() -> None:
+    """Make our own output encoding-independent, whatever the console was configured with.
+
+    Everything this tool writes is UTF-8: the token store, the event history, ESI's JSON and the
+    ``--json`` reports that round-trip it. A character name is whatever the player typed and EVE
+    accounts are global, so one legitimately contains CJK or Cyrillic - and a Windows stdout that
+    is not a console (piped to another program, redirected to a file, captured by CI) encodes with
+    the ANSI code page, cp1252 on an English install, where those characters do not exist. The
+    command then did all its work and failed on the printing: ``UnicodeEncodeError`` and exit 1 for
+    a report that was fine. An interactive Windows console already speaks UTF-8 (PEP 528), so this
+    changes nothing for a person at a keyboard; it only stops the redirect from corrupting the run.
+
+    Streams with no ``reconfigure`` - a test's ``StringIO``, an already-replaced stdout - are left
+    exactly as they were found.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):     # closed, detached, or not a text stream after all
+            pass
+
+
 def main(argv=None):
+    _use_utf8_streams()      # before parsing: an argparse usage error is output too
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None or args.command == "skills":

@@ -44,7 +44,7 @@ def _read(name: str) -> dict:
     for base in (Path(paths.data_dir()), PACKAGE_DATA_DIR):
         candidate = base / name
         if candidate.is_file():
-            with open(candidate) as fh:
+            with open(candidate, encoding="utf-8") as fh:
                 return json.load(fh)
     raise FileNotFoundError(f"{name} not found in {paths.data_dir()} or {PACKAGE_DATA_DIR}")
 

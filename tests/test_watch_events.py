@@ -389,7 +389,8 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(watchstate.load_state(), watchstate.empty_state())
         self.assertEqual(watchstate.load_events(), ([], 0))
         self.assertFalse(os.path.exists(self.state_home))
-        self.assertTrue(watchstate.state_file(create=False).endswith("eve-skills/watch-state.json"))
+        self.assertTrue(watchstate.state_file(create=False).endswith(
+            os.path.join("eve-skills", "watch-state.json")))
 
     def test_commit_persists_and_restart_does_not_reannounce(self):
         training = [obs(items=[item(SKILL_NAV, 2, "training", "F-NAV")])]
@@ -397,10 +398,10 @@ class PersistenceTests(unittest.TestCase):
         settled = [obs(trained={SKILL_NAV: 2})]
         events = watchstate.commit(settled, now_ts=T0 + 60)
         self.assertEqual([e.kind for e in events], ["training_finished", "queue_empty"])
-        with open(watchstate.state_file(create=False)) as fh:
+        with open(watchstate.state_file(create=False), encoding="utf-8") as fh:
             state_doc = json.load(fh)
         self.assertEqual(state_doc["version"], watchstate.SCHEMA_VERSION)
-        with open(watchstate.events_file(create=False)) as fh:
+        with open(watchstate.events_file(create=False), encoding="utf-8") as fh:
             self.assertEqual(len([ln for ln in fh if ln.strip()]), 2)
         # a restarted (or second) watcher replays the same poll and claims nothing
         self.assertEqual(watchstate.commit(settled, now_ts=T0 + 120), [])
@@ -410,21 +411,21 @@ class PersistenceTests(unittest.TestCase):
         watchstate.commit(training, now_ts=T0)
         # simulate a watcher that appended the events but died before claiming state:
         _, pending = watchstate.observe(watchstate.load_state(), [obs(trained={SKILL_NAV: 2})], T0 + 60)
-        with open(watchstate.events_file(create=False), "a") as fh:
+        with open(watchstate.events_file(create=False), "a", encoding="utf-8") as fh:
             for ev in pending:
                 fh.write(json.dumps(ev.to_json()) + "\n")
         replayed = watchstate.commit([obs(trained={SKILL_NAV: 2})], now_ts=T0 + 61)
         # the transition was already recorded, so the replay must announce nothing: a returned
         # event is what rings the bell and fires notify-send
         self.assertEqual(replayed, [])
-        with open(watchstate.events_file(create=False)) as fh:
+        with open(watchstate.events_file(create=False), encoding="utf-8") as fh:
             ids = [json.loads(ln)["id"] for ln in fh if ln.strip()]
         self.assertEqual(sorted(ids), sorted(e.id for e in pending))         # recorded exactly once
 
     def test_corrupt_history_lines_are_skipped_and_counted(self):
         watchstate.commit([obs(items=[item(SKILL_NAV, 2, "training", "F-NAV")])], now_ts=T0)
         watchstate.commit([obs(trained={SKILL_NAV: 2})], now_ts=T0 + 60)
-        with open(watchstate.events_file(create=False), "a") as fh:
+        with open(watchstate.events_file(create=False), "a", encoding="utf-8") as fh:
             fh.write("garbage, not json\n")
             fh.write(json.dumps({"kind": "training_finished"}) + "\n")   # missing required fields
         rows, skipped = watchstate.load_events()
@@ -453,7 +454,7 @@ class PersistenceTests(unittest.TestCase):
         """)
         claimed = self._spawn_children(child, [[str(T0 + 60)]] * 3)
         self.assertEqual(sum(claimed), 2, f"three racing watchers claimed {claimed} events")
-        with open(watchstate.events_file(create=False)) as fh:
+        with open(watchstate.events_file(create=False), encoding="utf-8") as fh:
             ids = [json.loads(ln)["id"] for ln in fh if ln.strip()]
         self.assertEqual(len(ids), 2)
         self.assertEqual(len(set(ids)), 2)
@@ -493,7 +494,7 @@ class PersistenceTests(unittest.TestCase):
                   "character_id": ADA.character_id, "character_name": ADA.name, "skill_id": SKILL_NAV,
                   "skill_name": "Navigation", "finished_level": 2, "finish_date": "F-NAV"}
         watchstate.commit([obs(items=[item(SKILL_NAV, 2, "training", "F-NAV")])], now_ts=T0)
-        with open(watchstate.events_file(create=False), "a") as fh:
+        with open(watchstate.events_file(create=False), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(legacy) + "\n")
         rows, skipped = watchstate.load_events()
         self.assertEqual(skipped, 0)
@@ -575,7 +576,7 @@ class WatchCliTestCase(WatchLoopMixin, unittest.TestCase):
         self.run_watch(1)
         blob = ""
         for name in ("watch-state.json", "events.jsonl"):
-            with open(os.path.join(self.env.state_home, "eve-skills", name)) as fh:
+            with open(os.path.join(self.env.state_home, "eve-skills", name), encoding="utf-8") as fh:
                 blob += fh.read()
         for secret in (ADA.token, VELA.token, "access_token", "refresh_token", "client_id"):
             self.assertNotIn(secret, blob)
@@ -691,7 +692,10 @@ class WatchClearTests(unittest.TestCase):
         return out.getvalue()
 
     def test_posix_terminal_gets_the_real_clear(self):
-        text = self.frames(2, tty=True)
+        # The unconditional-clear branch is the non-Windows one, so it is selected through the
+        # product's own seam: on a Windows runner stdout may be a pipe with no VT mode to set.
+        with mock.patch.object(cli.paths, "is_windows", return_value=False):
+            text = self.frames(2, tty=True)
         self.assertIn("\x1b[H\x1b[2J", text)
         self.assertNotIn("-" * 72, text)
 
@@ -901,7 +905,7 @@ class EventsCommandTests(unittest.TestCase):
 
     def test_corrupt_lines_warn_without_losing_the_rest(self):
         self.seed()
-        with open(watchstate.events_file(create=False), "a") as fh:
+        with open(watchstate.events_file(create=False), "a", encoding="utf-8") as fh:
             fh.write("this is not json\n")
         code, out, err = self.env.run(["events", "--json"])
         self.assertEqual(code, 0)

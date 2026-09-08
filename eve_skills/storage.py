@@ -232,37 +232,67 @@ def _create_temp(path: str, private: bool) -> tuple[int, str]:
     raise RuntimeError(f"could not create a temporary file next to {path}")
 
 
-# ``os.replace`` is atomic on both platforms, but on Windows it raises PermissionError
-# while any other process merely holds the destination open - a reader in a second
-# eve-skills process is enough. Retry briefly before admitting defeat; POSIX has no such
-# restriction, so on POSIX this loop always takes its first iteration and the retry is
-# dead code there. The budget (8 attempts, 0.02s doubling to 0.25s) is about a second:
-# long enough for a reader or an antivirus scan to let go, short enough that a
-# genuinely wedged destination does not hang the CLI.
-_REPLACE_ATTEMPTS = 8
-_REPLACE_DELAY = 0.02
-_REPLACE_DELAY_CEILING = 0.25
+# ``os.replace`` and ``os.remove`` are atomic on both platforms, but on Windows either one raises
+# PermissionError while any other process merely holds the target open - a reader in a second
+# eve-skills process is enough, and so is the scan Windows runs on a file that just changed. Retry
+# briefly before admitting defeat; POSIX has no such restriction, so on POSIX these loops always take
+# their first iteration and the retry is dead code there. The budget (8 attempts, 0.02s doubling to
+# 0.25s) is about a second: long enough for a reader or a scan to let go, short enough that a
+# genuinely wedged file does not hang the CLI.
+_SHARE_ATTEMPTS = 8
+_SHARE_DELAY = 0.02
+_SHARE_DELAY_CEILING = 0.25
+
+
+def _tolerate_sharing(operation, *args) -> None:
+    """``operation(*args)``, retrying a Windows sharing violation that clears on its own."""
+    delay = _SHARE_DELAY
+    for attempt in range(1, _SHARE_ATTEMPTS + 1):
+        try:
+            operation(*args)
+            return
+        except PermissionError:
+            if attempt == _SHARE_ATTEMPTS:
+                raise  # the original error, unwrapped: the window did not clear
+            time.sleep(delay)
+            delay = min(delay * 2, _SHARE_DELAY_CEILING)
 
 
 def _replace(src: str, dst: str) -> None:
     """``os.replace``, tolerating a Windows sharing violation that clears on its own."""
-    delay = _REPLACE_DELAY
-    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == _REPLACE_ATTEMPTS:
-                raise  # the original error, unwrapped: the window did not clear
-            time.sleep(delay)
-            delay = min(delay * 2, _REPLACE_DELAY_CEILING)
+    _tolerate_sharing(os.replace, src, dst)
+
+
+def remove_file(path: str) -> bool:
+    """Unlink ``path``; True when it is gone, False when there was nothing to remove.
+
+    Deleting the whole token store is a logout, and on Windows an unlink fails while another
+    process still holds the file - a watcher mid-read, or the antivirus scan a fresh file attracts.
+    Refusing to log out over that would be a worse outcome than the two lines of patience that
+    cover it, so the same budget as a replace applies. A violation that never clears still raises:
+    the tokens are then genuinely still there, and the user has to be told.
+    """
+    try:
+        _tolerate_sharing(os.remove, path)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def atomic_write(path: str, data: str | bytes, private: bool = False) -> None:
     """Replace ``path`` with ``data`` atomically, leaving no temporary behind on failure."""
     fd, tmp = _create_temp(path, private)
     try:
-        with os.fdopen(fd, "w" if isinstance(data, str) else "wb") as fh:
+        if isinstance(data, str):
+            # The descriptor is O_BINARY, but a text wrapper translates on its own anyway:
+            # newline=None rewrites every "\n" into os.linesep (events.jsonl readers count LF),
+            # and with no encoding given it falls back to the ANSI code page, which raises on a
+            # non-ASCII character or asset name. Pinning both keeps the durable bytes UTF-8 with
+            # LF on every platform, so a file written on Windows reads identically on Linux.
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        else:
+            handle = os.fdopen(fd, "wb")
+        with handle as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())  # payload durable before the rename publishes it

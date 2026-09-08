@@ -15,6 +15,8 @@ from unittest import mock
 
 from eve_skills import alphadata, paths, snapshots, sso, watchstate
 
+from tests.platform_contract import home_variables
+
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 
@@ -30,10 +32,17 @@ class WindowsLayoutTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def resolve_all(self, *, create: bool = False, **profile_vars) -> tuple[str, str, str, str]:
-        """Resolve the four kinds under a fake profile; XDG_* deliberately absent."""
-        with mock.patch.dict(os.environ, {"HOME": self.home, **profile_vars}):
-            for var in XDG_VARS:
-                os.environ.pop(var, None)          # patch.dict restores them on exit
+        """Resolve the four kinds under a fake profile; XDG_* deliberately absent.
+
+        A Windows runner really does define ``%USERPROFILE%``, ``%APPDATA%`` and
+        ``%LOCALAPPDATA%``, and ``expanduser`` there reads ``USERPROFILE`` rather than ``HOME`` -
+        so "no profile variables" has to be manufactured, not hoped for, or the fallback test
+        would resolve against the CI account instead of this fixture.
+        """
+        with mock.patch.dict(os.environ, {**home_variables(self.home), **profile_vars}):
+            for var in (*XDG_VARS, "APPDATA", "LOCALAPPDATA"):
+                if var not in profile_vars:
+                    os.environ.pop(var, None)      # patch.dict restores them on exit
             return (paths.config_dir(create=create), paths.cache_dir(create=create),
                     paths.data_dir(create=create), paths.state_dir(create=create))
 
@@ -66,16 +75,21 @@ class WindowsLayoutTest(unittest.TestCase):
 
 
 class PosixDefaultsTest(unittest.TestCase):
-    """With no pins on a POSIX host, every directory lands exactly where it always did."""
+    """With no pins on the POSIX branch, every directory lands exactly where it always did."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eve-skills-paths-")
         self.addCleanup(self.tmp.cleanup)
-        patcher = mock.patch.dict(os.environ, {"HOME": self.tmp.name})
+        patcher = mock.patch.dict(os.environ, home_variables(self.tmp.name))
         patcher.start()
         self.addCleanup(patcher.stop)
-        for var in XDG_VARS:
+        for var in (*XDG_VARS, "APPDATA", "LOCALAPPDATA"):
             os.environ.pop(var, None)
+        # The XDG layout is a branch of the resolver, not a property of the machine running the
+        # test: driven through the seam so it is still asserted - and still XDG - on Windows.
+        branch = mock.patch.object(paths, "is_windows", return_value=False)
+        branch.start()
+        self.addCleanup(branch.stop)
 
     def test_xdg_defaults_unchanged(self):
         self.assertEqual(paths.config_dir(create=False), os.path.join(self.tmp.name, ".config", "eve-skills"))
@@ -102,7 +116,7 @@ class XdgPrecedenceTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.pins = {var: os.path.join(self.tmp.name, var.lower()) for var in XDG_VARS}
         # A pin is taken as given: no Windows profile folders may compete with it...
-        self.env = {"HOME": os.path.join(self.tmp.name, "profile"),
+        self.env = {**home_variables(os.path.join(self.tmp.name, "profile")),
                     "APPDATA": os.path.join(self.tmp.name, "roaming-never-used"),
                     "LOCALAPPDATA": os.path.join(self.tmp.name, "local-never-used"), **self.pins}
 
@@ -155,7 +169,7 @@ class SingleResolverCutoverTest(unittest.TestCase):
         user_dir = os.path.join(self.data, "eve-skills")
         os.makedirs(user_dir, exist_ok=True)
         for name in ("clone_grades.json", "bloodline_races.json"):
-            with open(os.path.join(user_dir, name), "w") as fh:
+            with open(os.path.join(user_dir, name), "w", encoding="utf-8") as fh:
                 json.dump({"build": 1, "marker": "user-tree"}, fh)
         docs = alphadata.load()
         self.assertEqual(docs["grades"]["marker"], "user-tree")

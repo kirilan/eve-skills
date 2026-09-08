@@ -23,6 +23,8 @@ from unittest import mock
 
 from eve_skills import alphadata, cli, esi, snapshots, sso, storage
 
+from tests.platform_contract import POSIX_MODE_BITS
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADA, VELA = 91000001, 91000002
 
@@ -79,13 +81,13 @@ class XdgTestCase(unittest.TestCase):
         self.write_json(self.tokens_path(), {"characters": {str(r["character_id"]): r for r in records}})
 
     def read_store(self) -> dict:
-        with open(self.tokens_path()) as fh:
+        with open(self.tokens_path(), encoding="utf-8") as fh:
             return json.load(fh)
 
     @staticmethod
     def write_text(path: str, text: str, mode: int | None = None) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         if mode is not None:
             os.chmod(path, mode)
@@ -99,6 +101,23 @@ class XdgTestCase(unittest.TestCase):
     def mode(self, path: str) -> int:
         return stat.S_IMODE(os.stat(path).st_mode)
 
+    def assert_private(self, path: str) -> None:
+        """What "private" means for a file the product just wrote on the running platform.
+
+        POSIX has the bits the code asks for, so 0600 is checked exactly - unchanged strength.
+        Windows has no group/other bits at all: ``os.open``'s mode argument only decides whether
+        the read-only attribute gets set, and the privacy that actually protects a token store is
+        the ACL inherited from the user profile, which ``doctor`` reports as a documented SKIP
+        naming that ACL (asserted in ``test_doctor.WindowsDoctorTest``). What can still go wrong
+        here - and would break the next write - is creating a secret file read-only, so that is
+        what gets asserted instead of leaving a hole.
+        """
+        if POSIX_MODE_BITS:
+            self.assertEqual(self.mode(path), 0o600, path)
+        else:
+            self.assertTrue(os.stat(path).st_mode & stat.S_IWRITE,
+                            f"{path} must stay writable by its owner")
+
     def temp_leftovers(self, directory: str) -> list[str]:
         if not os.path.isdir(directory):
             return []
@@ -110,6 +129,28 @@ class XdgTestCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class StorageTests(XdgTestCase):
+    def test_a_non_ascii_multiline_payload_round_trips_byte_for_byte(self):
+        """The durable write is a byte contract, not a text one.
+
+        Character names are whatever the player typed and EVE accounts are global, so a token
+        store legitimately holds non-ASCII. On Windows the default encoding for a text-mode file
+        is the ANSI code page - which cannot encode most of them - and the default newline
+        translation rewrites every LF to CRLF, breaking the readers that count lines in
+        events.jsonl. Whatever runs the write, the bytes on disk must be exactly what we handed
+        over: UTF-8, LF-terminated, no CR inserted anywhere."""
+        path = os.path.join(self.config_dir, "unicode.json")
+        payload = '{"character": "Jäger Ölvsson", "corporation": "Ñapal Starr"}\nsecond line\n'
+        storage.atomic_write(path, payload)
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(raw, payload.encode("utf-8"))
+        self.assertNotIn(b"\r", raw)
+        # The bytes branch of atomic_write is the same promise for an already-encoded payload.
+        blob = payload.encode("utf-8")
+        storage.atomic_write(path, blob)
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), blob)
+
     def test_failed_replace_leaves_the_old_file_and_no_temporary(self):
         path = os.path.join(self.config_dir, "endpoints.json")
         self.write_json(path, {"keep": True})
@@ -119,16 +160,49 @@ class StorageTests(XdgTestCase):
         self.assertEqual(self.read_json_loose(path), {"keep": True})
         self.assertEqual(self.temp_leftovers(self.config_dir), [])
 
+    def test_a_file_held_by_another_process_is_removed_once_it_lets_go(self):
+        """Windows refuses an unlink while any other process holds the file, and the refusal clears.
+
+        This is what a concurrent watcher mid-read, or the scan Windows runs on a file that just
+        changed, does to `eve-skills logout` — so the retry, not the error, is the contract."""
+        path = self.write_json(os.path.join(self.config_dir, "tokens.json"), {"characters": {}})
+        real_remove = os.remove
+        refusals = [0]
+
+        def held_then_released(target: str):
+            refusals[0] += 1
+            if refusals[0] == 1:
+                raise PermissionError(13, "the file is being used by another process")
+            real_remove(target)
+
+        with mock.patch.object(storage.os, "remove", side_effect=held_then_released):
+            self.assertTrue(storage.remove_file(path))
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_sharing_violation_that_never_clears_is_still_reported(self):
+        # The budget is finite on purpose: a file that stays held means the data is still there,
+        # and the caller has to hear about it rather than believe the removal happened.
+        path = os.path.join(self.config_dir, "tokens.json")
+        with (
+            mock.patch.object(storage.os, "remove", side_effect=PermissionError(13, "held")),
+            mock.patch.object(storage, "_SHARE_DELAY", 0.0),
+        ):
+            with self.assertRaises(PermissionError):
+                storage.remove_file(path)
+
+    def test_removing_a_file_that_is_already_gone_is_not_a_failure(self):
+        self.assertFalse(storage.remove_file(os.path.join(self.config_dir, "nothing-here.json")))
+
     @staticmethod
     def read_json_loose(path: str):
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
 
     def test_lock_is_reentrant_for_the_same_thread(self):
         path = os.path.join(self.config_dir, "tokens.lock")
         with storage.file_lock(path):          # sso.refresh() holds this...
             with storage.file_lock(path):      # ...and calls load_store(), which takes it again
-                self.assertEqual(self.mode(path), 0o600)
+                self.assert_private(path)
 
     def test_lock_never_allows_two_holders_at_once(self):
         path = os.path.join(self.config_dir, "tokens.lock")
@@ -216,7 +290,7 @@ class TokenRefreshTests(XdgTestCase):
             from eve_skills import sso
 
             def fake_post(url, fields, basic_auth=None):
-                with open(os.environ["EVE_TEST_POST_LOG"], "a") as fh:
+                with open(os.environ["EVE_TEST_POST_LOG"], "a", encoding="utf-8") as fh:
                     fh.write(fields["refresh_token"] + "\\n")
                 time.sleep(0.3)   # hold the window a racy second refresher would need
                 return {"access_token": "access-2", "refresh_token": "refresh-2", "expires_in": 1199}
@@ -236,7 +310,7 @@ class TokenRefreshTests(XdgTestCase):
             self.assertEqual(proc.returncode, 0, err.decode())
             printed.append(out.decode().strip())
 
-        with open(post_log) as fh:
+        with open(post_log, encoding="utf-8") as fh:
             posted = [line.strip() for line in fh if line.strip()]
         self.assertEqual(posted, ["refresh-1"], f"the expiring refresh token was POSTED {len(posted)} times")
         self.assertEqual(printed, ["access-2"] * 3)   # losers waited and returned the winner's token
@@ -323,7 +397,7 @@ class TokenStoreLifecycleTests(XdgTestCase):
         self.assertEqual(store["characters"][str(ADA)]["character_name"], "Ada Vane")
         on_disk = self.read_store()
         self.assertNotIn("access_token", on_disk)      # rewritten in the new layout
-        self.assertEqual(self.mode(self.tokens_path()), 0o600)
+        self.assert_private(self.tokens_path())
         self.assertEqual(sso.list_characters()[0]["character_id"], ADA)
 
     def test_legacy_record_without_character_id_is_an_explicit_error(self):
@@ -378,7 +452,7 @@ class TokenStoreLifecycleTests(XdgTestCase):
             self.assertEqual(cli.main(["logout", "--char", "Ada Vane"]), 0)
         self.assertIn("Removed stored tokens for Ada Vane.", out.getvalue())
         self.assertEqual(list(self.read_store()["characters"]), [str(VELA)])
-        self.assertEqual(self.mode(self.tokens_path()), 0o600)
+        self.assert_private(self.tokens_path())
 
     def test_logout_all_removes_the_store(self):
         self.seed_store(make_record(ADA, "Ada Vane"), make_record(VELA, "Vela Krinn"))
@@ -386,6 +460,24 @@ class TokenStoreLifecycleTests(XdgTestCase):
             self.assertEqual(cli.main(["logout"]), 0)
         self.assertFalse(os.path.exists(self.tokens_path()))
         self.assertEqual(sso.list_characters(), [])
+
+    def test_logout_all_survives_a_store_another_process_holds_open(self):
+        """One watcher reading tokens.json is enough to refuse the unlink on Windows."""
+        self.seed_store(make_record(ADA, "Ada Vane"), make_record(VELA, "Vela Krinn"))
+        real_remove = os.remove
+        refusals = [0]
+
+        def held_then_released(target: str):
+            refusals[0] += 1
+            if refusals[0] == 1:
+                raise PermissionError(13, "the file is being used by another process")
+            real_remove(target)
+
+        with mock.patch.object(storage.os, "remove", side_effect=held_then_released), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, cli.main(["logout"]))
+        self.assertFalse(os.path.exists(self.tokens_path()))
+        self.assertEqual([], sso.list_characters())
 
     def test_logout_without_any_stored_tokens_is_quiet(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -468,12 +560,12 @@ class ManualLoginLifecycleTests(XdgTestCase):
         self.assertEqual(record["refresh_token"], "refresh-1")
         self.assertEqual(record["scopes"], sso.SCOPES)
         self.assertGreater(record["expires_at"], time.time())
-        with open(os.path.join(self.config_dir, "config.json")) as fh:
+        with open(os.path.join(self.config_dir, "config.json"), encoding="utf-8") as fh:
             cfg = json.load(fh)
         self.assertEqual(cfg["client_id"], "test-client")
         self.assertEqual(cfg["client_secret"], "shhh")
-        self.assertEqual({self.mode(self.tokens_path()), self.mode(os.path.join(self.config_dir, "config.json"))},
-                         {0o600})
+        self.assert_private(self.tokens_path())
+        self.assert_private(os.path.join(self.config_dir, "config.json"))
         self.assertEqual(self.temp_leftovers(self.config_dir), [])
 
     def test_foreign_callback_url_is_rejected_before_any_token_request(self):
@@ -585,7 +677,7 @@ class NameCachePersistenceTests(XdgTestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda ident: esi.resolve_names(client, {ident}, cache_dir=self.cache_dir), (1, 2)))
         self.assertEqual(results, [{1: "name 1"}, {2: "name 2"}])
-        with open(self.cache_path()) as fh:
+        with open(self.cache_path(), encoding="utf-8") as fh:
             on_disk = json.load(fh)
         self.assertEqual(on_disk, {"1": "name 1", "2": "name 2"})   # neither writer lost the other's id
         self.assertEqual(self.temp_leftovers(self.cache_dir), [])
@@ -669,7 +761,7 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
         for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json"):
             path = os.path.join(self.data_dir, name)
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
         self.assertEqual(self.temp_leftovers(self.data_dir), [])
         # Only types carrying both attributes are skills; rank and prerequisites survive the round trip.

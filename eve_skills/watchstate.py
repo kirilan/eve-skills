@@ -539,7 +539,7 @@ def observe_orders(state: dict, observations: Sequence[OrderObservation],
 def load_state() -> dict:
     """The last committed observations; absent or unreadable files are an empty state."""
     try:
-        with open(state_file(create=False)) as fh:
+        with open(state_file(create=False), encoding="utf-8") as fh:
             doc = json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError):
         return empty_state()
@@ -582,7 +582,7 @@ def _append_events(events: Sequence[WatchEvent], now_ts: float) -> list[WatchEve
     seen_ids: set[str] = set()
     kept: list[str] = []
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             for line in fh:
                 row = _parse_row(line)
                 if row is None or row["ts"] < cutoff or row["id"] in seen_ids:
@@ -635,7 +635,7 @@ def load_events(character_id: int | None = None) -> tuple[list[dict], int]:
     seen_ids: set[str] = set()
     skipped = 0
     try:
-        with open(events_file(create=False)) as fh:
+        with open(events_file(create=False), encoding="utf-8") as fh:
             for line in fh:
                 if not line.strip():
                     continue

@@ -70,7 +70,7 @@ REFRESH_LEEWAY = 60  # a token this close to expiry is refreshed before it is us
 
 def _load_json(path: str):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -111,7 +111,7 @@ def peek_config() -> dict:
             "user_agent": False, "env_client_id": bool(os.environ.get("EVE_SKILLS_CLIENT_ID")),
             "secret_values": []}
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except FileNotFoundError:
         info["problem"] = "missing"
@@ -185,7 +185,7 @@ def peek_store() -> dict:
     path = token_store_file(create=False)
     info = {"file": path, "problem": None, "records": [], "secret_values": []}
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except FileNotFoundError:
         info["problem"] = "missing"
@@ -240,10 +240,9 @@ def clear_tokens(character_id: int | None = None):
     read and write and resurrect (or swallow) a record."""
     with _store_lock():
         if character_id is None:
-            try:
-                os.remove(token_store_file())
-            except FileNotFoundError:
-                pass
+            # storage.remove_file waits out the Windows sharing violation a watcher mid-read
+            # causes, instead of exiting 1 in front of a user whose tokens are already gone.
+            storage.remove_file(token_store_file())
             return
         store = load_store()
         if not store.get("characters", {}).pop(str(character_id), None):

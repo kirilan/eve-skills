@@ -239,7 +239,7 @@ def _file_state(path: str) -> dict:
 def _read_doc(path: str) -> tuple[dict | None, str | None]:
     """JSON document at ``path``; returns (document, problem) and never echoes contents."""
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
     except FileNotFoundError:
         return None, "missing"

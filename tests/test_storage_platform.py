@@ -258,12 +258,12 @@ class ReplaceSharingTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def seed(self, path: str, obj) -> str:
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(obj, fh)
         return path
 
     def read(self, path: str):
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
 
     def temp_leftovers(self) -> list[str]:
