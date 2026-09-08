@@ -52,7 +52,7 @@ With uv, no environment to make first:
 ```bash
 cd eve-skills                                              # your checkout
 git status --short                    # clean tree apart from what you intend to release
-uv run --with setuptools python -m unittest discover -s tests -t . -q   # the whole suite: 462 tests
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # the whole suite: 469 tests
 uv run eve-skills doctor                                   # version, data freshness, config
 ```
 

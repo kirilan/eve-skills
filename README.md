@@ -74,7 +74,7 @@ uv run --with setuptools python -m unittest discover -s tests -t . -q   # the wh
 
 `--with setuptools` is not decoration: the packaging tier builds a real wheel and sdist to inspect,
 so without a build backend its two build-and-install classes skip their seven tests and the run
-reports 455 instead of 462.
+reports 462 instead of 469.
 
 Keep a project environment in sync with the lockfile — this is the install and update path:
 
@@ -1030,14 +1030,14 @@ retries with backoff on 420/429/502/503 honouring `Retry-After`, and automatic p
 
 ## Testing and verification status
 
-The permanent automated suite runs in 462 tests, all passing, and is deterministic: no network, no
+The permanent automated suite runs in 469 tests, all passing, and is deterministic: no network, no
 real credentials — every test works in a throwaway `$XDG_*` tree against fakes or fixtures, and those
 pins are what let the Windows branches run on a Linux host, since they win on every platform.
 
 ```bash
 cd eve-skills                                          # your checkout
-uv run --with setuptools python -m unittest discover -s tests -t . -q   # 462 tests, no install
-uv run python -m unittest discover -s tests -t . -q                     # 455: packaging tier skips
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # 469 tests, no install
+uv run python -m unittest discover -s tests -t . -q                     # 462: packaging tier skips
 .venv/bin/python -m unittest discover -s tests -t .                     # the same suite, without uv
 ```
 
@@ -1125,21 +1125,23 @@ consent, so a real fill has never passed through the watch here. That path (fetc
 announce, personal and corporation) is proven by `tests/test_watch_events.py` against the fake ESI,
 not by observation, and the README says so rather than implying otherwise.
 
-Nothing here has run on Windows **on this machine**: the `msvcrt` lock backend, profile-folder path
-resolution, doctor's skips and cmd-shaped hints, the virtual-terminal fallback and the notify
-explanation are exercised by forcing the platform — an injected fake `msvcrt`, an injected platform
-judgement — from a Linux host. That is real coverage of what those branches *do* (which syscall
-sequence, which path, which verdict, which string) and no evidence that Windows itself behaves as
-documented. `.github/workflows/ci.yml` is where that gap closes: the same suite runs on
-`windows-latest` and `ubuntu-latest` against Python 3.11 and 3.14, installs the package, and runs
-both entry points and `doctor` there. Until that workflow has gone green on a push, treat every
-Windows claim in this document as derived from Microsoft's documented contracts rather than
-observed — in particular whether `%LOCALAPPDATA%` resolves where it should, what ConHost accepts,
-and what an antivirus holding the token store open does to a rename.
+Windows is now **verified on Windows**, not only reasoned about.
+`.github/workflows/ci.yml` runs this suite on `windows-latest` and `ubuntu-latest` against Python
+3.11 and 3.14, installs the package, and exercises both entry points and `doctor` there; all four
+legs pass. Getting there took three rounds, and what the runner reported was worth having: two of
+the failures were tests that had written the POSIX layout into an assertion about something else,
+and three were real product bugs no forced-platform test could have caught — text writes taking the
+ANSI code page instead of UTF-8, stdout doing the same when it is not a console, and `logout`
+unable to delete a file another process held open. The forced-platform tests (an injected fake
+`msvcrt`, an injected platform judgement) still earn their place: they pin *which* syscall
+sequence, path, verdict and string each branch produces, which a green runner does not tell you.
+What no runner here covers: how a roaming profile moves these files between machines, what an
+antivirus holding the token store open does to a rename, and ConHost versus Windows Terminal for
+the virtual-terminal fallback.
 
 Proven here with uv 0.12.6 on Linux: `uv sync`, `uv run eve-skills --version`,
-`uv run --with setuptools python -m unittest discover -s tests -t . -q` (462 tests) and the same
-line without `--with setuptools` (455, packaging tier skipped — the reason the flag is documented),
+`uv run --with setuptools python -m unittest discover -s tests -t . -q` (469 tests) and the same
+line without `--with setuptools` (462, packaging tier skipped — the reason the flag is documented),
 `uv venv`, `uv pip install -e .`, `uv build`, and `uv tool install .` / `uv tool list` /
 `uv tool uninstall eve-skills`. The suite also passes under Python 3.11, the floor
 `requires-python` promises. Not run from this tree, only read out of `uv --help`: the

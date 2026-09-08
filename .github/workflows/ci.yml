@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  # write only so a failing leg can post its own output as a commit comment (see that step): job
-  # logs are admin-only, and a red matrix nobody can read is a matrix nobody acts on.
-  contents: write
+  # Read-only: nothing in this workflow writes to the repository. The failure reporter below
+  # annotates the check run with a workflow command, which needs no credential.
+  contents: read
 
 jobs:
   suite:
@@ -47,34 +47,26 @@ jobs:
           set -o pipefail
           python -m unittest discover -s tests -t . -v 2>&1 | tee suite-output.txt
 
-      # Job logs need repository admin rights, so a maintainer without them - or any tool acting for
-      # one - cannot see WHY a leg failed. A commit comment is readable by anyone who can read the
-      # repository, which turns a red matrix into something diagnosable instead of a guess.
+      # Job logs need repository admin rights, so a maintainer without them - or any tool acting
+      # for one - cannot see WHY a leg failed. A workflow-command annotation is attached to the
+      # check run, which anyone who can read the repository can read, and it needs no token at all:
+      # the earlier version of this step posted a commit comment with GITHUB_TOKEN, which meant
+      # handing every job in the matrix a repository-write credential to make a red run legible.
+      # Not worth it, so this writes nothing.
       - name: Report the failure where it can be read
         if: failure()
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python - "$GITHUB_SHA" "${{ matrix.os }}" "${{ matrix.python }}" <<'PY'
-          import json, os, sys, urllib.request
-          sha, os_name, python = sys.argv[1:4]
+          python - "${{ matrix.os }}" "${{ matrix.python }}" <<'PY'
+          import sys
+          os_name, python = sys.argv[1:3]
           try:
-              tail = open("suite-output.txt", encoding="utf-8", errors="replace").read()[-40000:]
+              tail = open("suite-output.txt", encoding="utf-8", errors="replace").read()[-8000:]
           except OSError as err:
               tail = f"(no suite output captured: {err})"
-          body = (f"### `tests` failed on {os_name} / Python {python}\n\n"
-                  f"Run: {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
-                  f"/actions/runs/{os.environ['GITHUB_RUN_ID']}\n\n```\n{tail}\n```\n")
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/commits/{sha}/comments",
-              data=json.dumps({"body": body}).encode(),
-              headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                       "Accept": "application/vnd.github+json",
-                       "User-Agent": "eve-skills-ci"},
-              method="POST")
-          with urllib.request.urlopen(request, timeout=30) as answer:
-              print("posted", answer.status)
+          # A workflow command is one line: percent first, then the newlines it would otherwise end on.
+          escaped = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=tests failed on {os_name} / Python {python}::{escaped}")
           PY
 
       # Proves the console script and the module entry point agree once actually installed, on both
