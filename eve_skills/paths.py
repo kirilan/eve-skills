@@ -45,13 +45,16 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-# kind -> (XDG variable, POSIX default under ~, leaf under the Windows root,
+# kind -> (XDG variable, POSIX default parts under ~, leaf under the Windows root,
 #          Windows profile variable, its documented fallback under the profile)
+# The POSIX default is parts rather than ".local/share": joined with os.sep it stays a
+# well-formed path on whichever host resolves it, instead of mixing separators when a test
+# (or a Cygwin-shaped runtime) drives the POSIX branch on Windows.
 _KINDS = {
-    "config": ("XDG_CONFIG_HOME", ".config", ("config",), "LOCALAPPDATA", ("AppData", "Local")),
-    "cache": ("XDG_CACHE_HOME", ".cache", ("cache",), "LOCALAPPDATA", ("AppData", "Local")),
-    "data": ("XDG_DATA_HOME", ".local/share", ("data",), "LOCALAPPDATA", ("AppData", "Local")),
-    "state": ("XDG_STATE_HOME", ".local/state", ("state",), "LOCALAPPDATA", ("AppData", "Local")),
+    "config": ("XDG_CONFIG_HOME", (".config",), ("config",), "LOCALAPPDATA", ("AppData", "Local")),
+    "cache": ("XDG_CACHE_HOME", (".cache",), ("cache",), "LOCALAPPDATA", ("AppData", "Local")),
+    "data": ("XDG_DATA_HOME", (".local", "share"), ("data",), "LOCALAPPDATA", ("AppData", "Local")),
+    "state": ("XDG_STATE_HOME", (".local", "state"), ("state",), "LOCALAPPDATA", ("AppData", "Local")),
 }
 
 
@@ -72,7 +75,7 @@ def _profile_root(profile_var: str, fallback_parts: tuple[str, ...]) -> str | No
 
 
 def _resolve(kind: str, create: bool) -> str:
-    xdg_var, posix_default, windows_leaf, profile_var, profile_fallback = _KINDS[kind]
+    xdg_var, posix_parts, windows_leaf, profile_var, profile_fallback = _KINDS[kind]
     root = os.environ.get(xdg_var)  # honoured on every platform; empty counts as unset
     if root:  # an explicit pin is taken exactly as given - no kind leaf it did not ask for
         path = os.path.join(root, LEAF)
@@ -82,7 +85,7 @@ def _resolve(kind: str, create: bool) -> str:
         if root:
             path = os.path.join(root, LEAF, *windows_leaf)
     if not root:  # POSIX default, and the last resort on a Windows with no locatable profile
-        path = os.path.expanduser(os.path.join("~", posix_default, LEAF))
+        path = os.path.expanduser(os.path.join("~", *posix_parts, LEAF))
     if create:
         os.makedirs(path, exist_ok=True)
     return path

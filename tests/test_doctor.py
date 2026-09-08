@@ -24,7 +24,7 @@ from email.utils import formatdate
 from pathlib import Path
 from unittest import mock
 
-from eve_skills import alphadata, cli, doctor, sso
+from eve_skills import alphadata, cli, doctor, paths, sso
 
 from tests.platform_contract import home_variables, posix_only
 
@@ -951,13 +951,18 @@ class HomePathTest(DoctorTestCase):
             self.assertNotIn(self.home, value)
         for rendered in (doctor.render_text(report), doctor.render_json(report)):
             self.assertNotIn(self.home, rendered)
-        # Built from separators, because the collapsed form follows the host's own: `~/.config/...`
-        # here, `~\.config\...` there - and JSON escapes a backslash, hence json.dumps.
-        self.assertIn(os.path.join("~", ".config", "eve-skills"), doctor.render_text(report))
-        self.assertIn(json.dumps(os.path.join("~", ".config", "eve-skills", "tokens.json")),
-                      doctor.render_json(report))
-        self.assertIn(json.dumps(os.path.join("~", ".local", "state", "eve-skills", "watch-state.json")),
-                      doctor.render_json(report))
+        # The expected form is derived from the resolver, not spelled out: the layout differs per
+        # platform (`~/.config/...` on POSIX, `~\AppData\Local\eve-skills\config\...` on Windows)
+        # while the property under test - the home directory collapsed to `~` - is the same. JSON
+        # escapes a backslash, hence json.dumps.
+        def shown(path: str) -> str:
+            return os.path.join("~", os.path.relpath(path, self.home))
+
+        config = shown(paths.config_dir(create=False))
+        state = shown(paths.state_dir(create=False))
+        self.assertIn(config, doctor.render_text(report))
+        self.assertIn(json.dumps(os.path.join(config, "tokens.json")), doctor.render_json(report))
+        self.assertIn(json.dumps(os.path.join(state, "watch-state.json")), doctor.render_json(report))
 
     def test_a_configured_location_outside_the_home_is_printed_as_it_is(self):
         outside = os.path.join(self.tmp.name, "srv", "eve-config")   # the operator's own choice

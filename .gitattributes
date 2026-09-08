@@ -1,0 +1,11 @@
+# Windows checkouts default to core.autocrlf=true, which rewrites LF to CRLF on the way out of
+# git. That silently changes bytes this repository asserts on: `tests/test_packaging.py` pins the
+# SHA-256 of LICENSE against the verbatim GPLv3 text from gnu.org, and it failed on a
+# windows-latest runner for exactly this reason. Normalising to LF in the working tree keeps a
+# checkout byte-identical on every platform, which is also what the packaging tests compare and
+# what `atomic_write` produces (it pins newline="\n" for the same reason).
+* text=auto eol=lf
+
+# Documents whose bytes are asserted or shipped verbatim: never touch their line endings at all.
+LICENSE -text
+eve_skills/data/*.json -text
