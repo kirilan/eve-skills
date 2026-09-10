@@ -3,8 +3,8 @@
 Command line tool for EVE Online characters: skills, training queue and alpha/omega clone state,
 plus opt-in views for standings, industry jobs, asset inventory (named, placed and valued), location/jump
 clones, implants, training plans and Skill Extractor math - and market data: live order books and prices
-for any item in any region or trade hub, your own open and closed orders, and a watch that announces the
-moment one of them fills, expires or is cancelled.
+for any item in any region or trade hub, what manufacturing that item would cost instead, your own open
+and closed orders, and a watch that announces the moment one of them fills, expires or is cancelled.
 
 - Linux and Windows, Python 3.11+, **standard library only** — no runtime dependencies, nothing to
   compile. See [Platform support](#platform-support).
@@ -19,6 +19,7 @@ $ eve-skills                     # same as: eve-skills skills
 $ eve-skills summary
 $ eve-skills skills --char Somecharacter --filter omega --sort sp
 $ eve-skills market Tritanium --hub jita --history 30   # public prices; no login needed
+$ eve-skills build-cost Hound                            # build it or buy it, off the same order books
 $ eve-skills orders --watch 1                            # announce my own fills as they happen
 ```
 
@@ -32,6 +33,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `summary` | One row per character: clone state, total SP, queue length, current item time left, grand total | no |
 | `attributes` | Base attributes, remaps available/last remap, accelerator days | no — covered by the standard skills consent |
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume | no — public ESI; works before you have logged in |
+| `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
@@ -42,7 +44,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `implants` | Implants fitted in the active clone | `--scopes clones` |
 | `plan` | Ordered, priced training path to target levels incl. auto-added prerequisites | no — needs the SDE skill catalog (`update-data`) |
 | `extract` | Skill Extractor count, injector yield, re-training cost | no |
-| `update-data` | Refresh alpha caps and the full skill catalog from the official SDE (~100 MB download) | no |
+| `update-data` | Refresh alpha caps, the full skill catalog and every blueprint's material list from the official SDE (~100 MB download) | no |
 | `doctor` | Diagnose install, stored logins and data freshness; `--network` probes SSO/ESI | no |
 
 Run `eve-skills <command> --help` for the full option list of any command. Errors print
@@ -74,7 +76,7 @@ uv run --with setuptools python -m unittest discover -s tests -t . -q   # the wh
 
 `--with setuptools` is not decoration: the packaging tier builds a real wheel and sdist to inspect,
 so without a build backend its two build-and-install classes skip their seven tests and the run
-reports 462 instead of 469.
+reports 513 instead of 520.
 
 Keep a project environment in sync with the lockfile — this is the install and update path:
 
@@ -333,9 +335,9 @@ into in the browser, so run one `login` per character.
   prints the fix once (`eve-skills login --scopes structures`). A token that provably lacks the scope is
   never sent probing at all — every refusal costs ESI error-window budget that throttles the rest of the
   run.
-- **Market prices need no consent at all** — `market` reads the public order books, so it works on a
-  fresh install with nothing configured. Only *your own* orders are private: `orders` needs the
-  `orders` consent, and `orders --corp` additionally needs `corp-orders` plus the in-game Accountant
+- **Market prices need no consent at all** — `market` and `build-cost` read the public order books, so
+  they work on a fresh install with nothing configured. Only *your own* orders are private: `orders` needs
+  the `orders` consent, and `orders --corp` additionally needs `corp-orders` plus the in-game Accountant
   or Trader role (see [orders](#orders--open-and-closed-market-orders)).
 
 ---
@@ -712,6 +714,132 @@ ESI's document has no row; `--csv` appends `reference_average_price`, `reference
 — so a header a script already reads keeps meaning. The text output is where the two are told apart,
 because there the footnote says which of them it was.
 
+### `build-cost` — what manufacturing an item costs right now
+
+```bash
+eve-skills build-cost Hound                       # one install, ME 0 top / ME 10 components, shopping at Jita 4-4
+eve-skills build-cost Hound --runs 5 --me 10      # five installs on a researched blueprint
+eve-skills build-cost Hound --component-me 0      # the component blueprints are unresearched too
+eve-skills build-cost "Fernite Carbide"           # a reaction: 10,000 units a run, no ME or TE
+eve-skills build-cost Hound --build "Plasma Thruster"    # force one component to be built anyway
+eve-skills build-cost Hound --buy-all             # never run a component job; buy everything
+eve-skills build-cost Hound --hub amarr           # shop at another trade hub's station
+eve-skills build-cost Hound --system Amarr        # bill the install in Amarr, still shop at Jita
+eve-skills build-cost Hound "Plasma Thruster"     # several products, off one set of order books
+```
+
+No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
+refreshed by `update-data` (the bundled one is build 3494416, 4952 blueprints covering 4943 distinct
+products) — and the prices come from public order books, so this runs on a machine that has never seen
+SSO. Nothing about the recipe is estimated: it is CCP's own material list for the blueprint that makes
+the type, with that blueprint's own material efficiency applied to the quantities.
+
+```text
+$ eve-skills build-cost Hound
+Hound (id 12034) - 1 unit from 1 run, at ME 0 / TE 0, components at ME 10, blueprint 12035
+material                               qty  buy/u       build/u     source  cost          surplus
+-------------------------------------  ---  ----------  ----------  ------  ------------  -------
+Fernite Carbide Composite Armor Plate  300  5,168.00    5,505.37    buy     1,550,400.00  0
+Nanomechanical Microprocessor          180  45,240.00   43,505.85   build   7,831,053.22  0
+Ladar Sensor Cluster                   60   18,410.00   18,981.93   buy     1,104,600.00  0
+Electrolytic Capacitor Unit            60   43,350.00   43,135.18   build   2,588,110.90  0
+Morphite                               38   17,790.00   -           buy     676,020.00    0
+Construction Blocks                    30   10,200.00   -           buy     306,000.00    0
+Plasma Thruster                        30   34,970.00   30,020.23   build   900,606.79    0
+Deflection Shield Emitter              15   30,690.00   30,024.98   build   450,374.65    0
+Nuclear Reactor Unit                   6    106,900.00  98,169.72   build   589,018.35    0
+R.A.M.- Starship Tech                  3    799.00      22,610.21   buy     2,397.00      0
+Breacher                               1    509,400.00  485,204.50  build   485,204.50    0
+  A component job runs in whole runs, so the build column charges every run needed to
+  cover the quantity above: a blueprint that yields more than the recipe wants leaves
+  real surplus behind - product you own and could sell, not waste.
+totals:
+  material cost   16,483,785.40 ISK
+  EIV             12,165,171.20 ISK  (base quantities x ESI adjusted price; ME does not reduce it)
+  job cost        2,613,078.77 ISK  = EIV x (0.1723 cost index + 0.0025 facility tax + 0.0400 SCC surcharge)
+  total           19,096,864.18 ISK
+  cost per unit   19,096,864.18 ISK
+  job time        1d 09h
+buy instead: cheapest ask 15,980,000.00 ISK, richest bid 15,020,000.00 ISK at Jita 4-4 (station)
+  buying is cheaper by 3,116,864.18 ISK for 1 unit (build 19,096,864.18 vs buy 15,980,000.00)
+```
+
+`buy/u` is the cheapest standing ask in the scope this run shops; `build/u` is what one unit of that
+material costs if you run *its* blueprint instead — its own materials at their asks plus its own install
+fee. `source` says which of the two won, per material: the cheapest option is taken row by row, and a
+dash under `build/u` means there is nothing to compare, either because no local blueprint makes that
+material or because building it cannot be priced. So the table is not a list of what you must buy — it
+is the build-or-buy decision made for every input, which is the part worth automating.
+
+Two research levels are named rather than one, because one level described a build nobody actually
+makes. `--me` is the level of the blueprint being run; the jobs feeding it run at `--component-me`,
+which defaults to ME 10 — component blueprints are ordinarily owned BPOs their holder has had long
+enough to take to the cap, while the top blueprint of a T2 item so often is an invented copy that
+carries no research at all. Guessing the pessimistic end for components was the single largest
+distortion this command made, because ME is charged against every material of every component and not
+only against the top job's: on the run above, `--component-me 0` costs 19,509,454.53 against
+19,096,864.18. Researching the *top* blueprint stays a separate knob — `--me 10` took the same item to
+17,604,461.25 and flipped more rows from buying to building. Both figures were re-measured minutes
+after the table above, so neither matches it to the penny; order books move between runs.
+
+The three money lines are deliberately kept apart because they answer different questions. `material
+cost` is the sum of the chosen options. `EIV` is CCP's billable value — base quantities times ESI's
+adjusted price — and ME does not reduce it, which is why a researched blueprint cuts the material bill
+and leaves the install fee alone. `job cost` prints its own arithmetic instead of one opaque number:
+the system's industry cost index, plus the facility tax (`--facility-tax`, 0.25% for an NPC station),
+plus the 4% SCC surcharge. Each has a different knob — `--system` picks the index, `--facility-tax`
+picks the tax, and the surcharge is CCP policy (see [Limitations](#limitations-you-should-know)).
+
+Substitution goes exactly one level deep, and that boundary is a request-budget decision, not an
+oversight: each component's own materials are priced from the books this run already opened, so the
+second level is free, while a third would need fresh books for every material of every component.
+Measured over all 4943 products in the snapshot, one product needs a median of 8 distinct types priced,
+p90 19, and 71 at the worst (Vanquisher) — multiplying that out is how a cost estimate stops being
+cheap enough to ask casually. The cold run above spent 30 requests: 26 order books, one
+`/industry/systems` for the cost index, one `/markets/prices`, and two name lookups. A second run inside
+the quote-cache window reads no books at all, on the same rule `inventory --value-at` uses — ESI's own
+`Expires` vouches for a cached figure or it is refetched. Asking for several products together is
+cheaper per product because a material two of them share is read once.
+
+Forcing is allowed and is not free, which the output shows rather than hides. On this item the mixed
+default (19,096,864.18) beats `--buy-all` at 19,656,945.77 and `--build-all` at 19,298,269.07; forcing
+`--build "R.A.M.- Starship Tech"` lifts the total to 19,162,681.81 and leaves 97 surplus units of that
+component behind. Surplus is real product, not waste — a component job runs in whole runs, so a
+blueprint yielding more than the recipe wants leaves something you can sell, and the `surplus` column
+says how much. Reactions are their own activity: `build-cost "Fernite Carbide"` runs 10,000 units per
+run, has no ME or TE of its own to research — so `--me` changes nothing there while its components
+still run at `--component-me`, and the heading says both — and is billed with that system's *reaction*
+index rather than manufacturing's. Five products in the snapshot are made by more than one blueprint;
+the lowest blueprint id is used and the others are reported as alternatives rather than silently
+averaged.
+
+`--system` bills the install and nothing else — it does not move the shopping, so `--system Amarr` with
+the default scope means buy at Jita, install in Amarr. That distinction matters because component jobs
+are billed at the same index as the top job, so the system you name changes the material line too.
+`--region` needs `--system` alongside it and refuses without one: a region has no single cost index, and
+picking a system for you would be inventing a number. A named system whose industry document publishes
+no manufacturing index is refused as well — with the note that only the tax and surcharge would apply —
+after the books have been read, since nothing else about the run was wrong.
+
+A material with neither an ask in scope nor a published price is reported as `-`, kept out of every
+total rather than counted as free, and takes the per-unit figure down with it: `cost per unit` prints a
+dash with the reason beside it, because a per-unit number with a hole in it is not something to quote to
+another person. The notes under the table name the type and say that the install fee understates its
+share, since EIV cannot include what has no adjusted price either.
+
+Refusals exit 1 and ask for nothing: no local blueprint makes the requested type (the message names
+`eve-skills update-data`, which is the only thing that can fix it), `--me` or `--component-me` outside
+0..10, `--te` outside 0..20, `--build-all` together with `--buy-all`, and `--region` without `--system`.
+Machine-readable output keeps the decision rather than only its winner: every material row carries a
+`build` object with the blueprint id, runs, units, surplus, its own `material_cost` / `job_cost` /
+`total` and per-unit cost — even on a row that was bought, so a script can see the option that lost and
+by how much — or `null` where no blueprint makes it. Note that `build.unit` is the cost per unit
+*produced* by that component job while the table prints cost per unit *needed*, which differ whenever a
+run overshoots the recipe. Each product object reports the levels its money was priced at as `me`,
+`te` and `component_me`, and `--csv` carries the same three columns in that order. Unpriced types appear
+under `unpriced`, and `--csv` writes one row per material to stdout with every note on stderr, so a
+header a script already reads keeps meaning.
+
 ### `plan` — training plan (one character)
 
 ```bash
@@ -859,23 +987,25 @@ id,ts,time_utc,kind,character_id,character_name,skill_id,skill_name,finished_lev
 has (never later than the order's own expiry). The text view prints those two as `[history]` and
 `[time estimated]` on the affected lines.
 
-### `update-data` — alpha caps and skill catalog from the official SDE
+### `update-data` — alpha caps, skill catalog and blueprint recipes from the official SDE
 
 ```bash
 eve-skills update-data              # latest build (~100 MB download)
 eve-skills update-data --build 3494416   # example: pin a known specific build
 ```
 
-Downloads the official JSONL SDE zip from `developers.eveonline.com`, extracts clone grades,
-bloodline races and the full skill catalog (name, rank, attributes and prerequisites for every
-catalogued skill), and atomically replaces three files in the data directory
-(`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That
-user copy takes precedence over the snapshot shipped in the package, so you can refresh caps and
-the catalog without touching the checkout. `plan` is built on this catalog — without one it
-refuses with `no local skill catalog - run: eve-skills update-data`. The whole download runs
-under `update.lock`, so two concurrent runs cannot both pull ~100 MB and interleave builds, and
-each file is replaced atomically. `skills` warns when the local snapshot is more than 90 days old
-(the age line also names the SDE build in use).
+Downloads the official JSONL SDE zip from `developers.eveonline.com`, extracts clone grades, bloodline
+races, the full skill catalog (name, rank, attributes and prerequisites for every catalogued skill) and
+the material list of every blueprint — manufacturing runs and reactions alike, keyed by the product each
+one makes — and atomically replaces four files in the data directory
+(`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That user copy takes
+precedence over the snapshot shipped in the package, so you can refresh caps, the catalog and the recipes
+without touching the checkout. `plan` is built on this catalog — without one it refuses with `no local
+skill catalog - run: eve-skills update-data` — and `build-cost` is built on the recipes, which is why a
+type that nothing makes locally ends by naming `update-data` instead of printing a table of dashes. The
+whole download runs under `update.lock`, so two concurrent runs cannot both pull ~100 MB and interleave
+builds, and each file is replaced atomically. `skills` warns when the local snapshot is more than 90 days
+old (the age line also names the SDE build in use).
 
 ### `doctor` — installation diagnostics
 
@@ -892,8 +1022,10 @@ will find it. Offline checks cover the package, the Python version and the OS th
 on (`versions.platform` — a pasted report may be read on a different machine than wrote it), the four
 data directories and their permissions (including the state directory the watchers use), config and
 token-store readability, per-character login state (token time left, auto-refresh, granted consent —
-`orders` and `corp-orders` included), SDE document freshness and where each document resolves from,
-the registered callback URLs, SP-history age, and what the watchers have accumulated:
+`orders` and `corp-orders` included), SDE document freshness and where each document resolves from — all
+four of them, `blueprint_materials.json` last, whose absence is a warning naming `update-data` rather than
+a blocker because it costs only `build-cost` — the registered callback URLs, SP-history age, and what the
+watchers have accumulated:
 
 - `watch.state` — watched characters, order owners (split into characters and corporations), known
   open orders, and how long ago any of them was last polled. A state that only holds training data is
@@ -992,7 +1124,7 @@ naming the wrong tree beats naming nothing.
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
-| `{clone_grades,bloodline_races,skill_catalog}.json` | data | SDE snapshot from `update-data`; overrides packaged data | Non-secret |
+| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes | Non-secret |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
@@ -1030,14 +1162,14 @@ retries with backoff on 420/429/502/503 honouring `Retry-After`, and automatic p
 
 ## Testing and verification status
 
-The permanent automated suite runs in 469 tests, all passing, and is deterministic: no network, no
+The permanent automated suite runs in 520 tests, all passing, and is deterministic: no network, no
 real credentials — every test works in a throwaway `$XDG_*` tree against fakes or fixtures, and those
 pins are what let the Windows branches run on a Linux host, since they win on every platform.
 
 ```bash
 cd eve-skills                                          # your checkout
-uv run --with setuptools python -m unittest discover -s tests -t . -q   # 469 tests, no install
-uv run python -m unittest discover -s tests -t . -q                     # 462: packaging tier skips
+uv run --with setuptools python -m unittest discover -s tests -t . -q   # 520 tests, no install
+uv run python -m unittest discover -s tests -t . -q                     # 513: packaging tier skips
 .venv/bin/python -m unittest discover -s tests -t .                     # the same suite, without uv
 ```
 
@@ -1095,6 +1227,26 @@ uv run python -m unittest discover -s tests -t . -q                     # 462: p
   write, two runs publishing to one file without losing each other's types, a cached figure printed at
   the age ESI stamped rather than the moment it was read, and the run's pre-flight notice — what it
   counts, when it quotes a duration, and the all-cached form that promises no book is read;
+- `tests/test_industry.py` — the cost model on its own, with no transport in sight: ME rounding to two
+  decimals then up (and a one-per-run material that research cannot make disappear), job time scaling with
+  runs and TE while a reaction ignores TE entirely, EIV built from base quantities so ME provably does not
+  shrink the fee, the fee itself as EIV × index + tax + surcharge with `--facility-tax` replacing only its
+  own term, recipe indexing where the lowest blueprint id wins and the rest are listed as alternatives,
+  one-level expansion that never expands a recipe into itself, whole-run charging for built components,
+  an unpriceable material excluded from every total rather than counted as free, the two research levels
+  billing their own jobs and nothing else (so a cap-researched component level cannot flatter the top
+  job, and an unresearched top level cannot cheapen a component), a reaction component taking no ME at
+  any component level, validation of `--me`, `--component-me`, `--te`, `--runs` against each blueprint's
+  own install limit, and the dated-rules warning firing only after its 180 days;
+- `tests/test_build_cost.py` — the command end to end against a synthetic blueprint world on the same fake
+  ESI: every material priced and the cheaper option charged, the printed fee recomputing from the printed
+  EIV and rates, `--system` moving the index without moving the shopping, JSON keeping the losing build
+  option visible (including per-unit cost of a component job beside its table figure), CSV as one row per
+  material with every note on stderr, forcing flipping a row and reporting its surplus, an unpriceable
+  material named in the notes with `cost per unit` withheld rather than rounded down, one book read per
+  distinct type with a warm rerun reading none, two products sharing one fan-out, and five refusals —
+  contradictory flags, a component level past the cap, a type no local blueprint makes, `--region`
+  without `--system`, a system with no published index — that spend no order-book request at all;
 - `tests/test_orders.py` — order normalisation from malformed and partial ESI rows (escrow optional,
   derived closed state), character + corporation fetching with its role diagnosis, and the `orders`
   command's table, totals and footnotes;
@@ -1140,8 +1292,8 @@ antivirus holding the token store open does to a rename, and ConHost versus Wind
 the virtual-terminal fallback.
 
 Proven here with uv 0.12.6 on Linux: `uv sync`, `uv run eve-skills --version`,
-`uv run --with setuptools python -m unittest discover -s tests -t . -q` (469 tests) and the same
-line without `--with setuptools` (462, packaging tier skipped — the reason the flag is documented),
+`uv run --with setuptools python -m unittest discover -s tests -t . -q` (520 tests) and the same
+line without `--with setuptools` (513, packaging tier skipped — the reason the flag is documented),
 `uv venv`, `uv pip install -e .`, `uv build`, and `uv tool install .` / `uv tool list` /
 `uv tool uninstall eve-skills`. The suite also passes under Python 3.11, the floor
 `requires-python` promises. Not run from this tree, only read out of `uv --help`: the
@@ -1183,6 +1335,22 @@ requests, an immediate repeat at 14.1 s / 63 requests with 455 types served from
 machine, which is why they are here: what a run *listed* is somebody's holdings, and none of it belongs in
 a public repository.
 
+The `build-cost` paths were measured live the same way, with the request log open: one product cold spent
+30 requests — 26 order books, one `/industry/systems`, one `/markets/prices` and two name lookups — and the
+rerun straight after read no books at all, because ESI's own `Expires` still vouched for every figure. The
+shape of a run was measured over the whole snapshot rather than assumed: pricing all 4943 products takes a
+median of 8 distinct types, p90 19, and 71 at the worst (Vanquisher), and 2415 of them have at least one
+direct material another blueprint makes — which is what turned the one-level substitution boundary
+into an arithmetic decision instead of a hunch. The worked example in
+[build-cost](#build-cost--what-manufacturing-an-item-costs-right-now) is that measurement: a Hound run
+at ME 0 with its components at the default ME 10 totals 19,096,864.18 ISK against a cheapest standing
+ask of 15,980,000.00, so the verdict printed beside it is *buy*; `--buy-all` (19,656,945.77) and
+`--build-all` (19,298,269.07) were each re-run to confirm that neither forcing mode beats letting the
+tool choose row by row, and `--component-me 0` on the same item lifted it to 19,509,454.53 — which is
+what one assumption about component research is worth on a build this size. What a live run cannot
+settle — order-book depth behind an ask, invention, who owns the blueprint — is carried in
+[Limitations](#limitations-you-should-know) instead of being quietly priced.
+
 ---
 
 ## Limitations you should know
@@ -1212,6 +1380,11 @@ a public repository.
 | Market freshness has a floor | ESI regenerates each regional book at most every five minutes, so `Last-Modified` ages below that are not this tool being slow and cannot be improved by polling harder. Nothing here caches a market book to disk: if ESI will not answer, `market` says so instead of showing a stale price. |
 | No third-party price source | Fuzzwork, EVERef and similar aggregators are deliberately not consulted — they are other people's copies of the same public books, with their own staleness, availability and terms, and no way for this tool to be told one is wrong. |
 | Vault-traded items have no book | PLEX (id 44992) trades on the account-wide vault market, which belongs to no region's order book: `GET /markets/{region}/orders?type_id=44992` answered `[]` for all 70 market regions when measured 2026-09-07, while `/markets/prices` carried the type the same minute (`average_price` 4,574,918.36, `adjusted_price` 0.0). ESI publishes no global order-book endpoint, so there is nothing wider to ask; `market` says so for that id and shows the published reference rather than leaving a row of dashes to be read as a broken tool. No other type id has been measured across the cluster, so no other empty book is given that explanation — it gets the wider scope that is still unasked instead. |
+| `build-cost` prices the cheapest ask, not the depth behind it | The material column charges a unit at the lowest standing ask in scope; ESI publishes no cumulative quantity per price level, so nothing here knows how many units that ask actually holds. Measured in Jita the error is ~0-1% even at 1000 runs — Tritanium there is effectively bottomless — but a thin market is another matter: the Hound sell side in Heimatar opens with one unit 8.7% below the blended cost of ten, so a quantity that size has to be swept further up a book this tool cannot see and would cost more than printed. |
+| Invention is not modelled | A T2 item's real cost is understated: no datacores, no decryptors, no probability-weighted attempts — only the manufacturing run after you already have a blueprint. The SDE carries the inputs for that stage and they were deliberately left out rather than half-modelled, so treat a T2 figure as a floor, not as what invention costs. |
+| Blueprint ownership and structure bonuses stay outside the number | BPO/BPC acquisition is excluded — the recipe is priced as if you already own it — industry skills are ignored because they change job time and not materials, and structure or rig bonuses reach the maths only through `--material-multiplier`, which is one flat factor for the whole job rather than the real stack of modifiers. |
+| Two research levels, not one per job | `--me` bills the blueprint you run; `--component-me` (default ME 10, since a component's BPO is usually long since researched to the cap) bills every component job. That is two levels where a real build has one per blueprint: nothing below a component job is ever built, so a component's own inputs are bought at their asks whatever you research, and a level named for a recipe that cannot be researched — a reaction — is dropped rather than applied somewhere else. |
+| The install fee's rates are CCP policy, not physics | The 4% SCC surcharge and the 0.25% NPC facility tax were measured against CCP's published rules on 2026-09-09 and warn once they are more than 180 days old. `--facility-tax` exists because a player-owned structure bills differently and only you know its rate; the system's cost index is ESI's own, from `/industry/systems`. |
 | ESI/SSO availability | Discovery (cached 24 h), token exchange, ESI routes and the SDE download are all remote services; failures surface as `error: network error ...` or `error: HTTP <code> ...`. |
 | Desktop notifications are Linux-only in practice | `--notify` shells out to `notify-send`, which no stock Windows installation ships; there the watch says so once per run and relies on the terminal bell. Alerts are printed and recorded on both platforms, so nothing is lost but the ping. |
 
@@ -1227,6 +1400,7 @@ eve_skills/
   esi.py         stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
   universe.py    asset identities: disk-cached type/group/category catalogue + nested location resolver
   market.py      public order books: type/scope resolution, quote maths, cluster scan, freshness + history
+  industry.py    blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
   orders.py      character/corporation order fetching, normalisation, access (consent vs role) diagnosis
   classify.py    alpha-cap lookup, per-skill classification, clone-state inference
   alphadata.py   packaged/user SDE data loading, transformations, update-data downloader
@@ -1237,11 +1411,12 @@ eve_skills/
   paths.py       the only resolver of the config / cache / data / state directories, on either platform
   exports.py     standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py      timestamps, SP/duration formatting, plain-text tables
-  data/          packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog)
+  data/          packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog, blueprint_materials)
 tests/           unittest suite: pure units, ESI transport, persistence concurrency + the injected
                  Windows lock backend, path layout on both branches, fake-ESI command integration,
-                 planner catalog, market (+ quote cache), universe catalogue/locations, orders,
-                 watch/events, doctor (POSIX + forced Windows), packaging
+                 planner catalog, market (+ quote cache), industry cost model and `build-cost` end to end,
+                 universe catalogue/locations, orders, watch/events, doctor (POSIX + forced Windows),
+                 packaging
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 

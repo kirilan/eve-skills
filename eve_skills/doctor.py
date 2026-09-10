@@ -611,6 +611,21 @@ def _check_sde(now: float) -> list[dict]:
     else:
         checks.append(_check("data.skill_catalog", OK, f"skill catalog available (SDE build {catalog['build']})", **catalog_fields))
 
+    # Missing blueprint data costs the cost model its input, not the tool: skills, training and
+    # market views all still work, so this is a warning with the same fix rather than a blocker.
+    blueprints = by_name["blueprint_materials.json"]
+    blueprint_fields = {"path": blueprints["path"], "present": blueprints["present"], "build": blueprints["build"]}
+    if not blueprints["present"]:
+        checks.append(_check("data.blueprint_materials", WARN,
+                             "the blueprint material lists are not installed - build cost cannot be computed",
+                             hint="run: eve-skills update-data", **blueprint_fields))
+    elif blueprints["problem"]:
+        checks.append(_check("data.blueprint_materials", WARN, f"the blueprint material lists are {blueprints['problem']}",
+                             hint="re-download it: eve-skills update-data", **blueprint_fields))
+    else:
+        checks.append(_check("data.blueprint_materials", OK,
+                             f"blueprint material lists available (SDE build {blueprints['build']})", **blueprint_fields))
+
     if len(builds) > 1:
         checks.append(_check("data.consistency", WARN,
                              f"the local SDE documents describe different builds ({', '.join(str(b) for b in builds)})",

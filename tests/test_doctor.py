@@ -464,6 +464,27 @@ class OfflineReportTest(DoctorTestCase):
         self.assertIn("12345", consistency["detail"])
         self.assertEqual(0, report["exit_code"])
 
+    def test_blueprint_materials_absent_or_damaged_is_a_warning_not_a_blocker(self):
+        """The cost model loses its input; skills, training and market views do not. So the run
+        still exits zero, and both halves of the problem name the one command that fixes it."""
+        self.seed_config()
+        self.seed_store(make_record(ADA, "Ada Vane"))
+        self.without_bundled_data()   # seed_sde seeds three documents; the fourth is simply absent
+        self.seed_sde()
+        missing = self.check(self.report(), "data.blueprint_materials")
+        self.assertEqual("warn", missing["status"])
+        self.assertIn("update-data", missing["hint"])
+        path = os.path.join(self.data_dir, "blueprint_materials.json")
+        self.write_json(path, {"build": 1}, mode=0o644)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"blueprints": {"681"')   # truncated download
+        report = self.report()
+        damaged = self.check(report, "data.blueprint_materials")
+        self.assertEqual("warn", damaged["status"])
+        self.assertIn("corrupt", damaged["detail"])
+        self.assertIn("update-data", damaged["hint"])
+        self.assertEqual(0, report["exit_code"])
+
     def test_bundled_data_is_reported_when_no_user_data_exists(self):
         self.seed_config()
         self.seed_store(make_record(ADA, "Ada Vane"))

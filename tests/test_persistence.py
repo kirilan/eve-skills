@@ -704,7 +704,9 @@ class AlphadataUpdateTests(XdgTestCase):
         self.zip_blob = self.make_zip()
 
     def make_zip(self) -> bytes:
-        """One skill with a prerequisite, one bare skill, and types that are not skills."""
+        """One skill with a prerequisite, one bare skill, types that are not skills, and three
+        blueprint rows: manufacturing next to its copying sibling, one reaction, and a run with no
+        materials at all."""
         members = {
             "cloneGrades.jsonl": '{"_key": 1, "name": "Caldari Alpha Clone", "skills": [{"typeID": 1003, "level": 3}]}\n',
             "bloodlines.jsonl": '{"_key": 402, "raceID": 1}\n',
@@ -719,6 +721,18 @@ class AlphadataUpdateTests(XdgTestCase):
             "types.jsonl": '{"_key": 1003, "name": {"en": "Astrogeology", "de": "Astrogeologie"}, "published": true}\n'
                            '{"_key": 1002, "name": {"en": "Science"}, "published": true}\n'
                            '{"_key": 900, "name": {"en": "Reactor Control Unit"}, "published": false}\n',
+            # The SDE's own row shape; only the two activities that consume goods may survive it.
+            "blueprints.jsonl": '{"_key": 681, "maxProductionLimit": 300, "activities": '
+                                '{"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
+                                '"products": [{"typeID": 165, "quantity": 1}], "time": 600}, '
+                                '"copying": {"materials": [{"typeID": 34, "quantity": 1}], '
+                                '"products": [{"typeID": 681, "quantity": 1}], "time": 60}}}\n'
+                                '{"_key": 45732, "maxProductionLimit": 1000000, "activities": '
+                                '{"reaction": {"materials": [{"typeID": 16657, "quantity": 100}, '
+                                '{"typeID": 16661, "quantity": 100}], '
+                                '"products": [{"typeID": 16672, "quantity": 20}], "time": 360}}}\n'
+                                '{"_key": 900, "maxProductionLimit": 1, "activities": {"manufacturing": '
+                                '{"materials": [], "products": [{"typeID": 899, "quantity": 1}], "time": 60}}}\n',
         }
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -759,7 +773,8 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual([s["build"] for s in summaries], [self.BUILD, self.BUILD])
         self.assertEqual(summaries[0]["grades"]["1"], {"name": "Caldari Alpha Clone", "skills": 1})
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
-        for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json"):
+        for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
+                     "blueprint_materials.json"):
             path = os.path.join(self.data_dir, name)
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
@@ -770,6 +785,91 @@ class AlphadataUpdateTests(XdgTestCase):
             1003: alphadata.SkillInfo(1003, "Astrogeology", 2, "perception", "intelligence", {1002: 3}),
             1002: alphadata.SkillInfo(1002, "Science", 1, "intelligence", "perception", {}),
         })
+        # Two products: copying never lands, and the blueprint whose only run has no materials is
+        # omitted rather than shipped as an empty entry.
+        self.assertEqual(summaries[0]["blueprint_products"], 2)
+        self.assertEqual(alphadata.blueprint_materials(), {
+            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 600, "limit": 300}},
+            "45732": {"reaction": {"m": {"16657": 100, "16661": 100}, "p": ["16672", 20], "t": 360,
+                                   "limit": 1000000}},
+        })
+
+
+class BlueprintMaterialsTests(XdgTestCase):
+    """The blueprint document on its own terms: which SDE rows survive the transform, and how the
+    finished document is handed to the cost model."""
+
+    # Straight from the SDE's blueprints.jsonl shape, covering every way a row can fail to be
+    # priceable: an activity nothing consumes materials for, an activity that yields nothing, and
+    # the four activities that spend time, skill points or data cores instead of goods.
+    BLUEPRINTS = [
+        {"_key": 681, "maxProductionLimit": 300, "activities": {
+            "manufacturing": {"materials": [{"typeID": 38, "quantity": 86}],
+                              "products": [{"typeID": 165, "quantity": 1}], "time": 60},
+            "copying": {"materials": [{"typeID": 34, "quantity": 1}],
+                        "products": [{"typeID": 681, "quantity": 1}], "time": 60}}},
+        {"_key": 45732, "maxProductionLimit": 1000000, "activities": {
+            "reaction": {"materials": [{"typeID": 16657, "quantity": 100}],
+                         "products": [{"typeID": 16672, "quantity": 20}], "time": 360}}},
+        # A T2 blueprint: invention is not a costed activity yet, and nothing else here is either,
+        # so the whole row disappears rather than becoming an entry with no materials behind it.
+        {"_key": 1163, "maxProductionLimit": 1, "activities": {
+            "invention": {"materials": [{"typeID": 25371, "quantity": 1}],
+                          "products": [{"typeID": 20486, "quantity": 1}], "time": 5000},
+            "research_time": {"materials": [{"typeID": 11587, "quantity": 1}],
+                              "products": [{"typeID": 11587, "quantity": 2}], "time": 100}}},
+        {"_key": 900, "maxProductionLimit": 30, "activities": {
+            "manufacturing": {"materials": [{"typeID": 34, "quantity": 10}], "products": [], "time": 60},
+            "reaction": {"materials": [], "products": [{"typeID": 901, "quantity": 1}], "time": 60}}},
+    ]
+
+    def test_only_the_two_activities_that_consume_materials_survive(self):
+        self.assertEqual({
+            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 60, "limit": 300}},
+            "45732": {"reaction": {"m": {"16657": 100}, "p": ["16672", 20], "t": 360, "limit": 1000000}},
+        }, alphadata._transform_blueprint_materials(iter(self.BLUEPRINTS)))
+
+    def test_the_priced_product_is_the_one_a_run_certainly_yields(self):
+        """A blueprint can list extra outputs it produces only occasionally; costing the bonus as
+        though it were the yield would understate every run built from it."""
+        docs = [{"_key": 1, "maxProductionLimit": 10, "activities": {"manufacturing": {
+            "materials": [{"typeID": 34, "quantity": 10}],
+            "products": [{"typeID": 165, "quantity": 1, "isProbability": True},
+                         {"typeID": 166, "quantity": 2}],
+            "time": 60}}}]
+        row = alphadata._transform_blueprint_materials(docs)["1"]["manufacturing"]
+        self.assertEqual(["166", 2], row["p"])
+
+    def test_a_user_copy_of_the_document_wins_over_the_packaged_snapshot(self):
+        """Same precedence as every other SDE document: `update-data` output beats what shipped."""
+        user = {"build": 2500001, "blueprints": {
+            "7": {"reaction": {"m": {"34": 1}, "p": ["8", 1], "t": 9, "limit": 2}}}}
+        self.write_json(os.path.join(self.data_dir, "blueprint_materials.json"), user, mode=0o644)
+        self.assertEqual(user["blueprints"], alphadata.blueprint_materials())
+
+    def test_a_document_in_the_wrong_shape_names_the_one_command_that_fixes_it(self):
+        path = os.path.join(self.data_dir, "blueprint_materials.json")
+        for wrong in ({"blueprints": []},                       # not a mapping at all
+                      {"blueprints": {"1": "not-a-row"}},       # envelope fine, body junk
+                      {"blueprints": {"1": {"manufacturing": {"m": {}}}}}):  # nothing to cost
+            self.write_json(path, wrong, mode=0o644)
+            with self.assertRaises(ValueError) as caught:
+                alphadata.blueprint_materials()
+            self.assertIn("update-data", str(caught.exception))
+
+    def test_the_packaged_blueprint_document_shares_the_build_of_the_other_three(self):
+        """A fourth file regenerated on its own ships silently - nothing reads it at install time -
+        and then `doctor` warns about mixed builds on a machine that never ran `update-data`."""
+        docs = {name: json.loads((alphadata.PACKAGE_DATA_DIR / name).read_text(encoding="utf-8"))
+                for name in alphadata.DATA_FILES}
+        self.assertEqual({docs["clone_grades.json"]["build"]}, {doc["build"] for doc in docs.values()},
+                         "the packaged SDE documents describe more than one build")
+        materials = alphadata.blueprint_materials()
+        self.assertEqual(set(docs["blueprint_materials.json"]["blueprints"]), set(materials),
+                         "blueprint_materials() must serve the document's inner mapping")
+        unpriceable = [key for key, activities in materials.items()
+                       if not set(activities) <= set(alphadata.INDUSTRY_ACTIVITIES)]
+        self.assertEqual([], unpriceable, "an activity nothing can price was packaged")
 
 
 if __name__ == "__main__":

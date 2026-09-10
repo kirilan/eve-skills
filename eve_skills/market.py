@@ -477,6 +477,15 @@ def resolve_region(client: esi_mod.Esi, spec) -> tuple[int, str]:
     return _resolve(client, spec, "regions", "region")
 
 
+def resolve_system(client: esi_mod.Esi, spec) -> tuple[int, str]:
+    """Solar system as (id, name) from a system id or an exact system name.
+
+    Same exact-name rule as the type and region resolvers, for the same reason: ESI's search endpoint
+    returns neighbours, and quietly building in `Jita` because someone typed `Jit` is not a decision
+    this tool gets to make on their behalf."""
+    return _resolve(client, spec, "systems", "system")
+
+
 # ---------------------------------------------------------------------------
 # quote cache: what ESI's own expiry licenses believing
 # ---------------------------------------------------------------------------

@@ -272,6 +272,108 @@ MARKET_PRICES = [
 # document's own, not accidentally the book's five-minute age.
 MARKET_PRICES_AGE = 3600 + 42
 
+# Build-cost universe: one manufactured article whose four materials cover every branch of the
+# build-or-buy table, a second product sharing one of them, and the two component blueprints that
+# make the difference. Invented like everything above; quantities and prices are round on purpose so
+# every ISK total in `tests/test_build_cost.py` can be written out by hand - a formula that drifts
+# then shows up as a wrong number rather than as a golden file nobody reads.
+BUILD_ARTICLE = 920001       # what the command is asked for (blueprint 930001)
+BUILD_ADDON = 920002         # a second product, sharing BUILD_HOUSING with the first
+BUILD_PLATE = 920010         # buildable and cheaper built: the row whose source is "build"
+BUILD_HOUSING = 920020       # no blueprint makes it: the "-" in the build column
+BUILD_CELL = 920030          # buildable ten at a time and dearer that way: surplus when forced
+BUILD_PASTE = 920040         # nobody orders it here, so only ESI's published reference prices it
+BUILD_ALLOY = 920050         # no order and no published price: unpriced, so absent from EIV too
+BUILD_CRYO = 920060          # what the plate blueprint consumes
+BUILD_GOO = 920070           # what the cell blueprint consumes, at a premium
+
+# A system ESI lists without a single cost-index row - which nullsec and wormhole space really do
+# return. Billing an install there would print a fee of just tax plus surcharge, so the command has
+# to refuse rather than total it in.
+SYSTEM_UNINDEXED = 30045281
+
+# Chosen so that `cost index + facility tax + SCC surcharge` is exactly 0.2: every install fee then
+# lands on whole cents, which is what lets the printed totals be asserted as literals. (Jita's real
+# manufacturing index was 0.1718 when these rules were measured; this fixture is not Jita.)
+BUILD_COST_INDEX = 0.1575
+
+# The compact SDE shape: `m` materials per run, `p` [product, quantity], `t` seconds per run,
+# `limit` runs per install - with every id spelled as a string exactly as the snapshot is written.
+BUILD_BLUEPRINTS = {
+    "930001": {"manufacturing": {"m": {str(BUILD_PLATE): 4, str(BUILD_HOUSING): 10,
+                                       str(BUILD_CELL): 5, str(BUILD_PASTE): 2},
+                                 "p": [str(BUILD_ARTICLE), 1], "t": 3600, "limit": 30}},
+    "930002": {"manufacturing": {"m": {str(BUILD_HOUSING): 3, str(BUILD_ALLOY): 6},
+                                 "p": [str(BUILD_ADDON), 1], "t": 1800, "limit": 10}},
+    # One plate per run out of two cheap inputs, so four wanted is four whole runs of it.
+    "930010": {"manufacturing": {"m": {str(BUILD_CRYO): 20, str(BUILD_GOO): 1},
+                                 "p": [str(BUILD_PLATE), 1], "t": 600, "limit": 300}},
+    # Ten cells per run, and its input is dear enough that five wanted cost more built than bought -
+    # which is what turns forcing this one into a visible decision instead of the tool's own choice.
+    "930030": {"manufacturing": {"m": {str(BUILD_GOO): 10},
+                                 "p": [str(BUILD_CELL), 10], "t": 900, "limit": 5}},
+}
+
+# The article's book. `BUILD_PLATE` is also quoted cheaper at another station in the same region: a
+# hub scope has to ignore it, and if that station filter ever leaked, the plate row and every total
+# under it would move - far harder to miss than a scope test of its own. `BUILD_PASTE` and
+# `BUILD_ALLOY` have no rows anywhere, which is two different statements: one type is priced by
+# ESI's published reference, the other by nothing at all.
+BUILD_ORDERS = [
+    _order(930101, 250.00, STATION_JITA, SYSTEM_FORGE, remain=5, type_id=BUILD_ARTICLE),
+    _order(930102, 90.00, STATION_JITA, SYSTEM_FORGE, remain=5, buy=True, type_id=BUILD_ARTICLE),
+    _order(930103, 40.00, STATION_JITA, SYSTEM_FORGE, remain=500, type_id=BUILD_PLATE),
+    _order(930104, 20.00, STATION_FORGE_OTHER, SYSTEM_FORGE, remain=500, type_id=BUILD_PLATE),
+    _order(930105, 7.00, STATION_JITA, SYSTEM_FORGE, remain=900, type_id=BUILD_HOUSING),
+    _order(930106, 6.50, STATION_JITA, SYSTEM_FORGE, remain=100, buy=True, type_id=BUILD_HOUSING),
+    _order(930107, 9.00, STATION_JITA, SYSTEM_FORGE, remain=80, type_id=BUILD_CELL),
+    _order(930108, 1.00, STATION_JITA, SYSTEM_FORGE, remain=100_000, type_id=BUILD_CRYO),
+    _order(930109, 5.00, STATION_JITA, SYSTEM_FORGE, remain=4_000, type_id=BUILD_GOO),
+    # The second product is quoted, so an unpriced material still leaves a buy price on the table -
+    # and comparing it against a build total that is missing a line has to be refused, not rounded up.
+    _order(930110, 120.00, STATION_JITA, SYSTEM_FORGE, remain=3, type_id=BUILD_ADDON),
+]
+
+# `/markets/prices` additions. `BUILD_ALLOY` gets no row whatsoever: that absence - not a zero - is
+# what makes it unpriceable, and the same absence keeps its share out of the article's EIV.
+BUILD_PRICES = [
+    {"type_id": BUILD_PLATE, "adjusted_price": 30.0},
+    {"type_id": BUILD_HOUSING, "adjusted_price": 6.0},
+    {"type_id": BUILD_CELL, "adjusted_price": 8.0},
+    {"type_id": BUILD_PASTE, "adjusted_price": 20.0},
+    {"type_id": BUILD_CRYO, "adjusted_price": 1.0},
+    {"type_id": BUILD_GOO, "adjusted_price": 5.0},
+]
+
+# Live ESI regenerates a regional book every five minutes and stamps that promise in `Expires`; the
+# quote cache is only licensed to believe a book that states one, so these carry it.
+BUILD_BOOK_TTL = 300
+
+# One page for every system, as served: two systems with indices, and `SYSTEM_UNINDEXED` absent.
+INDUSTRY_SYSTEMS = [
+    {"solar_system_id": SYSTEM_FORGE, "cost_indices": [
+        {"activity": "manufacturing", "cost_index": BUILD_COST_INDEX},
+        {"activity": "reaction", "cost_index": 0.05}]},
+    # Amarr bills manufacturing on its own index, so `--system Amarr` re-prices the install while the
+    # order book stays Jita's - the behaviour that flag's help text promises.
+    {"solar_system_id": SYSTEM_AMARR, "cost_indices": [
+        {"activity": "manufacturing", "cost_index": 0.2}]},
+]
+
+BUILD_NAMES = {
+    BUILD_ARTICLE: "Benchwork Widget",
+    BUILD_ADDON: "Salvage Sampler",
+    BUILD_PLATE: "Widget Plate",
+    BUILD_HOUSING: "Bulk Casing",
+    BUILD_CELL: "Batch Cell",
+    BUILD_PASTE: "Vacuum Sealed Paste",
+    BUILD_ALLOY: "Unquoteable Alloy",
+    BUILD_CRYO: "Common Ore",
+    BUILD_GOO: "Exotic Goo",
+    SYSTEM_AMARR: "Amarr",
+    SYSTEM_UNINDEXED: "Unindexed System",
+}
+
 MARKET_IDS: dict[str, dict[str, list[int]]] = {
     # ESI answers a name in every category: Tritanium is also a character, and a resolver that
     # takes the first non-empty bucket would price a player.
@@ -281,6 +383,15 @@ MARKET_IDS: dict[str, dict[str, list[int]]] = {
     "PLEX": {"inventory_types": [MARKET_PLEX]},
     "Domain": {"regions": [MARKET_DOMAIN]},
     "Nanite Repair Paste": {"inventory_types": [MARKET_UNTRADED]},
+    # The build-cost universe, so a product or a component can be named instead of typed as an id.
+    "Benchwork Widget": {"inventory_types": [BUILD_ARTICLE]},
+    "Salvage Sampler": {"inventory_types": [BUILD_ADDON]},
+    "Widget Plate": {"inventory_types": [BUILD_PLATE]},
+    "Bulk Casing": {"inventory_types": [BUILD_HOUSING]},
+    "Batch Cell": {"inventory_types": [BUILD_CELL]},
+    "Common Ore": {"inventory_types": [BUILD_CRYO]},
+    "Amarr": {"systems": [SYSTEM_AMARR]},
+    "Unindexed System": {"systems": [SYSTEM_UNINDEXED]},
 }
 
 # Order fixtures. CORP_SHARED is Ada's corporation in install_core, and Mira joins it in
@@ -838,6 +949,43 @@ class FakeEsiEnv:
         if wanted is not None:
             rows = [r for r in rows if str(r["type_id"]) == wanted]
         return rows, {"Last-Modified": http_date(-86400)}
+
+    # -- build-cost routes ------------------------------------------------------
+
+    def install_build_cost(self):
+        """Recipes, cost indices and priced books for the build-cost universe.
+
+        Three sources the command reads in three different ways: the recipe document is seeded into
+        `$XDG_DATA_HOME`, where `alphadata` looks before the packaged snapshot, so these four
+        blueprints are the whole world for this run; `/industry/systems` says what an install is
+        billed at; and the books have to carry an `Expires`, because a quote-cache entry is only
+        written for a book whose own expiry is still in the future - which is exactly what makes
+        "the second run read no orders at all" something a test can observe.
+        """
+        self.install_market()
+        self.server.post("/universe/names", handler=self._names_handler)
+        self._write_json(os.path.join(self.data_home, "eve-skills", "blueprint_materials.json"), {
+            "source": "synthetic", "build": 2500001, "fetched": iso(-86400),
+            "blueprints": BUILD_BLUEPRINTS,
+        })
+        self.names.update(BUILD_NAMES)
+
+        def build_orders(call: Call):
+            region = int(call.path.split("/")[2])
+            rows = list(MARKET_ORDERS.get(region, [])) + BUILD_ORDERS
+            for key in ("type_id", "location_id", "system_id"):
+                if call.query.get(key) is not None:
+                    rows = [r for r in rows if str(r[key]) == call.query[key]]
+            return rows, {"Last-Modified": http_date(-MARKET_BOOK_AGE[region]),
+                          "Expires": http_date(BUILD_BOOK_TTL), "X-Pages": "1"}
+
+        # Re-registered rather than edited in place: market tests read `MARKET_ORDERS` as served, and
+        # only a build cost needs a book the quote cache is licensed to remember.
+        self.server.get(f"/markets/{MARKET_FORGE}/orders", handler=build_orders)
+        self.server.get("/markets/prices", doc=MARKET_PRICES + BUILD_PRICES,
+                        headers={"Last-Modified": http_date(-MARKET_PRICES_AGE)})
+        self.server.get("/industry/systems", doc=INDUSTRY_SYSTEMS,
+                        headers={"Last-Modified": http_date(-600)})
 
     # -- command runner ---------------------------------------------------------
 
