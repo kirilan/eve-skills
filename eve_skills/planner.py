@@ -250,7 +250,17 @@ def calibrated_rate(ctx) -> tuple[float, str]:
         if not (start <= now < finish):
             continue
         span_h = (finish - start).total_seconds() / 3600
-        gain = int(item.get("level_end_sp") or 0) - int(item.get("level_start_sp") or 0)
+        # `start_date` is not where the level began: EVE restamps it on the active item every time
+        # the queue is rearranged, so pairing it with `level_start_sp` measures a whole level's SP
+        # against the few hours since the last queue edit and reports a rate several times too fast.
+        # `training_start_sp` is the SP held at that `start_date` - the only figure this span
+        # describes. An item that omits it cannot be measured here at all: defaulting to 0 would
+        # read the entire level as gained inside the span, so the item is skipped and the SP
+        # history gets the question instead. Zero is a real value (a level started from scratch),
+        # which is why this tests for absence rather than falsiness.
+        if item.get("training_start_sp") is None:
+            continue
+        gain = int(item.get("level_end_sp") or 0) - int(item["training_start_sp"])
         if span_h > 0 and gain > 0:
             return gain / span_h, "live training item"
     rate = snapshot_rate(ctx)

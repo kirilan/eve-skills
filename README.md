@@ -868,9 +868,13 @@ What the plan does:
 - New items are scheduled after the existing queue drains; that backlog finish time is printed.
 - The rate comes from `--rate <SP/hour>` if given, else a live `TRAINING` queue item (ground
   truth — the measurement already includes implants, remaps, clone state and the attributes of
-  the skill being trained), else the slope of local SP history over 7 days. Flat or
-  extraction-dipped history is deliberately rejected as a rate and the command tells you to pass
-  `--rate`.
+  the skill being trained), else the slope of local SP history over 7 days. The live measurement
+  spans `start_date` to `finish_date` and is paired with ESI's `training_start_sp`, the SP held at
+  that `start_date`: EVE restamps `start_date` on the active item every time the queue is
+  rearranged, so measuring the level's whole SP against it would report a rate several times too
+  fast. An item ESI publishes no `training_start_sp` for is skipped rather than guessed at, and the
+  SP history answers instead. Flat or extraction-dipped history is deliberately rejected as a rate
+  and the command tells you to pass `--rate`.
 - Notes flag targets above the character's alpha cap, omega-only skills, and skills CCP no longer
   publishes.
 

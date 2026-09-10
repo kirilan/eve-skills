@@ -216,11 +216,44 @@ class PlannerTests(unittest.TestCase):
             "token": {"character_id": 1},
             "queue": [{"skill_id": CAP3, "start_date": (NOW - timedelta(hours=2)).isoformat(),
                        "finish_date": (NOW + timedelta(hours=2)).isoformat(),
-                       "level_start_sp": 100_000, "level_end_sp": 110_000}],
+                       "level_start_sp": 100_000, "training_start_sp": 100_000,
+                       "level_end_sp": 110_000}],
         }
         rate, source = planner.calibrated_rate(ctx)
         self.assertEqual(rate, 2500.0)
         self.assertEqual(source, "live training item")
+
+    def test_calibrated_rate_ignores_sp_trained_before_the_queue_was_rearranged(self):
+        # EVE restamps start_date on the active item whenever the queue is reordered, so the span
+        # covers only the time since that edit. Half this level was already trained by then:
+        # 5,000 SP over the four hours the stamps describe, not the level's whole 10,000.
+        ctx = {
+            "now": NOW,
+            "token": {"character_id": 1},
+            "queue": [{"skill_id": CAP3, "start_date": (NOW - timedelta(hours=2)).isoformat(),
+                       "finish_date": (NOW + timedelta(hours=2)).isoformat(),
+                       "level_start_sp": 100_000, "training_start_sp": 105_000,
+                       "level_end_sp": 110_000}],
+        }
+        self.assertEqual((1250.0, "live training item"), planner.calibrated_rate(ctx))
+
+    def test_calibrated_rate_skips_an_item_that_cannot_be_measured(self):
+        # No training_start_sp means the span has no matching SP figure; reading level_start_sp as 0
+        # would claim the whole level was trained inside it. Fall through to the history instead.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(paths, "config_dir", return_value=tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        ctx = {
+            "now": NOW,
+            "token": {"character_id": 1},
+            "queue": [{"skill_id": CAP3, "start_date": (NOW - timedelta(hours=2)).isoformat(),
+                       "finish_date": (NOW + timedelta(hours=2)).isoformat(),
+                       "level_start_sp": 100_000, "level_end_sp": 110_000}],
+        }
+        with self.assertRaises(RuntimeError):
+            planner.calibrated_rate(ctx)
 
     def test_calibrated_rate_needs_data(self):
         tmp = tempfile.TemporaryDirectory()
