@@ -258,9 +258,12 @@ def calibrated_rate(ctx) -> tuple[float, str]:
         # read the entire level as gained inside the span, so the item is skipped and the SP
         # history gets the question instead. Zero is a real value (a level started from scratch),
         # which is why this tests for absence rather than falsiness.
-        if item.get("training_start_sp") is None:
+        # Both ends are required for the same reason, and `or 0` would be wrong on both: an absent
+        # `level_end_sp` would read as a negative gain that only the guard below happens to catch,
+        # which is luck rather than a rule.
+        if item.get("training_start_sp") is None or item.get("level_end_sp") is None:
             continue
-        gain = int(item.get("level_end_sp") or 0) - int(item["training_start_sp"])
+        gain = int(item["level_end_sp"]) - int(item["training_start_sp"])
         if span_h > 0 and gain > 0:
             return gain / span_h, "live training item"
     rate = snapshot_rate(ctx)

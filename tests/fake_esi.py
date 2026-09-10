@@ -654,9 +654,16 @@ class FakeEsiEnv:
         queues = {
             ADA: [
                 {"skill_id": SKILL_WIDE, "finished_level": 5, "queue_position": 0,
-                 "start_date": iso(-7200), "finish_date": iso(-900)},       # done, pending login
+                 "start_date": iso(-7200), "finish_date": iso(-900),        # done, pending login
+                 "level_start_sp": 45_255, "training_start_sp": 45_255, "level_end_sp": 256_000},
+                # Training now; ~2h30m left stays stable under ms drift. The SP figures are the
+                # shape ESI really sends, and deliberately the awkward shape: `start_date` was
+                # restamped by a queue reorder an hour ago, when the level was already most of the
+                # way trained, so `training_start_sp` sits far above `level_start_sp` and any code
+                # measuring this level by elapsed span disagrees with the SP.
                 {"skill_id": SKILL_NAV, "finished_level": 2, "queue_position": 1,
-                 "start_date": iso(-3600), "finish_date": iso(9030)},       # training now; ~2h30m left stays stable under ms drift
+                 "start_date": iso(-3600), "finish_date": iso(9030),
+                 "level_start_sp": 2_000, "training_start_sp": 6_500, "level_end_sp": 8_000},
             ],
             VELA: [],
         }

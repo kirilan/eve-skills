@@ -113,6 +113,51 @@ class QueueStatusTests(unittest.TestCase):
         self.assertEqual(cli.queue_status(blocked, NOW), "blocked")
 
 
+class LevelSpCellTests(unittest.TestCase):
+    """The `level sp` column is an SP question and must be answered from the SP fields.
+
+    Small Hybrid Turret is the real case that exposed this: rank 1, so L4 sits at 45,255 SP and L5
+    at 256,000. A queue reorder two hours ago restamped `start_date` while the level was already
+    nearly trained, so the fraction of the span that has elapsed says 40% where the SP says 97%.
+    """
+
+    def item(self, **over):
+        base = {"skill_id": CAP3, "finished_level": 5,
+                "start_date": (NOW - timedelta(hours=2)).isoformat(),
+                "finish_date": (NOW + timedelta(hours=3)).isoformat(),
+                "level_start_sp": 45_255, "training_start_sp": 245_200, "level_end_sp": 256_000}
+        return {**base, **over}
+
+    def test_progress_comes_from_sp_not_from_the_restamped_span(self):
+        # 245,200 + (256,000 - 245,200) * 2/5 = 249,520 SP, i.e. 96.9% of the 210,745 the level
+        # costs. The elapsed span alone would have said 40%.
+        cell = cli.level_sp_cell(self.item(), NOW, "training")
+        self.assertEqual("249.5K/256.0K 97%", cell)
+
+    def test_a_nearly_finished_level_is_not_reported_as_barely_started(self):
+        # The reported bug: an hour after a reorder, 94.9% read as 11%.
+        item = self.item(start_date=(NOW - timedelta(hours=1)).isoformat(),
+                         finish_date=(NOW + timedelta(hours=8)).isoformat(),
+                         training_start_sp=244_000)
+        self.assertIn("95%", cli.level_sp_cell(item, NOW, "training"))
+
+    def test_finished_and_unstarted_items(self):
+        self.assertEqual("256.0K/256.0K 100%", cli.level_sp_cell(self.item(), NOW, "done"))
+        self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "queued"))
+        self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "blocked"))
+
+    def test_missing_sp_fields_never_invent_a_figure(self):
+        bare = {k: v for k, v in self.item().items() if not k.endswith("_sp")}
+        self.assertEqual("-", cli.level_sp_cell(bare, NOW, "training"))
+        # A finished item is still known to be finished without any SP figure to show.
+        self.assertEqual("100%", cli.level_sp_cell(bare, NOW, "done"))
+        self.assertEqual("-", cli.level_sp_cell(self.item(training_start_sp=None), NOW, "training"))
+
+    def test_a_clock_past_the_finish_stamp_is_a_full_level_not_more(self):
+        item = self.item(finish_date=(NOW - timedelta(minutes=1)).isoformat())
+        self.assertEqual("256.0K/256.0K 100%", cli.level_sp_cell(item, NOW, "training"))
+
+
 class SnapshotTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

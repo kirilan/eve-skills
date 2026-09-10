@@ -101,6 +101,48 @@ def queue_status(item: dict, now) -> str:
     return "queued"
 
 
+def level_sp_cell(item: dict, now, status: str) -> str:
+    """`249.5K/256.0K 97%` - SP into the level being trained, out of what the level costs.
+
+    ESI publishes three SP figures per queue item and they answer three different questions:
+    `level_start_sp` is where the level began, `level_end_sp` is where it ends, and
+    `training_start_sp` is what the character held when `start_date` was stamped. Progress through
+    a level is an SP question, so it is answered from those three - never from the fraction of
+    `start_date`..`finish_date` that has elapsed. EVE restamps `start_date` on the active item
+    every time the queue is rearranged, so that fraction describes the current sitting at the
+    keyboard rather than the level: an hour after a reorder a level 95% trained reads as 11%, under
+    a column headed `level sp`.
+
+    SP does accrue linearly across the span, which is what makes the interpolation from
+    `training_start_sp` to `level_end_sp` exact and makes the restamped stamps harmless here - the
+    span and `training_start_sp` are the pair that describe each other. A queued item has trained
+    nothing yet and a blocked one never will, so both keep the dash the timing column explains.
+    """
+    level_start, level_end = item.get("level_start_sp"), item.get("level_end_sp")
+    if level_start is None or level_end is None or int(level_end) <= int(level_start):
+        # Nothing measurable was published. "done" is still known to be done - it finished - but a
+        # figure this column cannot source is a dash, not an invented percentage.
+        return "100%" if status == "done" else "-"
+    level_start, level_end = int(level_start), int(level_end)
+    if status == "done":
+        held: float = level_end
+    elif status == "training" and item.get("training_start_sp") is not None:
+        start = render.parse_opt(item.get("start_date"))
+        finish = render.parse_opt(item.get("finish_date"))
+        if start is None or finish is None or finish <= start:
+            return "-"
+        at_start = int(item["training_start_sp"])
+        span = (finish - start).total_seconds()
+        # Clamped because ESI's stamps and its clock can disagree by a poll: a hair past the finish
+        # is 100% of the level, never 101%.
+        elapsed = min(max((now - start).total_seconds(), 0.0), span)
+        held = at_start + (level_end - at_start) * elapsed / span
+    else:
+        return "-"
+    return (f"{render.format_sp(int(round(held)))}/{render.format_sp(level_end)} "
+            f"{(held - level_start) / (level_end - level_start):.0%}")
+
+
 def render_text(ctx: dict, args) -> str:
     now = ctx["now"]
     public = ctx["public"]
@@ -129,18 +171,17 @@ def render_text(ctx: dict, args) -> str:
             status = queue_status(item, now)
             start = render.parse_opt(item.get("start_date"))
             finish = render.parse_opt(item.get("finish_date"))
+            progress = level_sp_cell(item, now, status)
             if status == "done":
-                label, when, progress = "done", "finished (pending login)", "100%"
+                label, when = "done", "finished (pending login)"
             elif status == "training":
                 label = "TRAINING"
                 when = f"{render.format_duration((finish - now).total_seconds())} left"
-                progress = f"{(now - start).total_seconds() / (finish - start).total_seconds():.0%}" if finish > start else "100%"
             elif status == "blocked":
-                label, when, progress = "BLOCKED", "no schedule - cannot train", "-"
+                label, when = "BLOCKED", "no schedule - cannot train"
             else:
                 label = "queued"
                 when = f"starts in {render.format_duration((start - now).total_seconds())}, {render.format_duration((finish - start).total_seconds())} long"
-                progress = "-"
             cap = ctx["caps"].get(sid)
             access = "alpha" if cap is not None and item.get("finished_level", 0) <= cap else "OMEGA"
             rows.append([label, ctx["names"].get(sid, f"skill {sid}"), f"L{item.get('finished_level', '?')}", progress, when, access])

@@ -364,6 +364,14 @@ and access column. Rows marked `*` finished training but ESI has not reflected t
 on next in-game login. Never-trained prerequisite skills that ESI also lists are filtered out of the
 table and out of CSV alike.
 
+The queue's `level sp` column is SP into the level being trained, out of what the level costs
+(`249.5K/256.0K 97%`), interpolated from the three SP figures ESI publishes per item —
+`level_start_sp`, `training_start_sp` and `level_end_sp`. It is deliberately not the fraction of
+`start_date`..`finish_date` that has elapsed: EVE restamps `start_date` on the active item every
+time the queue is rearranged, so that fraction describes the current sitting rather than the level,
+and a level 95% trained would read as 11% an hour after a reorder. A queued or blocked item shows
+`-` — it has trained none of its level yet, and the timing column says when it will.
+
 Output-format precedence: `--watch` wins over everything; otherwise `--csv` wins over `--json`.
 `--filter`, `--sort` and `--week` shape the **text** table only — JSON always contains every row and
 every field, CSV always emits all trained (or pending) rows in source order.
