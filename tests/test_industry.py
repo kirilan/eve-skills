@@ -251,6 +251,21 @@ class PlanBuildTests(unittest.TestCase):
         self.assertIsNone(row.build)          # its own blueprint is not an input to itself
         self.assertEqual((row.source, row.cost), ("buy", 150.0))
 
+    def test_a_component_jobs_own_eiv_gap_is_reported_by_the_plan(self):
+        # 900700 has an ask, so building 900600 out of it costs a real material figure - but CCP
+        # publishes no adjusted price for it, and the install fee is levied on adjusted prices.
+        # The component's fee is therefore charged low, and the plan has to name the gap: folding
+        # it away would present an understated total as a complete one.
+        prices = industry.Prices(unit={900_500: 1000.0, 900_600: 120.0, 900_700: 4.0},
+                                 adjusted={900_500: 1000.0, 900_600: 18.0})
+        plan = industry.plan_build(WIDGET, INDEX, prices, FACILITY)
+        row = component(plan, 900_600)
+        self.assertEqual(row.source, "build")           # still chargeable: its materials are priced
+        self.assertEqual(row.build.eiv, 0.0)            # ...on a fee basis with nothing in it
+        self.assertEqual(row.build.eiv_missing, (900_700,))
+        self.assertEqual(plan.eiv_missing, (900_700,))
+        self.assertEqual(plan.unpriced, ())             # nothing is missing a *market* price
+
 
 class PricingIdsTests(unittest.TestCase):
     def test_the_product_its_direct_materials_and_one_more_level(self):

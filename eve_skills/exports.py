@@ -239,6 +239,15 @@ class Valuation:
     scope: dict | None = None
     failed_books: int = 0
     cached_figures: int = 0
+    # Types priced by this basis's fallback figure rather than its headline one. The reference
+    # basis substitutes CCP's industry `adjusted_price` for a row with no `average_price`, and the
+    # two are different published numbers - a reader reconciling a total against `/markets/prices`
+    # cannot do it if the substitution is invisible.
+    substituted: frozenset[int] = frozenset()
+
+    def row_basis(self, type_id: int) -> str:
+        """The basis key for one row: the substituted figure where one was used."""
+        return "esi_adjusted" if type_id in self.substituted else self.key
 
     @property
     def scope_label(self) -> str:
@@ -257,6 +266,7 @@ def _reference_valuation(client, type_ids: set[int], now: float) -> Valuation:
                          unit={}, requests=0, requests_note="no request: nothing was held")
     table = market.price_table(client)
     unit: dict[int, float] = {}
+    substituted: set[int] = set()
     for type_id in type_ids:
         reference = table.reference(type_id)
         if reference is None:
@@ -264,11 +274,14 @@ def _reference_valuation(client, type_ids: set[int], now: float) -> Valuation:
         price = reference.average_price
         if price is None:
             price = reference.adjusted_price
+            if price is not None:
+                substituted.add(type_id)
         if price is not None:
             unit[type_id] = price
     return Valuation(key=REFERENCE_BASIS, label=REFERENCE_LABEL, short="ESI reference", unit=unit,
                      requests=1, requests_note="1 request for ESI's whole price document",
-                     freshness=market.reference_freshness_line(table.meta, now))
+                     freshness=market.reference_freshness_line(table.meta, now),
+                     substituted=frozenset(substituted))
 
 
 def _valuation_scope(client, spec: str) -> market.Scope:
@@ -439,15 +452,22 @@ class _Tally:
         self.types: set[int] = set()
         self.units = 0
         self.value: float | None = None
+        self.unpriced_units = 0
 
     def add(self, row: dict) -> None:
         self.types.add(row["type_id"])
         self.units += row["quantity"]
-        if row["value"] is not None:
+        if row["value"] is None:
+            # Held, and not in the money column beside it. `_owner_totals` keeps these apart at
+            # owner level for exactly this reason; a group cell has one line for both figures, so
+            # it carries the count and lets the renderer mark the pair as not matching.
+            self.unpriced_units += row["quantity"]
+        else:
             self.value = (self.value or 0.0) + row["value"]
 
     def cells(self) -> dict:
-        return {"types": len(self.types), "units": self.units, "value": self.value}
+        return {"types": len(self.types), "units": self.units, "value": self.value,
+                "unpriced_units": self.unpriced_units}
 
 
 def _inventory_groups(rows: list[dict], by: str) -> list[dict]:
@@ -504,6 +524,15 @@ def _sorted_items(rows: list[dict]) -> list[dict]:
                                          row["display"].lower()))
 
 
+def _group_value(cell: dict) -> str:
+    """A group's ISK, marked `*` when the unit count beside it includes units the money does not.
+
+    A subtotal has one line for both figures, so without the mark the two read as a matching pair
+    and invite value-per-unit arithmetic that is wrong by whatever was left unpriced."""
+    text = _isk(cell["value"])
+    return f"{text} *" if cell["value"] is not None and cell["unpriced_units"] else text
+
+
 def _owner_table(owner: InventoryOwner, by: str, items: bool) -> str:
     """One owner's table: the grouped view with a subtotal per section, or one row per item."""
     if items:
@@ -515,9 +544,9 @@ def _owner_table(owner: InventoryOwner, by: str, items: bool) -> str:
         for group in _inventory_groups(owner.rows, by):
             for entry in group["entries"]:
                 table_rows.append([group["name"], entry["name"], f"{entry['types']:,}",
-                                   f"{entry['units']:,}", _isk(entry["value"])])
+                                   f"{entry['units']:,}", _group_value(entry)])
             table_rows.append([f"subtotal {group['name']}", "", f"{group['types']:,}",
-                               f"{group['units']:,}", _isk(group["value"])])
+                               f"{group['units']:,}", _group_value(group)])
     return render.table(ITEMS_COLUMNS if items else SUMMARY_COLUMNS[by], table_rows)
 
 
@@ -547,6 +576,14 @@ def _valuation_notes(basis: Valuation, priced: int, unpriced: list[str],
         notes.append(alt_line)
     notes.append(f"priced {priced} of {priced + len(unpriced)} distinct types held "
                  f"({basis.requests_note}).")
+    if basis.substituted:
+        count = len(basis.substituted)
+        extra = "s" if count != 1 else ""
+        # The umbrella label covers both figures, so without this the total mixes a rolling trade
+        # average with CCP's industry reference and says only "published reference price".
+        notes.append(f"{count} of those type{extra} had no published average price, so CCP's "
+                     f"industry reference (adjusted price) stands in for it - a different figure, "
+                     f"marked esi_adjusted in --csv and --json")
     if unpriced:
         notes.append(f"no price on this basis, excluded from every total above "
                      f"({len(unpriced)}): {', '.join(unpriced)}")
@@ -647,15 +684,31 @@ def cmd_inventory(args):
 
     unpriced = sorted((infos[ident].name if ident in infos else f"type {ident}")
                       for ident in held if ident not in basis.unit)
-    alt_total, alt_types = 0.0, set()
+    # The comparison has to cover the rows the TOTAL actually covered, or it is not a comparison:
+    # the ask side reaches types the bid side does not, and summing those extra types into "would
+    # raise X" credits the alternative with holdings the figure it is measured against never
+    # priced. So the alt total is taken over the intersection, and the types the other basis could
+    # have priced are counted out loud instead of quietly folded in.
+    alt_total, alt_types, alt_only = 0.0, set(), set()
     for owner in owners:
         for row in owner.rows:
             unit = basis.alt_unit.get(row["type_id"])
-            if unit is not None:
-                alt_total += unit * row["quantity"]
-                alt_types.add(row["type_id"])
-    alt_line = (f"listing the same holdings at {basis.alt_label} would raise {_isk(alt_total)} ISK "
-                f"over {len(alt_types)} types") if basis.alt_label and alt_types else None
+            if unit is None:
+                continue
+            if row["type_id"] not in basis.unit:
+                alt_only.add(row["type_id"])
+                continue
+            alt_total += unit * row["quantity"]
+            alt_types.add(row["type_id"])
+    alt_line = None
+    if basis.alt_label and alt_types:
+        shared = f"{len(alt_types)} type" + ("s" if len(alt_types) != 1 else "")
+        alt_line = (f"listing the same holdings at {basis.alt_label} would raise {_isk(alt_total)} ISK "
+                    f"over the {shared} both bases price, across every owner shown")
+        if alt_only:
+            count = f"{len(alt_only)} further type" + ("s" if len(alt_only) != 1 else "")
+            verb = "are" if len(alt_only) != 1 else "is"
+            alt_line += f"; {count} {verb} priced on that basis alone, so {verb} in neither figure"
     notes = (_valuation_notes(basis, len(held) - len(unpriced), unpriced, alt_line)
              + ([_structure_notice(len(blind))] if blind else [])) if held else []
 
@@ -675,10 +728,14 @@ def cmd_inventory(args):
                             # freshness does not need it repeated inside its own value
                             "freshness": None if basis.freshness is None else
                             basis.freshness.removeprefix("freshness: "),
+                            # `types` is the shared set the alternative was summed over, and
+                            # `basis_only_types` the ones only the alternative could price - a
+                            # consumer comparing the two totals needs to know they match sets.
                             "alternative": None if basis.alt_label is None else
                             {"label": basis.alt_label, "value": alt_total if alt_types else None,
-                             "types": len(alt_types)},
-                            "cached_figures": basis.cached_figures},
+                             "types": len(alt_types), "basis_only_types": len(alt_only)},
+                            "cached_figures": basis.cached_figures,
+                            "substituted_types": len(basis.substituted)},
             "hints": hints,
             "warnings": failures,
             "characters": [{"character_id": owner.character_id, "name": owner.name,
@@ -699,7 +756,8 @@ def cmd_inventory(args):
                                  row["quantity"], int(row["singleton"]), row["flag"],
                                  row["location_id"], place.name if place else "",
                                  row["group_name"], row["category_name"], row["custom_name"] or "",
-                                 row["path"], place.kind if place else "", basis.key,
+                                 row["path"], place.kind if place else "",
+                                 basis.row_basis(row["type_id"]),
                                  basis.scope_label, row["unit_price"], row["value"],
                                  unpriced_here])
         for line in notes:      # the footnotes matter; they just may not pollute a CSV pipe
@@ -713,6 +771,10 @@ def cmd_inventory(args):
             continue
         blocks.append(f"{head}\n{_owner_table(owner, by, items)}\n"
                       f"{_totals_line(basis, _owner_totals(owner.rows))}")
+    # Only the grouped view marks cells, so only it needs the legend; `--items` prices row by row.
+    if not items and any(row["value"] is None for owner in owners for row in owner.rows):
+        notes = notes + ["* the ISK on that line covers only its priced units; the unit count "
+                         "beside it is everything held, including what nothing priced"]
     if notes:
         blocks.append("\n".join(notes))
     print("\n\n".join(blocks))

@@ -85,7 +85,19 @@ def _resolve(kind: str, create: bool) -> str:
         if root:
             path = os.path.join(root, LEAF, *windows_leaf)
     if not root:  # POSIX default, and the last resort on a Windows with no locatable profile
-        path = os.path.expanduser(os.path.join("~", *posix_parts, LEAF))
+        # `expanduser` hands its argument back when it cannot identify a user - a container run
+        # as a uid with no passwd entry and no HOME. Creating the literal `~` it returns would
+        # put the token store in a directory named `~` under whatever the current working
+        # directory happens to be, so every invocation from elsewhere would report "not logged
+        # in" and leave credentials scattered. The Windows branch already declines to guess.
+        try:
+            home = os.path.expanduser("~")
+        except (OSError, RuntimeError):
+            home = ""
+        if not home or home == "~":
+            raise RuntimeError(f"cannot locate a home directory for the {kind} directory - set HOME "
+                               f"or pin it explicitly with {xdg_var}")
+        path = os.path.join(home, *posix_parts, LEAF)
     if create:
         os.makedirs(path, exist_ok=True)
     return path

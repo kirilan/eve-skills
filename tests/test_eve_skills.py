@@ -129,10 +129,18 @@ class LevelSpCellTests(unittest.TestCase):
         return {**base, **over}
 
     def test_progress_comes_from_sp_not_from_the_restamped_span(self):
-        # 245,200 + (256,000 - 245,200) * 2/5 = 249,520 SP, i.e. 96.9% of the 210,745 the level
-        # costs. The elapsed span alone would have said 40%.
+        # 245,200 + (256,000 - 245,200) * 2/5 = 249,520 SP held in the skill, which is 204,265 into
+        # the 210,745 this level costs: 96.9%. The elapsed span alone would have said 40%.
         cell = cli.level_sp_cell(self.item(), NOW, "training")
-        self.assertEqual("249.5K/256.0K 97%", cell)
+        self.assertEqual("204.3K/210.7K 97%", cell)
+
+    def test_the_sp_pair_shares_the_percentage_baseline(self):
+        # Both figures are level-relative, so the ratio and the percentage cannot disagree. The
+        # cumulative pair ESI publishes would print 832/1.4K here - 59% - beside "50%".
+        item = self.item(finished_level=2, level_start_sp=250, training_start_sp=250,
+                         level_end_sp=1_414, start_date=(NOW - timedelta(hours=4)).isoformat(),
+                         finish_date=(NOW + timedelta(hours=4)).isoformat())
+        self.assertEqual("582/1.2K 50%", cli.level_sp_cell(item, NOW, "training"))
 
     def test_a_nearly_finished_level_is_not_reported_as_barely_started(self):
         # The reported bug: an hour after a reorder, 94.9% read as 11%.
@@ -142,7 +150,7 @@ class LevelSpCellTests(unittest.TestCase):
         self.assertIn("95%", cli.level_sp_cell(item, NOW, "training"))
 
     def test_finished_and_unstarted_items(self):
-        self.assertEqual("256.0K/256.0K 100%", cli.level_sp_cell(self.item(), NOW, "done"))
+        self.assertEqual("210.7K/210.7K 100%", cli.level_sp_cell(self.item(), NOW, "done"))
         self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "queued"))
         self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "blocked"))
 
@@ -155,7 +163,7 @@ class LevelSpCellTests(unittest.TestCase):
 
     def test_a_clock_past_the_finish_stamp_is_a_full_level_not_more(self):
         item = self.item(finish_date=(NOW - timedelta(minutes=1)).isoformat())
-        self.assertEqual("256.0K/256.0K 100%", cli.level_sp_cell(item, NOW, "training"))
+        self.assertEqual("210.7K/210.7K 100%", cli.level_sp_cell(item, NOW, "training"))
 
 
 class SnapshotTests(unittest.TestCase):
@@ -428,14 +436,19 @@ class ScopeRegistryTests(unittest.TestCase):
 
 
 class RateGuardTests(unittest.TestCase):
-    def _rate(self, first_sp, last_sp):
+    def _measure(self, *samples):
+        """`snapshot_rate` over rows given as (hours_ago, total_sp), newest last."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "config_dir", return_value=tmp):
             base = NOW.timestamp()
             with open(os.path.join(tmp, "sp-history.jsonl"), "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"ts": base - 7200, "char_id": 1, "total_sp": first_sp}) + "\n")
-                fh.write(json.dumps({"ts": base - 3600, "char_id": 1, "total_sp": last_sp}) + "\n")
+                for hours_ago, sp in samples:
+                    fh.write(json.dumps({"ts": base - hours_ago * 3600, "char_id": 1, "total_sp": sp}) + "\n")
             ctx = {"now": NOW, "token": {"character_id": 1}, "queue": []}
             return planner.snapshot_rate(ctx)
+
+    def _rate(self, first_sp, last_sp):
+        measured = self._measure((2, first_sp), (1, last_sp))
+        return None if measured is None else measured[0]
 
     def test_flat_history_is_none_not_zero(self):
         self.assertIsNone(self._rate(50_000_000, 50_000_000))  # ZeroDivisionError regression
@@ -445,6 +458,94 @@ class RateGuardTests(unittest.TestCase):
 
     def test_real_gain_still_measures(self):
         self.assertAlmostEqual(self._rate(50_000_000, 52_162_000), 2_162_000.0)  # 2.162M SP over the 1h gap
+
+    def test_an_extractor_inside_the_window_does_not_net_off_the_training(self):
+        # 50.0M six days ago, 49.5M three days ago (a 500k extractor ran), 50.2M now. End to end
+        # that nets to 200k over 144h - 1,389 SP/hour - while the character really trained 700k in
+        # the 72h since the withdrawal. Only the monotonic tail is a rate.
+        rate, hours = self._measure((144, 50_000_000), (72, 49_500_000), (0, 50_200_000))
+        self.assertAlmostEqual(hours, 72.0)
+        self.assertAlmostEqual(rate, 700_000 / 72)
+
+    def test_the_source_label_names_the_span_it_measured(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "config_dir", return_value=tmp):
+            base = NOW.timestamp()
+            with open(os.path.join(tmp, "sp-history.jsonl"), "w", encoding="utf-8") as fh:
+                for hours_ago, sp in ((2, 50_000_000), (0, 50_004_000)):
+                    fh.write(json.dumps({"ts": base - hours_ago * 3600, "char_id": 1, "total_sp": sp}) + "\n")
+            ctx = {"now": NOW, "token": {"character_id": 1}, "queue": []}
+            rate, source = planner.calibrated_rate(ctx)
+            self.assertAlmostEqual(rate, 2000.0)
+            # A two-hour slope must not be advertised as a week of evidence.
+            self.assertEqual("local SP history (2.0h)", source)
+
+
+class UnclassifiedCountTests(unittest.TestCase):
+    """A skill the local data cannot classify is not an omega claim.
+
+    `beyond_alpha` is true for any row without an alpha cap, which includes the rows
+    `classify` deliberately refused to judge because it could not resolve the skill id. Folding
+    those into the omega count made one screen assert an omega-restricted skill and, two lines up,
+    warn that no omega claim had been made about it.
+    """
+
+    def render(self, rows):
+        ctx = {"now": NOW, "token": {"character_id": 1}, "public": {"name": "T", "bloodline_id": 1},
+               "grade_name": "g", "caps": {}, "queue": [], "rows": rows, "data_build": 3494416,
+               "skills_doc": {"total_sp": 1000, "unallocated_sp": 0},
+               "state": SimpleNamespace(state="UNKNOWN", confidence="low", evidence=[], warnings=[]),
+               "names": {}}
+        args = SimpleNamespace(trained_only=False, filter="all", sort="name", week=False)
+        with mock.patch.object(cli.alphadata, "load", return_value={"races": {"races": {}}}):
+            return cli.render_text(ctx, args)
+
+    def row(self, sid, cap, unknown=False):
+        return classify.SkillRow(skill_id=sid, name=f"skill {sid}", trained=4, active=4, sp=1000,
+                                 cap=cap, omega_now=False, restricted=False,
+                                 pending_completion=False, unknown_data=unknown)
+
+    def test_unresolvable_skills_get_their_own_bucket(self):
+        out = self.render([self.row(1, 4), self.row(9999, None, unknown=True)])
+        self.assertIn("alpha-trainable: 1, omega-restricted: 0, unclassified: 1", out)
+
+    def test_a_real_omega_skill_is_still_counted_as_omega(self):
+        out = self.render([self.row(1, 4), self.row(2, None)])
+        self.assertIn("alpha-trainable: 1, omega-restricted: 1", out)
+        self.assertNotIn("unclassified", out)
+
+
+class PlanWithoutItemsTests(unittest.TestCase):
+    def test_a_fully_covered_plan_does_not_need_a_training_rate(self):
+        # Nothing to train means nothing to price, so a character with no measurable rate (idle
+        # queue, fresh install with no SP history) must still be told the target is covered rather
+        # than be refused with "pass --rate" for a figure the answer never uses.
+        catalog = cli.load_skill_catalog()
+        skill_id, info = next((sid, row) for sid, row in catalog.items() if row.name == "Industry")
+        ctx = {"now": NOW, "token": {"character_id": 1}, "public": {"name": "Tester"},
+               "rows": [SimpleNamespace(skill_id=skill_id, trained=5, name=info.name)],
+               "queue": [], "caps": {skill_id: 5}}
+        args = SimpleNamespace(char="Tester", target=["Industry:5"], rate=None)
+        with mock.patch.object(cli, "gather", return_value=ctx), \
+             mock.patch.object(sso, "list_characters", return_value=[{"character_id": 1}]), \
+             mock.patch.object(planner, "calibrated_rate", side_effect=AssertionError("no rate needed")), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertIn(cli.cmd_plan(args), (None, 0))
+        printed = out.getvalue()
+        self.assertIn("0 item(s) to train", printed)
+        self.assertIn("already trained to L5", printed)
+        self.assertNotIn("rate:", printed)
+
+
+class HistoryClockTests(unittest.TestCase):
+    def test_rows_are_stamped_with_the_clock_the_caller_measures_against(self):
+        # ESI server time is what every consumer compares these rows to, so a machine whose clock
+        # is hours off must not write rows on its own clock: the two ends of `skills --week` would
+        # then come from different clocks and the SP/day would be wrong by the skew.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(paths, "config_dir", return_value=tmp):
+            esi_now = NOW.timestamp()
+            with mock.patch.object(snapshots.time, "time", return_value=esi_now + 6 * 3600):
+                snapshots.record(7, 1_000_000, now=esi_now)
+            self.assertEqual([esi_now], [row["ts"] for row in snapshots.load()])
 
 
 class CsvParityTests(unittest.TestCase):

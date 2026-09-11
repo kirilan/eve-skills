@@ -223,19 +223,39 @@ def observe(state: dict, observations: Sequence[CharacterObservation], now_ts: f
                     # the item can be gone while the level is still stale. Keep waiting.
                     carried[key] = {**entry, "seen": float(entry.get("seen") or prior.get("updated") or now_ts)}
             if int(prior.get("queue_len") or 0) > 0 and len(obs.items) == 0:
+                # `last_finish` alone cannot separate two episodes whose items carried no finish
+                # date - CCP issues none for an item it will not schedule - nor one that refilled
+                # with such items after a dated episode, because then the old date is carried
+                # forward. Both hash to the id already in the log, so the second emptying is read
+                # as a duplicate and the user is told once, ever. `episode` stamps when the queue
+                # last went from empty to filled, which is exactly what tells them apart. State
+                # written before this field existed has none, and then the id stays byte-identical
+                # to the old one: an upgrade must not re-announce what it already announced.
+                episode = prior.get("episode")
+                parts = (cid, prior.get("last_finish")) if episode is None else (
+                    cid, prior.get("last_finish"), episode)
                 events.append(WatchEvent(
-                    id=_event_id("queue_empty", cid, prior.get("last_finish")),
+                    id=_event_id("queue_empty", *parts),
                     ts=now_ts, kind="queue_empty",
                     character_id=cid, character_name=obs.character_name,
                 ))
 
         finishes = [it.finish_date for it in obs.items if it.finish_date]
+        if not obs.items:
+            episode = None              # nothing queued; the next refill starts a new episode
+        elif prior.get("episode") and int(prior.get("queue_len") or 0) > 0:
+            episode = prior["episode"]  # the same episode this poll already knew about
+        else:
+            episode = now_ts            # the queue just went from empty (or unknown) to filled
         chars[cid] = {
             "name": obs.character_name,
             "queue_len": len(obs.items),
             # the newest finish date of the current queue episode; distinguishes one
-            # empty-the-queue transition from the next (a refill always adds a later date)
+            # empty-the-queue transition from the next (a refill always adds a later date) -
+            # except for items CCP refuses to schedule, which carry no date at all, which is
+            # what `episode` is for
             "last_finish": max(finishes) if finishes else prior.get("last_finish"),
+            "episode": episode,
             "known": {**carried, **{k: {"skill_name": it.name, "finish_date": it.finish_date, "seen": now_ts}
                                     for k, it in training.items()}},
             "updated": now_ts,

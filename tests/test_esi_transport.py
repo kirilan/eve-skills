@@ -254,6 +254,34 @@ class FreshnessTests(TransportTestCase):
         self.client.get_meta(self.PATH)
         self.assertEqual(len(transport.requests), 2)
 
+    def test_the_revalidated_expiry_is_what_the_meta_reports(self):
+        # The cache adopts the 304's Expires, so the Meta has to state that window too: a figure
+        # stamped with an expiry already in the past is refused by market.publish_figures, so a
+        # revalidated book would never reach the durable quote cache.
+        transport = ScriptedTransport(
+            FakeResponse([{"price": 1}], {"Last-Modified": http_date(-120), "Expires": http_date(-1),
+                                          "Etag": '"v1"'}),
+            self.error(304, "not modified", Expires=http_date(300)),
+        )
+        self.serve(transport)
+        self.client.get_meta(self.PATH)
+        _value, again = self.client.get_meta(self.PATH)
+        self.assertGreater(again.expires, self.client.now().timestamp())
+
+    def test_a_stale_entry_is_measured_against_esi_time_not_the_local_clock(self):
+        # `Expires` is an instant the server stamped. On a machine an hour behind ESI, comparing it
+        # to the local clock keeps a five-minute order book alive for an hour - and a watch loop
+        # reading that cache announces nothing for as long as the skew lasts.
+        transport = ScriptedTransport(
+            FakeResponse([{"price": 1}], {"Expires": http_date(250)}),
+            FakeResponse([{"price": 2}], {"Expires": http_date(250)}),
+        )
+        self.serve(transport)
+        self.client.server_offset = 3600.0      # as if ESI's Date had said so
+        self.assertEqual(self.client.get_meta(self.PATH)[0], [{"price": 1}])
+        self.assertEqual(self.client.get_meta(self.PATH)[0], [{"price": 2}])
+        self.assertEqual(len(transport.requests), 2)
+
     def test_a_response_that_refuses_to_be_cached_evicts_the_stale_entry(self):
         transport = ScriptedTransport(
             FakeResponse([1], {"Expires": http_date(-1), "Etag": '"v1"'}),   # cached, already stale

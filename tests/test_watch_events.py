@@ -154,6 +154,30 @@ class TransitionModelTests(unittest.TestCase):
         self.assertEqual([e.kind for e in events], ["queue_empty"])
         self.assertNotEqual(events[0].id, empty_id)
 
+    def test_queue_empty_fires_again_when_the_items_carried_no_finish_date(self):
+        # CCP issues no schedule dates for an item it will not train, so `last_finish` stays put
+        # across such an episode. Two emptyings then hashed to the same id and the second was read
+        # as a duplicate: the user who asked to be told their queue emptied was told once, ever.
+        blocked = [obs(items=[item(SKILL_NAV, 2, "blocked", None)])]
+        state, _ = watchstate.observe(watchstate.empty_state(), blocked, T0)
+        state, first = watchstate.observe(state, [obs()], T0 + 60)
+        state, _ = watchstate.observe(state, blocked, T0 + 120)
+        _, second = watchstate.observe(state, [obs()], T0 + 180)
+        self.assertEqual(["queue_empty"], [e.kind for e in first])
+        self.assertEqual(["queue_empty"], [e.kind for e in second])
+        self.assertNotEqual(first[0].id, second[0].id)
+
+    def test_state_written_before_episodes_existed_keeps_its_event_id(self):
+        # An upgrade must not re-announce what the old version already announced, so an entry with
+        # no `episode` field still hashes to exactly the id the old two-part formula produced.
+        state, _ = watchstate.observe(watchstate.empty_state(),
+                                      [obs(items=[item(SKILL_NAV, 2, "training", "F-ONE")])], T0)
+        legacy = json.loads(json.dumps(state))
+        legacy["characters"][str(ADA.character_id)].pop("episode")
+        _, events = watchstate.observe(legacy, [obs()], T0 + 60)
+        self.assertEqual([watchstate._event_id("queue_empty", ADA.character_id, "F-ONE")],
+                         [e.id for e in events])
+
     def test_failed_fetch_keeps_prior_state_and_late_event_keeps_its_id(self):
         poll = [obs(items=[item(SKILL_NAV, 2, "training", "F-NAV")])]
         state, _ = watchstate.observe(watchstate.empty_state(), poll, T0)

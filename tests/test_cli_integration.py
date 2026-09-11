@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import os
 import subprocess
@@ -391,10 +392,13 @@ class InventoryCommandTests(CommandTestCase):
         # Only ore and the blueprint have buy orders here, so the total covers 2,401 of 2,558 units.
         self.assertIn("TOTAL (max buy @ Jita 4-4): 10,083.10 ISK over 2,401 units of 2 distinct "
                       "types; 3 more types held, none priced", out)
-        # The asks come out of the same rows, so they are free, and they reach types the buy side
-        # does not. Both bases label the age of their money the same way.
+        # The asks come out of the same rows, so they are free - but they reach types the buy side
+        # does not, and a comparison against the TOTAL has to cover the TOTAL's own rows. Only
+        # Tritanium is priced on both bases here (12,120.00); Pyerite has an ask and no bid, so it
+        # belongs to neither figure and is counted out loud instead of inflating the alternative.
         self.assertIn("listing the same holdings at Jita 4-4's cheapest standing ask would raise "
-                      "13,205.00 ISK over 2 types", out)
+                      "12,120.00 ISK over the 1 type both bases price", out)
+        self.assertIn("1 further type is priced on that basis alone", out)
         self.assertIn("freshness: as of ", out)
         self.assertEqual(5, len(self.env.server.calls_to("/markets/10000002/orders")))
         self.assertEqual([], self.env.server.calls_to("/markets/prices"))
@@ -474,6 +478,19 @@ class InventoryCommandTests(CommandTestCase):
         self.assertEqual(1, len(doc["warnings"]))
         self.assertIn("Mira Solen", doc["warnings"][0])
 
+    def test_a_row_priced_by_the_fallback_figure_says_so(self):
+        # `average_price` and `adjusted_price` are different published numbers. Where a held type
+        # has only the second, the total quietly mixes a trade average with CCP's industry
+        # reference, so the run has to say how many rows that covers and mark them per row.
+        code, out, _ = self.env.run(["inventory", "--char", "Ada"])
+        self.assertEqual(code, 0)
+        self.assertIn("had no published average price, so CCP's industry reference", out)
+        code, csv_out, _ = self.env.run(["inventory", "--char", "Ada", "--csv"])
+        rows = list(csv.DictReader(io.StringIO(csv_out)))
+        bases = {row["item_name"]: row["price_basis"] for row in rows}
+        self.assertEqual("esi_adjusted", bases["Rifter"])      # adjusted_price only
+        self.assertEqual("esi_reference", bases["Tritanium"])  # has a published average
+
     def test_json_is_one_document_carrying_ids_and_names_together(self):
         code, out, err = self.env.run(["inventory", "--json"])
         self.assertEqual(code, 0)
@@ -496,7 +513,12 @@ class InventoryCommandTests(CommandTestCase):
         # Group cells are numbers plus names: a consumer never has to re-derive a label from an id.
         jita = [g for g in owner["groups"] if g["name"] == "Jita - Mradd"][0]
         self.assertEqual(12008279.0, jita["value"])
-        self.assertIn({"name": "Ship", "types": 1, "units": 1, "value": 12000000.0}, jita["entries"])
+        # `unpriced_units` travels with the pair so a consumer can tell that a group's unit count
+        # covers more than its ISK does - the blueprint entry holds one unit nothing priced.
+        self.assertIn({"name": "Ship", "types": 1, "units": 1, "value": 12000000.0,
+                       "unpriced_units": 0}, jita["entries"])
+        self.assertIn({"name": "Blueprint", "types": 1, "units": 1, "value": None,
+                       "unpriced_units": 1}, jita["entries"])
 
     def test_corporation_inventory_asks_the_corporation_endpoints(self):
         """A corporation run must ask about the corporation's items. Reusing the character endpoint

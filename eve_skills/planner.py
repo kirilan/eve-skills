@@ -222,22 +222,36 @@ def build_plan(targets: dict[int, int], catalog: dict[int, SkillInfo],
     return TrainingPlan(items=items, covered=covered)
 
 
-def snapshot_rate(ctx, window_days: float = 7.0) -> float | None:
-    """SP/hour from local SP history over the recent window; None when too sparse."""
+def snapshot_rate(ctx, window_days: float = 7.0) -> tuple[float, float] | None:
+    """(sp_per_hour, hours_measured) from local SP history, or None when nothing is measurable.
+
+    The span is trimmed to whatever follows the most recent drop in `total_sp`. A Skill Extractor
+    takes SP out, so history that dips and recovers has two different things in it: a rate, and a
+    withdrawal. Measuring end to end across the dip nets them off and understates training badly -
+    50.0M, then 49.5M after an extractor, then 50.2M reads as 1,389 SP/hour where the character
+    really trained at 9,722. Rejecting only a net-negative window, as this did, never noticed the
+    dip at all; measuring only the monotonic tail uses real data and needs no correction.
+
+    The measured span travels with the figure because it is the caller's only way to say how much
+    data the rate came from: an hour of history and a week of it are both allowed here, and one of
+    them is a much better number than the other.
+    """
     char_id = ctx["token"]["character_id"]
     now_ts = ctx["now"].timestamp()
-    rows = [r for r in snapshots.load() if r["char_id"] == char_id and r["ts"] >= now_ts - window_days * 86400]
+    rows = sorted((r for r in snapshots.load()
+                   if r["char_id"] == char_id and r["ts"] >= now_ts - window_days * 86400),
+                  key=lambda r: r["ts"])
+    for index in range(len(rows) - 1, 0, -1):
+        if rows[index]["total_sp"] < rows[index - 1]["total_sp"]:
+            rows = rows[index:]     # SP left the character here; only what follows is training
+            break
     if len(rows) < 2:
         return None
-    first = min(rows, key=lambda r: r["ts"])
-    last = max(rows, key=lambda r: r["ts"])
-    hours = (last["ts"] - first["ts"]) / 3600
-    if hours < 1:
-        return None
-    gain = last["total_sp"] - first["total_sp"]
-    if gain <= 0:
-        return None  # flat or extraction-dipped history is not a measurable rate; callers must ask for --rate
-    return gain / hours
+    hours = (rows[-1]["ts"] - rows[0]["ts"]) / 3600
+    gain = rows[-1]["total_sp"] - rows[0]["total_sp"]
+    if hours < 1 or gain <= 0:
+        return None  # too short, or flat: not a measurable rate. Callers must ask for --rate.
+    return gain / hours, hours
 
 
 def calibrated_rate(ctx) -> tuple[float, str]:
@@ -266,9 +280,14 @@ def calibrated_rate(ctx) -> tuple[float, str]:
         gain = int(item["level_end_sp"]) - int(item["training_start_sp"])
         if span_h > 0 and gain > 0:
             return gain / span_h, "live training item"
-    rate = snapshot_rate(ctx)
-    if rate is not None:
-        return rate, "local SP history (7d)"
+    measured = snapshot_rate(ctx)
+    if measured is not None:
+        # Naming the window rather than the measurement would be the same defect as the two this
+        # function already carries comments about: "(7d)" over an hour-long slope claims a week of
+        # evidence for the noisiest number the history can produce.
+        rate, hours = measured
+        span = f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
+        return rate, f"local SP history ({span})"
     raise RuntimeError(
         "cannot estimate training rate: nothing is training right now and local SP history is too short. "
         "Pass --rate <sp-per-hour> or let the character train for a while first."

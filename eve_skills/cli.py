@@ -63,7 +63,9 @@ def gather(args, client: esi_mod.Esi | None = None) -> dict:
     )
 
     try:
-        snapshots.record(char_id, int(skills_doc.get("total_sp") or 0))
+        # ESI's clock, not the machine's: `week_line` and the rate calibration measure these rows
+        # against `now`, and a stamp from a different clock makes that span wrong by the skew.
+        snapshots.record(char_id, int(skills_doc.get("total_sp") or 0), now=now.timestamp())
     except OSError:
         pass  # history is diagnostics; never fail the view over it
 
@@ -102,7 +104,7 @@ def queue_status(item: dict, now) -> str:
 
 
 def level_sp_cell(item: dict, now, status: str) -> str:
-    """`249.5K/256.0K 97%` - SP into the level being trained, out of what the level costs.
+    """`204.3K/210.7K 97%` - SP into the level being trained, out of what the level costs.
 
     ESI publishes three SP figures per queue item and they answer three different questions:
     `level_start_sp` is where the level began, `level_end_sp` is where it ends, and
@@ -139,8 +141,13 @@ def level_sp_cell(item: dict, now, status: str) -> str:
         held = at_start + (level_end - at_start) * elapsed / span
     else:
         return "-"
-    return (f"{render.format_sp(int(round(held)))}/{render.format_sp(level_end)} "
-            f"{(held - level_start) / (level_end - level_start):.0%}")
+    # Both figures are level-relative, like the percentage beside them. The cumulative pair ESI
+    # publishes (SP held in the *skill* over SP the skill ends the level with) would put a ratio
+    # next to a percentage it contradicts: a rank-1 skill halfway through L1->L2 holds 832 of 1,414
+    # cumulative SP, which reads as 59% of a level that is 50% trained.
+    into_level, level_cost = held - level_start, level_end - level_start
+    return (f"{render.format_sp(int(round(into_level)))}/{render.format_sp(level_cost)} "
+            f"{into_level / level_cost:.0%}")
 
 
 def render_text(ctx: dict, args) -> str:
@@ -190,7 +197,12 @@ def render_text(ctx: dict, args) -> str:
     # ESI also lists never-trained prerequisite skills; the table is about what you have.
     rows_all = [r for r in ctx["rows"] if r.trained > 0 or r.pending_completion]
     alpha_n = sum(1 for r in rows_all if not r.beyond_alpha)
-    omega_n = len(rows_all) - alpha_n
+    # A row the local data could not classify has no cap, so `beyond_alpha` is true for it - but the
+    # warning three lines up has already said no omega claim is being made about it. Counting it as
+    # omega-restricted would make one screen assert and disclaim the same thing, so it gets its own
+    # bucket. The row's own cell already reads "unknown data"; the header now agrees with it.
+    unknown_n = sum(1 for r in rows_all if r.unknown_data)
+    omega_n = len(rows_all) - alpha_n - unknown_n
     filtered = [r for r in rows_all if FILTERS[args.filter](r)] if args.filter != "all" else rows_all
 
     if args.sort == "name":
@@ -202,7 +214,10 @@ def render_text(ctx: dict, args) -> str:
 
     out.append("")
     scope = "" if args.filter == "all" else f" (filter: {args.filter})"
-    out.append(f"TRAINED SKILLS ({len(filtered)} of {len(rows_all)}; alpha-trainable: {alpha_n}, omega-restricted: {omega_n}){scope}")
+    counts = f"alpha-trainable: {alpha_n}, omega-restricted: {omega_n}"
+    if unknown_n:
+        counts += f", unclassified: {unknown_n}"
+    out.append(f"TRAINED SKILLS ({len(filtered)} of {len(rows_all)}; {counts}){scope}")
     table_rows = []
     for r in filtered:
         level = f"{r.trained} (active {r.active})" if r.restricted else str(r.trained)
@@ -1564,7 +1579,8 @@ def _component_doc(component: industry.Component, names: dict[int, str]) -> dict
                 "blueprint_id": build.recipe.blueprint_id, "runs": build.runs, "units": build.units,
                 "surplus": build.surplus, "unit": build.unit, "material_cost": build.material_cost,
                 "job_cost": build.job_cost, "eiv": build.eiv, "total": build.total,
-                "unpriced": _typed_docs(build.unpriced, names)}}
+                "unpriced": _typed_docs(build.unpriced, names),
+                "eiv_missing": _typed_docs(build.eiv_missing, names)}}
 
 
 def build_cost_json(run: BuildRun) -> dict:
@@ -2165,7 +2181,15 @@ def cmd_plan(args):
                               planner.scheduled_levels(ctx["queue"]))
     if args.rate is not None and args.rate <= 0:
         raise RuntimeError(f"--rate must be a positive SP/hour value, not {args.rate:g}")
-    rate, rate_src = (float(args.rate), "--rate override") if args.rate is not None else planner.calibrated_rate(ctx)
+    # A plan with no items needs no rate, so it must not be refused for want of one: "every target
+    # is already covered" is the answer, and demanding --rate to print it would be an error message
+    # standing in for good news. Every consumer of `rate` below is inside the items loop or guarded.
+    if args.rate is not None:
+        rate, rate_src = float(args.rate), "--rate override"
+    elif plan.items:
+        rate, rate_src = planner.calibrated_rate(ctx)
+    else:
+        rate, rate_src = None, None
 
     # New items can only start once everything already queued has finished.
     eta = ctx["now"]
@@ -2195,8 +2219,9 @@ def cmd_plan(args):
         if not catalog[item.skill_id].published:
             notes.append(f"{item.name} is no longer published by CCP - its cost may be historical")
 
-    print(render.table(["skill", "why", "now", "target", "SP cost", "time", "ready"], rows))
-    print(f"\ntotal: {render.format_sp(plan.total_sp)} SP; queue would end ~{eta.strftime('%Y-%m-%d %H:%M')} UTC")
+    if plan.items:
+        print(render.table(["skill", "why", "now", "target", "SP cost", "time", "ready"], rows))
+        print(f"\ntotal: {render.format_sp(plan.total_sp)} SP; queue would end ~{eta.strftime('%Y-%m-%d %H:%M')} UTC")
     if backlog_end and backlog_end > ctx["now"]:
         print(f"note: the existing queue drains first (finishes ~{backlog_end.strftime('%Y-%m-%d %H:%M')} UTC);"
               " new items start after that")
@@ -2209,7 +2234,8 @@ def cmd_plan(args):
     if any(item.from_level > item.trained_level for item in plan.items):
         print("note: * = an existing queue entry raises this skill to that level before the item starts")
     pairs = sorted({(catalog[i.skill_id].primary, catalog[i.skill_id].secondary) for i in plan.items})
-    print(f"rate: {rate:,.0f} SP/hour ({rate_src})")
+    if rate is not None:
+        print(f"rate: {rate:,.0f} SP/hour ({rate_src})")
     if len(pairs) > 1:
         listed = ", ".join(f"{primary}/{secondary}" for primary, secondary in pairs)
         print(f"note: one rate is applied to every row, but these skills are driven by {listed};"

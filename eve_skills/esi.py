@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -105,7 +105,13 @@ def _header_epoch(headers, name: str) -> float | None:
         return None
 
 
-def _header_expiry(headers) -> float | None:
+def _header_expiry(headers, now: float | None = None) -> float | None:
+    """When a response stops being reusable, in ESI's own clock frame.
+
+    `Expires` is an absolute instant ESI stamped, so it is already in that frame. `max-age` is a
+    duration, and adding it to the local clock would put two different frames in one field - the
+    value is later compared against ESI's time, so `now` is the server-corrected epoch the caller
+    measures with, not `time.time()`."""
     expires = _header_epoch(headers, "Expires")
     if expires is not None:
         return expires
@@ -113,7 +119,7 @@ def _header_expiry(headers) -> float | None:
         part = part.strip()
         if part.startswith("max-age="):
             try:
-                return time.time() + int(part[8:])
+                return (time.time() if now is None else now) + int(part[8:])
             except ValueError:
                 pass
     return None
@@ -162,9 +168,9 @@ def fold_meta(metas: Iterable[Meta]) -> Meta:
     )
 
 
-def _meta_of(headers) -> Meta:
+def _meta_of(headers, now: float | None = None) -> Meta:
     return Meta(
-        expires=_header_expiry(headers),
+        expires=_header_expiry(headers, now),
         last_modified=_header_epoch(headers, "Last-Modified"),
         etag=headers.get("ETag"),
         pages=_page_count(headers),
@@ -204,16 +210,23 @@ class Esi:
 
         The cache stores the Meta together with the payload, because a hit and a 304
         revalidation both hand back bytes ESI generated earlier: reporting `now` for them would
-        present an hours-old order book as instantaneous. A 304 keeps the stored Meta verbatim -
-        same bytes, same generation.
+        present an hours-old order book as instantaneous. A 304 keeps the stored `last_modified`
+        and `etag` verbatim - same bytes, same generation - but takes the expiry ESI just stated,
+        which is the window the cache itself now honours.
+
+        Every expiry comparison uses ESI's clock, never the machine's. `Expires` is an instant
+        stamped by the server, so on a host whose clock is an hour behind, `time.time()` would
+        keep serving a five-minute order book for an hour and a watch loop polling that cache
+        would announce nothing the whole time.
         """
+        moment = self.now().timestamp()
         if not cache:
             value, headers = self._request("GET", path, token=token)
-            return value, _meta_of(headers)
+            return value, _meta_of(headers, moment)
         key = hashlib.sha1(f"{token or 'public'}\n{path}".encode()).hexdigest()
         with self._lock:
             entry = self._cache.get(key)
-        if entry and entry["expires"] > time.time():
+        if entry and entry["expires"] > moment:
             return entry["value"], entry["meta"]
         extra = {"If-None-Match": entry["etag"]} if entry and entry.get("etag") else None
         try:
@@ -222,10 +235,17 @@ class Esi:
             # ESI always sends Expires alongside a 304; fall back to revalidating next call.
             if entry is None:  # cannot happen against real ESI (we only get 304 for our own ETag)
                 raise EsiError(f"HTTP 304 on {path} with nothing cached") from None
+            expires = _header_expiry(nm.headers, moment) or 0.0
             with self._lock:
-                entry["expires"] = _header_expiry(nm.headers) or 0.0
-            return entry["value"], entry["meta"]
-        meta = _meta_of(headers)
+                entry["expires"] = expires
+                # The returned Meta has to describe the same window the cache is keeping, or a
+                # caller sees data ESI just vouched for stamped with an expiry already in the past.
+                # `market.publish_figures` refuses such a figure, so a revalidated book would
+                # never reach the durable quote cache.
+                entry["meta"] = replace(entry["meta"], expires=expires, pages=_page_count(nm.headers))
+                meta = entry["meta"]
+            return entry["value"], meta
+        meta = _meta_of(headers, moment)
         with self._lock:
             if meta.expires is not None:
                 self._cache[key] = {"value": value, "expires": meta.expires, "etag": meta.etag, "meta": meta}

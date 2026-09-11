@@ -27,15 +27,24 @@ def _recent(line: str, cutoff_ts: float) -> bool:
         return False  # corrupt lines are dropped on prune; load() always skipped them
 
 
-def record(character_id: int, total_sp: int):
+def record(character_id: int, total_sp: int, now: float | None = None):
     """Append one row, dropping anything past retention.
+
+    `now` is the epoch the row is stamped with, and callers pass ESI's clock (`client.now()`) for
+    the same reason every other date comparison in this tool does: these rows are later measured
+    against that clock, and stamping them with the local one puts the two ends of `skills --week`
+    on different clocks. A machine six hours fast writes a row six hours ahead of itself, so the
+    baseline lookup picks the day before and the printed SP/day is wrong by the skew; a large
+    forward jump prunes real history early. It defaults to the local clock only for a caller with
+    no ESI response to hand.
 
     The read-prune-rewrite runs under a lock: watch mode and a manual command can
     record in the same second, and each rewriting from its own stale read would leave
     only the last writer's rows on disk."""
+    moment = time.time() if now is None else now
     path = history_file()
-    row = json.dumps({"ts": round(time.time()), "char_id": int(character_id), "total_sp": int(total_sp)}) + "\n"
-    cutoff = time.time() - RETENTION_DAYS * 86400
+    row = json.dumps({"ts": round(moment), "char_id": int(character_id), "total_sp": int(total_sp)}) + "\n"
+    cutoff = moment - RETENTION_DAYS * 86400
     with storage.file_lock(os.path.join(paths.config_dir(), "sp-history.lock")):
         try:
             with open(path, encoding="utf-8") as fh:

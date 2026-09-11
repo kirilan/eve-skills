@@ -350,7 +350,13 @@ class BuildQuote:
     requirement does not land on a run boundary.
 
     `unpriced` names this job's own materials that no basis could price. Non-empty means the total
-    below is missing an input and must never be offered as what building costs."""
+    below is missing an input and must never be offered as what building costs.
+
+    `eiv_missing` is the softer gap, and the same distinction the top-level plan draws: a material
+    that has an ask but no `/markets/prices` adjusted row can be bought, so the material cost is
+    whole, but CCP levies the install fee on a value that has no figure for it. The fee is
+    therefore charged low, and the shortfall has to be named rather than folded into a total that
+    presents itself as complete."""
 
     recipe: Recipe
     runs: int
@@ -363,6 +369,7 @@ class BuildQuote:
     unit: float                # total / units, i.e. per unit actually produced
     time: int                  # seconds this job takes
     unpriced: tuple[int, ...]
+    eiv_missing: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -463,14 +470,14 @@ def _component_build(material_id: int, required: int, recipe: Recipe, index: Map
             continue
         material_cost += required_quantity(base, job_runs, me_job, facility.material_multiplier) * unit
 
-    eiv, _eiv_missing = estimated_item_value(candidate, job_runs, prices.adjusted)
+    eiv, eiv_missing = estimated_item_value(candidate, job_runs, prices.adjusted)
     fee = job_cost(eiv, facility)
     units = job_runs * candidate.product_qty
     total = material_cost + fee
     return BuildQuote(recipe=candidate, runs=job_runs, units=units, surplus=units - required,
                       material_cost=material_cost, eiv=eiv, job_cost=fee, total=total,
                       unit=total / units, time=job_time(candidate, job_runs, te_job),
-                      unpriced=tuple(sorted(missing)))
+                      unpriced=tuple(sorted(missing)), eiv_missing=eiv_missing)
 
 
 def _normalized_force(force: Mapping[int, str] | None) -> dict[int, str]:
@@ -605,6 +612,13 @@ def plan_build(recipe: Recipe, index: Mapping[int, Recipe], prices: Prices, faci
     material_cost = sum(component.cost for component in components if component.cost is not None)
     unpriced = tuple(sorted(component.type_id for component in components
                             if component.source == "unpriced"))
+    # A component job's own EIV gap is the parent's problem too: its install fee is part of the
+    # total printed here, and a fee levied on an incomplete value makes that total low. Only the
+    # builds actually charged can shift it, so a gap inside a component nobody builds is not one.
+    eiv_gaps = set(eiv_missing)
+    for component in components:
+        if component.source == "build" and component.build is not None:
+            eiv_gaps.update(component.build.eiv_missing)
     total = material_cost + fee
     return BuildPlan(
         recipe=recipe,
@@ -621,7 +635,7 @@ def plan_build(recipe: Recipe, index: Mapping[int, Recipe], prices: Prices, faci
         cost_per_unit=None if unpriced else total / units,
         time=job_time(recipe, runs, te_job),
         unpriced=unpriced,
-        eiv_missing=tuple(eiv_missing),
+        eiv_missing=tuple(sorted(eiv_gaps)),
     )
 
 
