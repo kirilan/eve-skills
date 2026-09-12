@@ -619,7 +619,7 @@ class FakeEsiEnv:
     # -- route scenarios ------------------------------------------------------
 
     def install_core(self):
-        """Everything `cli.gather` needs for both characters, plus attributes."""
+        """Everything `cmd_skills.gather` needs for both characters, plus attributes."""
         self.server.post("/universe/names", handler=self._names_handler)
         public = {
             ADA: {"name": "Ada Vane", "bloodline_id": 402, "corporation_id": CORP_SHARED},

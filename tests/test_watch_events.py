@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
-from eve_skills import cli, orders, watchstate
+from eve_skills import cli, cmd_watch, orders, watchstate
 from tests.fake_esi import (ADA, CORP_SHARED, SKILL_NAV, SKILL_WIDE, VELA, FakeEsiEnv,
                             owner_order)
 
@@ -664,7 +664,7 @@ class WatchCliTestCase(WatchLoopMixin, unittest.TestCase):
         # one process - runs nothing, and keeps ringing the terminal's own \a bell everywhere.
         argv = ["skills", "--watch", "1", "--notify"]
         with mock.patch("shutil.which", return_value=None), \
-                mock.patch.object(cli, "_notify_warned", False), \
+                mock.patch.object(cmd_watch, "_notify_warned", False), \
                 mock.patch("subprocess.run", side_effect=AssertionError("must not run")):
             _code, _out, first = self.run_watch(1, argv)
             self.complete_navigation()
@@ -698,7 +698,7 @@ class WatchClearTests(unittest.TestCase):
             state["n"] += 1
             if state["n"] >= cycles:
                 raise KeyboardInterrupt()
-            return cli.WatchCycle(title="skills", body="Ada Vane: Navigation to L2")
+            return cmd_watch.WatchCycle(title="skills", body="Ada Vane: Navigation to L2")
 
         class Out(io.StringIO):
             def isatty(self):
@@ -711,14 +711,14 @@ class WatchClearTests(unittest.TestCase):
             stack.enter_context(mock.patch("time.sleep"))
             stack.enter_context(mock.patch("sys.stdout", out))
             stack.enter_context(mock.patch("sys.stderr", err))
-            code = cli.watch_loop(SimpleNamespace(watch=1, notify=False), poll)
+            code = cmd_watch.watch_loop(SimpleNamespace(watch=1, notify=False), poll)
         self.assertEqual(130, code)
         return out.getvalue()
 
     def test_posix_terminal_gets_the_real_clear(self):
         # The unconditional-clear branch is the non-Windows one, so it is selected through the
         # product's own seam: on a Windows runner stdout may be a pipe with no VT mode to set.
-        with mock.patch.object(cli.paths, "is_windows", return_value=False):
+        with mock.patch.object(cmd_watch.paths, "is_windows", return_value=False):
             text = self.frames(2, tty=True)
         self.assertIn("\x1b[H\x1b[2J", text)
         self.assertNotIn("-" * 72, text)
@@ -732,16 +732,16 @@ class WatchClearTests(unittest.TestCase):
         # Forced Windows on a host that has no ctypes.windll: enabling cannot succeed, so the
         # frame must contain no escape at all - printing one is exactly the litter being avoided.
         text = self.frames(2, True,
-                           mock.patch.object(cli.paths, "is_windows", return_value=True),
-                           mock.patch.object(cli, "_vt_processing", None))
+                           mock.patch.object(cmd_watch.paths, "is_windows", return_value=True),
+                           mock.patch.object(cmd_watch, "_vt_processing", None))
         self.assertNotIn("\x1b", text)
         self.assertIn("-" * 72, text)
 
     def test_windows_console_with_virtual_terminal_still_clears(self):
         text = self.frames(2, True,
-                           mock.patch.object(cli.paths, "is_windows", return_value=True),
-                           mock.patch.object(cli, "_vt_processing", None),
-                           mock.patch.object(cli, "_enable_vt_processing", return_value=True))
+                           mock.patch.object(cmd_watch.paths, "is_windows", return_value=True),
+                           mock.patch.object(cmd_watch, "_vt_processing", None),
+                           mock.patch.object(cmd_watch, "_enable_vt_processing", return_value=True))
         self.assertIn("\x1b[H\x1b[2J", text)
         self.assertNotIn("-" * 72, text)
 

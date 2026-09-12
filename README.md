@@ -1406,38 +1406,44 @@ settle — order-book depth behind an ask, invention, who owns the blueprint —
 
 ```text
 eve_skills/
-  cli.py         parser + command handlers, gather(), text/JSON/CSV rendering, watch loop
-  doctor.py      read-only installation diagnostics (never writes, redacts secrets)
-  sso.py         OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
-  esi.py         stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
-  universe.py    asset identities: disk-cached type/group/category catalogue + nested location resolver
-  market.py      public order books: type/scope resolution, quote maths, cluster scan, freshness + history
-  industry.py    blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
-  orders.py      character/corporation order fetching, normalisation, access (consent vs role) diagnosis
-  classify.py    alpha-cap lookup, per-skill classification, clone-state inference
-  alphadata.py   packaged/user SDE data loading, transformations, update-data downloader
-  planner.py     rank-based SP costs, prerequisite expansion, rate calibration, extractor math
-  snapshots.py   local SP history (60-day JSONL)
-  watchstate.py  watch observations, exactly-once transitions, durable event history
-  storage.py     unique-temp atomic writes + advisory file locks (flock on POSIX, byte-range on Windows)
-  paths.py       the only resolver of the config / cache / data / state directories, on either platform
-  exports.py     standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
-  render.py      timestamps, SP/duration formatting, plain-text tables
-  data/          packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog, blueprint_materials)
-tests/           unittest suite: pure units, ESI transport, persistence concurrency + the injected
-                 Windows lock backend, path layout on both branches, fake-ESI command integration,
-                 planner catalog, market (+ quote cache), industry cost model and `build-cost` end to end,
-                 universe catalogue/locations, orders, watch/events, doctor (POSIX + forced Windows),
-                 packaging
+  cli.py             argument parser, the HANDLERS table and main(); one module per command area below
+  cmd_skills.py      skills / summary / plan / extract: gather(), the training book, text/JSON/CSV output
+  cmd_watch.py       the shared --watch loop, both watch cycles, desktop notifications, the events command
+  cmd_market.py      the market command: scopes asked for, quote tables, empty-book and reference notes
+  cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
+  cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
+  doctor.py          read-only installation diagnostics (never writes, redacts secrets)
+  sso.py             OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
+  esi.py             stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
+  universe.py        asset identities: disk-cached type/group/category catalogue + nested location resolver
+  market.py          public order books: type/scope resolution, quote maths, cluster scan, freshness + history
+  industry.py        blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
+  orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
+  classify.py        alpha-cap lookup, per-skill classification, clone-state inference
+  alphadata.py       packaged/user SDE data loading, transformations, update-data downloader
+  planner.py         rank-based SP costs, prerequisite expansion, rate calibration, extractor math
+  snapshots.py       local SP history (60-day JSONL)
+  watchstate.py      watch observations, exactly-once transitions, durable event history
+  storage.py         unique-temp atomic writes + advisory file locks (flock on POSIX, byte-range on Windows)
+  paths.py           the only resolver of the config / cache / data / state directories, on either platform
+  exports.py         standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
+  render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
+  data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog, blueprint_materials)
+tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
+                     Windows lock backend, path layout on both branches, fake-ESI command integration,
+                     planner catalog, market (+ quote cache), industry cost model and `build-cost` end
+                     to end, universe catalogue/locations, orders, watch/events, doctor (POSIX + forced
+                     Windows), packaging
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 
 Conventions: standard library only — adding a runtime dependency needs a deliberate decision.
 Console entry point is `eve-skills = eve_skills.cli:main`; `python -m eve_skills` calls the same
-function, so both paths must stay equivalent. New commands belong in `cli.py` (core) or `exports.py`
-(consent-gated views), take `--char` with the shared semantics, and degrade per character rather than
-aborting a multi-character run. Optional consent always goes through `sso.OPTIONAL_SCOPES` +
-`exports.targets()` so a missing grant stays a hint. Keep parser help text, this README and the scope
-table in sync when adding a feature name. A new OS difference belongs in `paths.py` (where a directory
-lives) or `storage.py` (how a file is locked and replaced), chosen by capability — module availability,
-not a version guess — so command handlers never learn the platform at all.
+function, so both paths must stay equivalent. New commands belong in a `cmd_*.py` command area (core)
+or `exports.py` (consent-gated views), take `--char` with the shared semantics, and degrade per
+character rather than aborting a multi-character run. Optional consent always goes through
+`sso.OPTIONAL_SCOPES` + `exports.targets()` so a missing grant stays a hint. Keep parser help text,
+this README and the scope table in sync when adding a feature name. A new OS difference belongs in
+`paths.py` (where a directory lives) or `storage.py` (how a file is locked and replaced), chosen by
+capability — module availability, not a version guess — so command handlers never learn the platform
+at all.

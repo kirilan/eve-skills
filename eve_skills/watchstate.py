@@ -96,7 +96,7 @@ def _commit_lock():
 
 @dataclass(frozen=True)
 class QueueItem:
-    """One queue entry as observed this poll. status is cli.queue_status()."""
+    """One queue entry as observed this poll. status is cmd_skills.queue_status()."""
     skill_id: int
     finished_level: int
     status: str                       # done | training | queued | blocked

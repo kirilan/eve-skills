@@ -486,6 +486,14 @@ def resolve_system(client: esi_mod.Esi, spec) -> tuple[int, str]:
     return _resolve(client, spec, "systems", "system")
 
 
+def hub_scope(spec: str) -> Scope:
+    """A named trade hub, narrowed to its station rather than its whole region."""
+    hub = HUBS.get(spec.strip().lower())
+    if hub is None:
+        raise RuntimeError(f"unknown hub '{spec}' - choices: {', '.join(HUBS)}")
+    return Scope(hub.region_id, f"{hub.label} (station)", hub.system_id, hub.station_id)
+
+
 # ---------------------------------------------------------------------------
 # quote cache: what ESI's own expiry licenses believing
 # ---------------------------------------------------------------------------

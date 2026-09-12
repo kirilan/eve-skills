@@ -12,7 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
-from eve_skills import classify, cli, esi, exports, paths, planner, snapshots, sso
+from eve_skills import classify, cli, cmd_skills, esi, exports, paths, planner, snapshots, sso
 NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
 
 # Synthetic skill ids with synthetic caps: tests pin the logic, not the SDE.
@@ -107,10 +107,10 @@ class QueueStatusTests(unittest.TestCase):
         training = queue_item(CAP3, 4, start=NOW - timedelta(hours=1), finish=NOW + timedelta(hours=1))
         queued = queue_item(CAP3, 4, start=NOW + timedelta(hours=1), finish=NOW + timedelta(hours=3))
         blocked = queue_item(CAP3, 4)
-        self.assertEqual(cli.queue_status(done, NOW), "done")
-        self.assertEqual(cli.queue_status(training, NOW), "training")
-        self.assertEqual(cli.queue_status(queued, NOW), "queued")
-        self.assertEqual(cli.queue_status(blocked, NOW), "blocked")
+        self.assertEqual(cmd_skills.queue_status(done, NOW), "done")
+        self.assertEqual(cmd_skills.queue_status(training, NOW), "training")
+        self.assertEqual(cmd_skills.queue_status(queued, NOW), "queued")
+        self.assertEqual(cmd_skills.queue_status(blocked, NOW), "blocked")
 
 
 class LevelSpCellTests(unittest.TestCase):
@@ -131,7 +131,7 @@ class LevelSpCellTests(unittest.TestCase):
     def test_progress_comes_from_sp_not_from_the_restamped_span(self):
         # 245,200 + (256,000 - 245,200) * 2/5 = 249,520 SP held in the skill, which is 204,265 into
         # the 210,745 this level costs: 96.9%. The elapsed span alone would have said 40%.
-        cell = cli.level_sp_cell(self.item(), NOW, "training")
+        cell = cmd_skills.level_sp_cell(self.item(), NOW, "training")
         self.assertEqual("204.3K/210.7K 97%", cell)
 
     def test_the_sp_pair_shares_the_percentage_baseline(self):
@@ -140,30 +140,30 @@ class LevelSpCellTests(unittest.TestCase):
         item = self.item(finished_level=2, level_start_sp=250, training_start_sp=250,
                          level_end_sp=1_414, start_date=(NOW - timedelta(hours=4)).isoformat(),
                          finish_date=(NOW + timedelta(hours=4)).isoformat())
-        self.assertEqual("582/1.2K 50%", cli.level_sp_cell(item, NOW, "training"))
+        self.assertEqual("582/1.2K 50%", cmd_skills.level_sp_cell(item, NOW, "training"))
 
     def test_a_nearly_finished_level_is_not_reported_as_barely_started(self):
         # The reported bug: an hour after a reorder, 94.9% read as 11%.
         item = self.item(start_date=(NOW - timedelta(hours=1)).isoformat(),
                          finish_date=(NOW + timedelta(hours=8)).isoformat(),
                          training_start_sp=244_000)
-        self.assertIn("95%", cli.level_sp_cell(item, NOW, "training"))
+        self.assertIn("95%", cmd_skills.level_sp_cell(item, NOW, "training"))
 
     def test_finished_and_unstarted_items(self):
-        self.assertEqual("210.7K/210.7K 100%", cli.level_sp_cell(self.item(), NOW, "done"))
-        self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "queued"))
-        self.assertEqual("-", cli.level_sp_cell(self.item(), NOW, "blocked"))
+        self.assertEqual("210.7K/210.7K 100%", cmd_skills.level_sp_cell(self.item(), NOW, "done"))
+        self.assertEqual("-", cmd_skills.level_sp_cell(self.item(), NOW, "queued"))
+        self.assertEqual("-", cmd_skills.level_sp_cell(self.item(), NOW, "blocked"))
 
     def test_missing_sp_fields_never_invent_a_figure(self):
         bare = {k: v for k, v in self.item().items() if not k.endswith("_sp")}
-        self.assertEqual("-", cli.level_sp_cell(bare, NOW, "training"))
+        self.assertEqual("-", cmd_skills.level_sp_cell(bare, NOW, "training"))
         # A finished item is still known to be finished without any SP figure to show.
-        self.assertEqual("100%", cli.level_sp_cell(bare, NOW, "done"))
-        self.assertEqual("-", cli.level_sp_cell(self.item(training_start_sp=None), NOW, "training"))
+        self.assertEqual("100%", cmd_skills.level_sp_cell(bare, NOW, "done"))
+        self.assertEqual("-", cmd_skills.level_sp_cell(self.item(training_start_sp=None), NOW, "training"))
 
     def test_a_clock_past_the_finish_stamp_is_a_full_level_not_more(self):
         item = self.item(finish_date=(NOW - timedelta(minutes=1)).isoformat())
-        self.assertEqual("210.7K/210.7K 100%", cli.level_sp_cell(item, NOW, "training"))
+        self.assertEqual("210.7K/210.7K 100%", cmd_skills.level_sp_cell(item, NOW, "training"))
 
 
 class SnapshotTests(unittest.TestCase):
@@ -213,7 +213,7 @@ class CsvContractTests(unittest.TestCase):
                                 sp=1234, cap=3, omega_now=False, restricted=True,
                                 pending_completion=False, unknown_data=False)
         ctx = {"token": {"character_id": 55}, "public": {"name": "Test, Character"}, "rows": [row]}
-        parsed = list(csv.reader(io.StringIO(cli.render_csv([ctx]))))
+        parsed = list(csv.reader(io.StringIO(cmd_skills.render_csv([ctx]))))
         self.assertEqual(parsed[0][0], "character_id")
         self.assertEqual(len(parsed), 2)
         self.assertEqual(parsed[1][:2], ["55", "Test, Character"])
@@ -225,7 +225,7 @@ class CsvContractTests(unittest.TestCase):
                                 sp=500, cap=None, omega_now=True, restricted=False,
                                 pending_completion=False, unknown_data=False)
         ctx = {"token": {"character_id": 1}, "public": {"name": "X"}, "rows": [row]}
-        parsed = list(csv.reader(io.StringIO(cli.render_csv([ctx]))))
+        parsed = list(csv.reader(io.StringIO(cmd_skills.render_csv([ctx]))))
         self.assertEqual(parsed[1][8], "omega")
 
 
@@ -496,8 +496,8 @@ class UnclassifiedCountTests(unittest.TestCase):
                "state": SimpleNamespace(state="UNKNOWN", confidence="low", evidence=[], warnings=[]),
                "names": {}}
         args = SimpleNamespace(trained_only=False, filter="all", sort="name", week=False)
-        with mock.patch.object(cli.alphadata, "load", return_value={"races": {"races": {}}}):
-            return cli.render_text(ctx, args)
+        with mock.patch.object(cmd_skills.alphadata, "load", return_value={"races": {"races": {}}}):
+            return cmd_skills.render_text(ctx, args)
 
     def row(self, sid, cap, unknown=False):
         return classify.SkillRow(skill_id=sid, name=f"skill {sid}", trained=4, active=4, sp=1000,
@@ -519,17 +519,17 @@ class PlanWithoutItemsTests(unittest.TestCase):
         # Nothing to train means nothing to price, so a character with no measurable rate (idle
         # queue, fresh install with no SP history) must still be told the target is covered rather
         # than be refused with "pass --rate" for a figure the answer never uses.
-        catalog = cli.load_skill_catalog()
+        catalog = cmd_skills.load_skill_catalog()
         skill_id, info = next((sid, row) for sid, row in catalog.items() if row.name == "Industry")
         ctx = {"now": NOW, "token": {"character_id": 1}, "public": {"name": "Tester"},
                "rows": [SimpleNamespace(skill_id=skill_id, trained=5, name=info.name)],
                "queue": [], "caps": {skill_id: 5}}
         args = SimpleNamespace(char="Tester", target=["Industry:5"], rate=None)
-        with mock.patch.object(cli, "gather", return_value=ctx), \
+        with mock.patch.object(cmd_skills, "gather", return_value=ctx), \
              mock.patch.object(sso, "list_characters", return_value=[{"character_id": 1}]), \
              mock.patch.object(planner, "calibrated_rate", side_effect=AssertionError("no rate needed")), \
              mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-            self.assertIn(cli.cmd_plan(args), (None, 0))
+            self.assertIn(cmd_skills.cmd_plan(args), (None, 0))
         printed = out.getvalue()
         self.assertIn("0 item(s) to train", printed)
         self.assertIn("already trained to L5", printed)
@@ -555,7 +555,7 @@ class CsvParityTests(unittest.TestCase):
             cap=5, beyond_alpha=False, restricted=False, pending_completion=pending, unknown_data=False)
         ctx = {"token": {"character_id": 7}, "public": {"name": "T"},
                "rows": [row(1, 0), row(2, 0, pending=True), row(3, 3)]}
-        out = list(csv.DictReader(io.StringIO(cli.render_csv([ctx]))))
+        out = list(csv.DictReader(io.StringIO(cmd_skills.render_csv([ctx]))))
         self.assertEqual([int(r["skill_id"]) for r in out], [2, 3])  # L0 unstarted rows only live in --json
 
 

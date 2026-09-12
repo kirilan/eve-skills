@@ -37,6 +37,21 @@ def format_sp(sp: int) -> str:
     return str(sp)
 
 
+def isk(value: float | None) -> str:
+    """ISK with thousands separators; "-" when there is no figure to show. A dash admits nobody is
+    quoting that side, or that ESI priced nothing on this basis; `0.00` would claim the thing is
+    worthless, and those are different statements."""
+    return "-" if value is None else f"{value:,.2f}"
+
+
+def csv_cell(value) -> str:
+    """CSV cell for an optional value: empty when unknown, unformatted otherwise - and bools as 1/0,
+    the convention every CSV in this tool already uses."""
+    if value is None:
+        return ""
+    return str(int(value)) if isinstance(value, bool) else str(value)
+
+
 def table(headers: list[str], rows: list[list[str]]) -> str:
     widths = [len(h) for h in headers]
     for row in rows:

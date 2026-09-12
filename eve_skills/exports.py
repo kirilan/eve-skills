@@ -196,12 +196,6 @@ REFERENCE_LABEL = ("ESI's published reference price - a figure CCP publishes abo
                    "not an order anybody will fill")
 
 
-def _isk(value) -> str:
-    """ISK with separators, or `-`. A dash admits ESI gave no figure for this basis; `0.00` would
-    claim the item is worthless, and those are different statements about somebody's holding."""
-    return "-" if value is None else f"{value:,.2f}"
-
-
 def _ident(value) -> int | None:
     try:
         return int(value)
@@ -529,7 +523,7 @@ def _group_value(cell: dict) -> str:
 
     A subtotal has one line for both figures, so without the mark the two read as a matching pair
     and invite value-per-unit arithmetic that is wrong by whatever was left unpriced."""
-    text = _isk(cell["value"])
+    text = render.isk(cell["value"])
     return f"{text} *" if cell["value"] is not None and cell["unpriced_units"] else text
 
 
@@ -537,8 +531,8 @@ def _owner_table(owner: InventoryOwner, by: str, items: bool) -> str:
     """One owner's table: the grouped view with a subtotal per section, or one row per item."""
     if items:
         table_rows = [[row["display"], row["group_name"], row["category_name"],
-                       f"{row['quantity']:,}", row["path"], _isk(row["unit_price"]),
-                       _isk(row["value"])] for row in _sorted_items(owner.rows)]
+                       f"{row['quantity']:,}", row["path"], render.isk(row["unit_price"]),
+                       render.isk(row["value"])] for row in _sorted_items(owner.rows)]
     else:
         table_rows = []
         for group in _inventory_groups(owner.rows, by):
@@ -558,7 +552,7 @@ def _totals_line(basis: Valuation, totals: dict) -> str:
     if totals["value"] is None:
         return (f"TOTAL ({basis.short}): nothing priced on this basis "
                 f"({totals['types']} distinct types held)")
-    line = (f"TOTAL ({basis.short}): {_isk(totals['value'])} ISK over {totals['priced_units']:,} "
+    line = (f"TOTAL ({basis.short}): {render.isk(totals['value'])} ISK over {totals['priced_units']:,} "
             f"units of {totals['priced_types']} distinct types")
     if totals["unpriced_types"]:
         extra = "s" if totals["unpriced_types"] != 1 else ""
@@ -703,7 +697,7 @@ def cmd_inventory(args):
     alt_line = None
     if basis.alt_label and alt_types:
         shared = f"{len(alt_types)} type" + ("s" if len(alt_types) != 1 else "")
-        alt_line = (f"listing the same holdings at {basis.alt_label} would raise {_isk(alt_total)} ISK "
+        alt_line = (f"listing the same holdings at {basis.alt_label} would raise {render.isk(alt_total)} ISK "
                     f"over the {shared} both bases price, across every owner shown")
         if alt_only:
             count = f"{len(alt_only)} further type" + ("s" if len(alt_only) != 1 else "")
