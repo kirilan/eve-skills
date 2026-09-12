@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_market, cmd_orders, cmd_skills, cmd_watch
+from . import cmd_build_cost, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_watch
 
 
 def cmd_login(args):
@@ -73,6 +73,9 @@ def cmd_update_data(args):
     print(f"  skill catalog: {summary['catalog_skills']} skills (name, rank, attributes, prerequisites)")
     print(f"  blueprint materials: {summary['blueprint_products']} products a manufacturing or reaction "
           f"blueprint builds (materials, run time, batch limit)")
+    print(f"  planetary industry: {summary['pi_schematics']} schematics across "
+          f"{summary['pi_planet_types']} planet types, {summary['pi_commodities']} commodities and "
+          f"{summary['pi_command_center_levels']} command center levels (facility costs, output rates, customs tax)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -237,6 +240,65 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_cost.add_argument("--csv", action="store_true",
                               help="CSV material rows on stdout; the notes go to stderr")
 
+    p_pi = sub.add_parser("pi", help="planetary industry: recipe trees, a colony's CPU/powergrid budget "
+                                     "and what one planet type can make alone (recipes from local SDE "
+                                     "data; prices from public ESI, no login)")
+    pisub = p_pi.add_subparsers(dest="pi_action", metavar="ACTION")
+
+    p_pi_chain = pisub.add_parser("chain", help="the recipe tree for one product down to its raw materials")
+    p_pi_chain.add_argument("type", metavar="PRODUCT",
+                            help="exact type name or numeric id of the thing to make, e.g. "
+                                 "\"Broadcast Node\"; quantities in the tree are per 1 unit of it")
+    p_pi_chain.add_argument("--hub", metavar="HUB",
+                            help=f"price every step at this trade hub's station (default jita): "
+                                 f"{', '.join(market.HUBS)}")
+    p_pi_chain.add_argument("--region", metavar="NAME",
+                            help="price every step somewhere in this region (exact name or id) instead of "
+                                 "at one station - the whole regional book, so any system's asks win")
+    p_pi_chain.add_argument("--customs-rate", dest="customs_rate", type=float, metavar="PCT",
+                            help="add a customs column: the percent a corporation sets at its own customs "
+                                 "office (0..100). ESI only publishes that rate to the corporation owning "
+                                 "the office, so this number is yours to know; each step is billed on the "
+                                 "SDE's own per-unit customs values, discounted on inputs and not on output")
+    p_pi_chain.add_argument("--json", action="store_true",
+                            help="machine-readable tree: every step with its quantity, price and margin")
+    p_pi_chain.add_argument("--csv", action="store_true",
+                            help="CSV step rows on stdout; the notes go to stderr")
+
+    p_pi_fit = pisub.add_parser("fit", help="a colony layout against its command centre budget")
+    p_pi_fit.add_argument("--ccu", type=int, required=True, metavar="N",
+                          help=f"command centre upgrade level ({', '.join(str(level) for level in cmd_pi.CCU_LEVELS)}) "
+                               f"- it is what sets the CPU and powergrid budget everything else has to fit into")
+    p_pi_fit.add_argument("--ecu", type=int, default=0, metavar="N",
+                          help="extractor control units fitted; each can attach at most "
+                               f"{cmd_pi.MAX_HEADS_PER_ECU} extractor heads")
+    p_pi_fit.add_argument("--heads", type=int, default=None, metavar="N",
+                          help="extractor heads to charge for (each draws the ECU's own head CPU/PG); omit "
+                               "it and the command reports the most that still fit and which resource binds")
+    p_pi_fit.add_argument("--basic", type=int, default=0, metavar="N", help="basic industry facilities")
+    p_pi_fit.add_argument("--advanced", type=int, default=0, metavar="N", help="advanced industry facilities")
+    p_pi_fit.add_argument("--high-tech", dest="high_tech", type=int, default=0, metavar="N",
+                          help="high-tech industry facilities")
+    p_pi_fit.add_argument("--storage", type=int, default=0, metavar="N", help="storage facilities")
+    p_pi_fit.add_argument("--launchpad", type=int, default=0, metavar="N",
+                          help="launchpads - by far the hungriest item on the budget at 3600 CPU / 700 PG")
+    p_pi_fit.add_argument("--link-allowance", dest="link_allowance", metavar="CPU,PG",
+                          help="charge the layout for keeping inter-planetary links up, as CPU,PG "
+                               "(e.g. --link-allowance 500,400); what a colony's links cost depends on "
+                               "which links it has and ESI publishes nothing about them, so this is your figure")
+    p_pi_fit.add_argument("--json", action="store_true", help="machine-readable load, budget and verdict")
+
+    p_pi_planet = pisub.add_parser("planet-type",
+                                   help="one planet type's raw materials and everything it can refine "
+                                        "with no imports")
+    p_pi_planet.add_argument("planet", metavar="TYPE",
+                             help="planet type name or id: Barren, Gas, Ice, Lava, Oceanic, Plasma, "
+                                  "Storm, Temperate (or their ids)")
+    p_pi_planet.add_argument("--json", action="store_true",
+                             help="machine-readable output: raw materials and every reachable product")
+    p_pi_planet.add_argument("--csv", action="store_true",
+                             help="CSV rows - one per commodity, tier 0 to tier 3 - on stdout")
+
     p_orders = sub.add_parser("orders",
                               help="open market orders of stored characters or their corps (needs login --scopes orders)")
     p_orders.add_argument("--char", help="stored character name or id (default: every stored character)")
@@ -280,7 +342,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "travel": exports.cmd_travel, "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders}
+            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi}
 
 
 def _use_utf8_streams() -> None:

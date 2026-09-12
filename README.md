@@ -34,6 +34,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `attributes` | Base attributes, remaps available/last remap, accelerator days | no — covered by the standard skills consent |
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume | no — public ESI; works before you have logged in |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
+| `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
@@ -335,10 +336,10 @@ into in the browser, so run one `login` per character.
   prints the fix once (`eve-skills login --scopes structures`). A token that provably lacks the scope is
   never sent probing at all — every refusal costs ESI error-window budget that throttles the rest of the
   run.
-- **Market prices need no consent at all** — `market` and `build-cost` read the public order books, so
-  they work on a fresh install with nothing configured. Only *your own* orders are private: `orders` needs
-  the `orders` consent, and `orders --corp` additionally needs `corp-orders` plus the in-game Accountant
-  or Trader role (see [orders](#orders--open-and-closed-market-orders)).
+- **Market prices need no consent at all** — `market`, `build-cost` and `pi chain` read the public
+  order books, so they work on a fresh install with nothing configured. Only *your own* orders are
+  private: `orders` needs the `orders` consent, and `orders --corp` additionally needs `corp-orders`
+  plus the in-game Accountant or Trader role (see [orders](#orders--open-and-closed-market-orders)).
 
 ---
 
@@ -848,6 +849,162 @@ run overshoots the recipe. Each product object reports the levels its money was 
 under `unpriced`, and `--csv` writes one row per material to stdout with every note on stderr, so a
 header a script already reads keeps meaning.
 
+### `pi` — planetary industry: recipe trees, colony fits, planet yields
+
+```bash
+eve-skills pi chain "Broadcast Node"                   # every step down to the raw materials, priced
+eve-skills pi chain 2867 --hub amarr                   # a type id, shopped at Amarr's station
+eve-skills pi chain "Data Chips" --region Heimatar     # price off a whole region's book instead
+eve-skills pi chain "Broadcast Node" --customs-rate 5  # add what a 5% customs office takes per step
+eve-skills pi fit --ccu 4 --launchpad 1 --ecu 2 --basic 2 --advanced 1 --link-allowance 500,400
+eve-skills pi fit --ccu 3 --ecu 1 --heads 12           # a layout that cannot work, and which rule stops it
+eve-skills pi planet-type Barren                       # one planet's raws and all it can refine alone
+```
+
+Nothing here logs in. Recipes, structure costs, command-centre budgets and the per-unit customs values come
+from the local SDE snapshot — build 3494416 ships in the package and `update-data` refreshes it: 68
+schematics (15 tier 1, 24 tier 2, 21 tier 3, 8 tier 4), 83 commodities on five customs tiers, eight planet
+types, and the CPU/powergrid every structure draws — and only `pi chain` touches the network at all, for
+prices, on the public order-book endpoints. `fit` and `planet-type` answer from the snapshot alone; their
+tests assert that not one request leaves the process.
+
+```text
+$ eve-skills pi chain "Broadcast Node"
+Broadcast Node (id 2867) - planetary recipe tree per 1 unit of product, SDE build 3494416
+commodity                  tier  qty/unit  facility   cycle   planets                     price/u       va/fac-hr
+-------------------------  ----  --------  ---------  ------  --------------------------  ------------  ----------
+Broadcast Node             4     1         high-tech  1h 00m                              1,980,000.00  321,240.00
+  Data Chips               3     6         advanced   1h 00m                              104,600.00    -4,100.00
+    Microfiber Shielding   2     20        advanced   1h 00m                              17,400.00     29,192.00
+      Industrial Fibers    1     160       basic      30m                                 720.60        4,704.00
+        Autotrophs         0     24,000    -          -       Temperate                   4.02          -
+      Silicon              1     160       basic      30m                                 724.60        -9,776.00
+        Felsic Magma       0     24,000    -          -       Lava                        6.46          -
+...
+  prices: cheapest standing ask at Jita 4-4 (station), as of 23:38:25Z (4m 23s ago; ESI refreshes the book
+  every 5 min); 28 order-book requests now
+```
+
+`qty/unit` is what **one unit of the product** needs, not what one facility cycle makes: each quantity is
+scaled through its own schematic's per-cycle ratio, so tier 1 sits under this tree at 24,000 units of raw
+material for a single Broadcast Node. That is also why the output is an indented tree instead of a summed
+shopping list — Silicon appears twice, once under Data Chips and once under Silicate Glass, each at the
+quantity that branch needs, because the two branches can be run on different colonies.
+
+`va/fac-hr` answers the question a colony actually turns on: what one hour of that facility is worth. It is
+`(output × price − inputs × prices) ÷ cycle hours` from the schematic's own per-cycle quantities, so it does
+not change with scale and is the figure for the tree above as much as for one cycle. Negative rows are kept
+rather than hidden — Data Chips loses 4,100 an hour at today's asks, which is the fact that makes someone
+sell Microfiber Shielding instead. A step whose output or any input has neither an ask in scope nor a
+published price prints `-` for `va/fac-hr` and names the type in a note: an unpriced participant is never
+counted as free.
+
+Prices are why `chain` asks for anything. The default scope is Jita 4-4; `--hub` picks another trade hub and
+`--region` prices off a whole region's book, and the two together are refused because they disagree about
+what "the market" is. There is no install fee in planetary industry, so there is no `--system`: unlike
+`build-cost`, nothing here needs a system to bill, only a scope to read asks from. One order book per
+distinct type in the tree — 28 for Broadcast Node — and ESI's megabyte `/markets/prices` document is fetched
+only when some participant actually lacks an ask; a second run inside the quote-cache window says so
+instead: `no order-book request: all 28 types came from the local quote cache, which ESI's own expiry says
+is still current`.
+
+Customs is the one number this command cannot look up. ESI publishes a customs office's rate to the
+corporation that owns it and to nobody else, so `--customs-rate PCT` is yours to supply — validated 0..100
+before any book is opened. Each step is then billed from the SDE's own per-unit values:
+`PCT × (inputs×tax × 0.5 + output×tax × 1.0)`, the import and export factors read from the document rather
+than hard-coded, so a CCP change arrives with `update-data`. The root row above is checkable by hand: 18
+units of tier-3 input at 60,000 each discounted to half (540,000) plus one tier-4 output at 1,200,000, times
+5% = 87,000. Customs gets its own column and is never folded into `va/fac-hr`, because a corporation sets
+the rate to change behaviour and the point of the table is to see *which* step the rate punishes.
+
+```text
+$ eve-skills pi fit --ccu 4 --launchpad 1 --ecu 2 --basic 2 --advanced 1 --link-allowance 500,400
+Planetary colony fit - command centre upgrade level 4, SDE build 3494416
+item                           cpu each  pg each  count  cpu     pg
+-----------------------------  --------  -------  -----  ------  ------
+launchpad                      3,600     700      1      3,600   700
+extractor control unit         400       2,600    2      800     5,200
+basic industry facility        200       800      2      400     1,600
+advanced industry facility     500       700      1      500     700
+planetary links                500       400      1      500     400
+total                                             7      5,800   8,600
+command centre level 4 budget                            21,315  17,000
+free                                                     15,515  8,400
+
+  each extractor head costs 110 CPU / 550 PG (the ECU's own head figures in the local SDE)
+  the free budget would carry 141 heads on CPU and 15 on powergrid; 2 extractor control units can attach at most 20
+  fits: yes - room for 15 extractor heads; powergrid binds first
+```
+
+The command-centre ladder is what `--ccu` selects — 1,675 CPU / 6,000 PG at level 0 up to 25,415 / 19,000 at
+level 5 — and the measurement behind this command is that those figures, and every structure's cost, are
+**the same for all eight planet types** in build 3494416. That is why `fit` takes no planet: it would be a
+parameter nobody needs. The check is kept in the code rather than in a comment — if a future SDE makes one
+planet's budget differ, the command refuses and names the disagreement instead of quietly averaging eight
+numbers. Powergrid is what binds real colonies: on the layout above CPU would carry 141 more heads and
+powergrid 15, so powergrid decides, and the note says both. Four layouts were measured against this ladder:
+the one above fits 15 heads; the same shape at level 5 (free 19,615 / 10,400) fits 18; four ECUs, four basic
+and two advanced facilities at level 4 leave only 900 PG and fit 1 head; the identical layout at level 5 fits
+5. One launchpad alone eats 3,600 CPU — a fifth of a level-4 budget — which is why `--launchpad` is the first
+number worth arguing about.
+
+Heads are charged what the SDE says an ECU's head costs (110 CPU / 550 PG), and at most ten attach to one
+ECU. That cap is a documented game rule, not a dogma value: it was looked for and not found in the data —
+of 2,867 attributes on build 3503375 only `ecuExtractorHeadCPU` (1690) and `ecuExtractorHeadPower` (1691)
+describe heads at all, `/universe/types/2848` publishes no head count, and `/universe/dogma/*` returns 404 —
+so it is taken from EVE University's *Planetary buildings* page (read 2026-09-13: "every head (up to a
+maximum of 10) needs an amount of Powergrid (550) and CPU") and carried as a named constant. Ask for twelve
+heads on one ECU and the answer is a verdict, not a stack trace: `fits: no - more heads than the units can
+carry: 12 heads against 1 x 10 = 10`, exit 0, because the question that makes someone run this is a near
+miss. Over budget is reported the same way — level 0 with a launchpad and an ECU prints the table, then
+`fits: no - CPU over budget by 2,325.00`. Only nonsense is refused: a negative count, `--ccu` outside 0..5,
+a malformed `--link-allowance`.
+
+`--link-allowance CPU,PG` is your figure, and the output labels it as one. What keeping inter-planetary
+links up costs depends on which links a colony has, and ESI publishes nothing about it; charging an
+invented default would put a number you did not choose into a budget decision.
+
+```text
+$ eve-skills pi planet-type Barren
+Barren (planet type 2016) - what it yields and refines with no imports, SDE build 3494416
+raw material      refines into (tier 1)
+----------------  ---------------------
+Aqueous Liquids   Water
+Base Metals       Reactive Metals
+Carbon Compounds  Biofuels
+Microorganisms    Bacteria
+Noble Metals      Precious Metals
+
+product                        tier  facility  cycle
+-----------------------------  ----  --------  ------
+Biocells                       2     advanced  1h 00m
+Mechanical Parts               2     advanced  1h 00m
+Nanites                        2     advanced  1h 00m
+Test Cultures                  2     advanced  1h 00m
+Water-Cooled CPU               2     advanced  1h 00m
+Transcranial Microcontrollers  3     advanced  1h 00m
+  no tier-4 product is reachable on Barren with no imports; no planet type in SDE build 3494416 reaches one
+  alone, because every tier-4 recipe wants at least one input another planet's extractors yield
+```
+
+`planet-type` closes the recipe set over the schematics that run on that planet alone — a product counts
+only if everything feeding it is itself reachable without an import. The closure was cross-checked against
+an independent from-scratch walk over all eight planet types with zero disagreements, and the result worth
+knowing before planning a nine-character operation is in the note above: **no single planet type reaches
+tier 4 on its own**, because every tier-4 recipe wants at least one input another planet's extractors yield.
+A shorter list than expected is a fact about the SDE, so it is said out loud instead of leaving an empty
+table to be misread as a bug.
+
+Machine output follows the same rules as the rest of the tool. `chain --json` reports the product, the
+pricing scope and every step with `qty_per_unit_of_product`, `price_per_unit`, `price_basis`
+(`min_sell` or `esi_adjusted`), `value_added_per_facility_hour`, `customs_per_facility_hour` and the lists of
+`unpriced_participants` / `untaxed_participants` that made any of those a null; `--csv` writes one row per
+step to stdout with the notes on stderr. `fit --json` keeps the verdict machine-readable: `heads.binding` is
+a key from `heads.limits` (`cpu`, `powergrid`, `per_ecu_cap`, ties joined with `+`) so a spreadsheet can
+pivot on it, while the text says "CPU and powergrid" — and `over_budget`, `fits` and `reasons` separate what
+the layout costs from whether it is allowed. `planet-type --csv` writes one row per commodity from tier 0
+down, with each product's inputs in its own cell.
+
 ### `plan` — training plan (one character)
 
 ```bash
@@ -999,7 +1156,7 @@ id,ts,time_utc,kind,character_id,character_name,skill_id,skill_name,finished_lev
 has (never later than the order's own expiry). The text view prints those two as `[history]` and
 `[time estimated]` on the affected lines.
 
-### `update-data` — alpha caps, skill catalog and blueprint recipes from the official SDE
+### `update-data` — alpha caps, skill catalog, blueprint recipes and planetary industry from the official SDE
 
 ```bash
 eve-skills update-data              # latest build (~100 MB download)
@@ -1007,17 +1164,20 @@ eve-skills update-data --build 3494416   # example: pin a known specific build
 ```
 
 Downloads the official JSONL SDE zip from `developers.eveonline.com`, extracts clone grades, bloodline
-races, the full skill catalog (name, rank, attributes and prerequisites for every catalogued skill) and
+races, the full skill catalog (name, rank, attributes and prerequisites for every catalogued skill),
 the material list of every blueprint — manufacturing runs and reactions alike, keyed by the product each
-one makes — and atomically replaces four files in the data directory
+one makes — and the planetary-industry chain: each planet type with what its extractors pull, every
+recipe with its inputs, outputs, cycle time, plant class and the planets able to run it, the CPU and power
+each structure draws, a command center's output at every upgrade level, and the customs-tax factors —
+and atomically replaces five files in the data directory
 (`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That user copy takes
-precedence over the snapshot shipped in the package, so you can refresh caps, the catalog and the recipes
-without touching the checkout. `plan` is built on this catalog — without one it refuses with `no local
-skill catalog - run: eve-skills update-data` — and `build-cost` is built on the recipes, which is why a
-type that nothing makes locally ends by naming `update-data` instead of printing a table of dashes. The
-whole download runs under `update.lock`, so two concurrent runs cannot both pull ~100 MB and interleave
-builds, and each file is replaced atomically. `skills` warns when the local snapshot is more than 90 days
-old (the age line also names the SDE build in use).
+precedence over the snapshot shipped in the package, so you can refresh caps, the catalog, the recipes and
+the planetary data without touching the checkout. `plan` is built on this catalog — without one it refuses
+with `no local skill catalog - run: eve-skills update-data` — and `build-cost` is built on the recipes,
+which is why a type that nothing makes locally ends by naming `update-data` instead of printing a table of
+dashes; `pi` reads the planetary document. The whole download runs under `update.lock`, so two concurrent
+runs cannot both pull ~100 MB and interleave builds, and each file is replaced atomically. `skills` warns
+when the local snapshot is more than 90 days old (the age line also names the SDE build in use).
 
 ### `doctor` — installation diagnostics
 
@@ -1035,9 +1195,9 @@ on (`versions.platform` — a pasted report may be read on a different machine t
 data directories and their permissions (including the state directory the watchers use), config and
 token-store readability, per-character login state (token time left, auto-refresh, granted consent —
 `orders` and `corp-orders` included), SDE document freshness and where each document resolves from — all
-four of them, `blueprint_materials.json` last, whose absence is a warning naming `update-data` rather than
-a blocker because it costs only `build-cost` — the registered callback URLs, SP-history age, and what the
-watchers have accumulated:
+five of them, `planet_industry.json` last; as with `blueprint_materials.json`, an absent one is a warning
+naming `update-data` rather than a blocker, since it costs one command's subject and not the tool — the
+registered callback URLs, SP-history age, and what the watchers have accumulated:
 
 - `watch.state` — watched characters, order owners (split into characters and corporations), known
   open orders, and how long ago any of them was last polled. A state that only holds training data is
@@ -1136,7 +1296,7 @@ naming the wrong tree beats naming nothing.
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
-| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes | Non-secret |
+| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id | Non-secret |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
@@ -1411,6 +1571,7 @@ eve_skills/
   cmd_watch.py       the shared --watch loop, both watch cycles, desktop notifications, the events command
   cmd_market.py      the market command: scopes asked for, quote tables, empty-book and reference notes
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
+  cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
   cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
   doctor.py          read-only installation diagnostics (never writes, redacts secrets)
   sso.py             OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
@@ -1428,7 +1589,8 @@ eve_skills/
   paths.py           the only resolver of the config / cache / data / state directories, on either platform
   exports.py         standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
-  data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog, blueprint_materials)
+  data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog,
+                     blueprint_materials, planet_industry)
 tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
                      Windows lock backend, path layout on both branches, fake-ESI command integration,
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end

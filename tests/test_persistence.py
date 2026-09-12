@@ -704,9 +704,10 @@ class AlphadataUpdateTests(XdgTestCase):
         self.zip_blob = self.make_zip()
 
     def make_zip(self) -> bytes:
-        """One skill with a prerequisite, one bare skill, types that are not skills, and three
-        blueprint rows: manufacturing next to its copying sibling, one reaction, and a run with no
-        materials at all."""
+        """One skill with a prerequisite, one bare skill, types that are not skills, three blueprint
+        rows (manufacturing next to its copying sibling, one reaction, and a run with no materials at
+        all), and the smallest planetary industry picture that still resolves: one recipe whose pin is
+        a processor, on one planet, turning one raw resource into one tier-1 commodity."""
         members = {
             "cloneGrades.jsonl": '{"_key": 1, "name": "Caldari Alpha Clone", "skills": [{"typeID": 1003, "level": 3}]}\n',
             "bloodlines.jsonl": '{"_key": 402, "raceID": 1}\n',
@@ -717,10 +718,38 @@ class AlphadataUpdateTests(XdgTestCase):
                                ' {"attributeID": 182, "value": 1002.0}, {"attributeID": 277, "value": 3.0}]}\n'
                                '{"_key": 1002, "dogmaAttributes": [{"attributeID": 180, "value": 165.0},'
                                ' {"attributeID": 181, "value": 164.0}, {"attributeID": 275, "value": 1.0}]}\n'
-                               '{"_key": 900, "dogmaAttributes": [{"attributeID": 180, "value": 164.0}]}\n',
+                               '{"_key": 900, "dogmaAttributes": [{"attributeID": 180, "value": 164.0}]}\n'
+                               # Planetary industry, in the SDE's own spelling: cpuLoad/powerLoad (49/15)
+                               # for the plant, harvesterType (709) for what the extractor pulls,
+                               # importTax/exportTax (1638/1639) on the launchpad, and cpuOutput/powerOutput
+                               # (48/11) on the command center - which also carries exportTax 3.0, a
+                               # structure modifier that must not be mistaken for the planet's rate.
+                               '{"_key": 2469, "dogmaAttributes": [{"attributeID": 49, "value": 200.0},'
+                               ' {"attributeID": 15, "value": 800.0}, {"attributeID": 1632, "value": 2016.0}]}\n'
+                               '{"_key": 2247, "dogmaAttributes": [{"attributeID": 49, "value": 200.0},'
+                               ' {"attributeID": 15, "value": 800.0}, {"attributeID": 1632, "value": 2016.0},'
+                               ' {"attributeID": 709, "value": 2268.0}]}\n'
+                               '{"_key": 16239, "dogmaAttributes": [{"attributeID": 49, "value": 3600.0},'
+                               ' {"attributeID": 15, "value": 700.0}, {"attributeID": 1632, "value": 2016.0},'
+                               ' {"attributeID": 1638, "value": 0.5}, {"attributeID": 1639, "value": 1.0}]}\n'
+                               '{"_key": 2524, "dogmaAttributes": [{"attributeID": 48, "value": 1675.0},'
+                               ' {"attributeID": 11, "value": 6000.0}, {"attributeID": 1632, "value": 2016.0},'
+                               ' {"attributeID": 1639, "value": 3.0}]}\n'
+                               '{"_key": 2268, "dogmaAttributes": [{"attributeID": 1640, "value": 5.0},'
+                               ' {"attributeID": 1641, "value": 5.0}]}\n'
+                               '{"_key": 3645, "dogmaAttributes": [{"attributeID": 1640, "value": 400.0},'
+                               ' {"attributeID": 1641, "value": 400.0}]}\n',
             "types.jsonl": '{"_key": 1003, "name": {"en": "Astrogeology", "de": "Astrogeologie"}, "published": true}\n'
                            '{"_key": 1002, "name": {"en": "Science"}, "published": true}\n'
-                           '{"_key": 900, "name": {"en": "Reactor Control Unit"}, "published": false}\n',
+                           '{"_key": 900, "name": {"en": "Reactor Control Unit"}, "published": false}\n'
+                           '{"_key": 2268, "name": {"en": "Aqueous Liquids"}, "groupID": 1032, "published": true}\n'
+                           '{"_key": 3645, "name": {"en": "Water"}, "groupID": 1042, "published": true}\n'
+                           '{"_key": 2469, "name": {"en": "Barren Basic Industry Facility"}, "groupID": 1028, "published": true}\n'
+                           '{"_key": 2247, "name": {"en": "Barren Extractor"}, "groupID": 1026, "published": true}\n'
+                           '{"_key": 16239, "name": {"en": "Barren Launchpad"}, "groupID": 1030, "published": true}\n'
+                           '{"_key": 2524, "name": {"en": "Barren Command Center"}, "groupID": 1027, "published": true}\n'
+                           # Planet names only exist on unpublished marker types; the document still has to carry them.
+                           '{"_key": 2016, "name": {"en": "Planet (Barren)"}, "groupID": 7, "published": false}\n',
             # The SDE's own row shape; only the two activities that consume goods may survive it.
             "blueprints.jsonl": '{"_key": 681, "maxProductionLimit": 300, "activities": '
                                 '{"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
@@ -733,6 +762,14 @@ class AlphadataUpdateTests(XdgTestCase):
                                 '"products": [{"typeID": 16672, "quantity": 20}], "time": 360}}}\n'
                                 '{"_key": 900, "maxProductionLimit": 1, "activities": {"manufacturing": '
                                 '{"materials": [], "products": [{"typeID": 899, "quantity": 1}], "time": 60}}}\n',
+            # The SDE's own row shape for a recipe: pins are bare type ids, quantities live in `types`.
+            "planetSchematics.jsonl": '{"_key": 121, "cycleTime": 1800, "name": {"en": "Water"}, '
+                                      '"pins": [2469], "types": [{"_key": 2268, "isInput": true, "quantity": 3000}, '
+                                      '{"_key": 3645, "isInput": false, "quantity": 20}]}\n',
+            # Category is what separates a structure from a raw resource from a manufactured commodity.
+            "groups.jsonl": '{"_key": 1026, "categoryID": 41}\n{"_key": 1027, "categoryID": 41}\n'
+                            '{"_key": 1028, "categoryID": 41}\n{"_key": 1030, "categoryID": 41}\n'
+                            '{"_key": 1032, "categoryID": 42}\n{"_key": 1042, "categoryID": 43}\n',
         }
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -774,7 +811,7 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual(summaries[0]["grades"]["1"], {"name": "Caldari Alpha Clone", "skills": 1})
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
         for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
-                     "blueprint_materials.json"):
+                     "blueprint_materials.json", "planet_industry.json"):
             path = os.path.join(self.data_dir, name)
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
@@ -793,6 +830,22 @@ class AlphadataUpdateTests(XdgTestCase):
             "45732": {"reaction": {"m": {"16657": 100, "16661": 100}, "p": ["16672", 20], "t": 360,
                                    "limit": 1000000}},
         })
+        # Planetary industry arrives with the rest, and its counts come from those same rows - including
+        # the level-0 command center, which is the one unit carrying no skill-level attribute.
+        self.assertEqual({"pi_schematics": 1, "pi_planet_types": 1, "pi_commodities": 2,
+                          "pi_command_center_levels": 1},
+                         {key: summaries[0][key] for key in ("pi_schematics", "pi_planet_types",
+                                                             "pi_commodities",
+                                                             "pi_command_center_levels")})
+        pi = alphadata.planet_industry()
+        self.assertEqual({"2016": "Barren"}, pi["planet_types"])
+        self.assertEqual({"2016": [2268]}, pi["resources"])
+        self.assertEqual({"import": 0.5, "export": 1.0}, pi["tax_factors"])
+        # One recipe read end to end: quantities from the SDE, tier from the output's group, plant class
+        # from the pin's fitting cost, planet from the pin's own restriction.
+        self.assertEqual({"name": "Water", "cycle": 1800, "in": {"2268": 3000}, "out": {"3645": 20},
+                          "tier": 1, "facility": "basic", "planet_types": [2016]},
+                         pi["schematics"]["121"])
 
 
 class BlueprintMaterialsTests(XdgTestCase):
@@ -857,8 +910,8 @@ class BlueprintMaterialsTests(XdgTestCase):
                 alphadata.blueprint_materials()
             self.assertIn("update-data", str(caught.exception))
 
-    def test_the_packaged_blueprint_document_shares_the_build_of_the_other_three(self):
-        """A fourth file regenerated on its own ships silently - nothing reads it at install time -
+    def test_the_packaged_blueprint_document_shares_the_build_of_the_other_four(self):
+        """A fifth file regenerated on its own ships silently - nothing reads it at install time -
         and then `doctor` warns about mixed builds on a machine that never ran `update-data`."""
         docs = {name: json.loads((alphadata.PACKAGE_DATA_DIR / name).read_text(encoding="utf-8"))
                 for name in alphadata.DATA_FILES}

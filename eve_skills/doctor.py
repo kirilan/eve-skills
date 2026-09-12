@@ -626,6 +626,22 @@ def _check_sde(now: float) -> list[dict]:
         checks.append(_check("data.blueprint_materials", OK,
                              f"blueprint material lists available (SDE build {blueprints['build']})", **blueprint_fields))
 
+    # Planetary industry data is the only thing `pi` reads, so its absence costs recipes, fittings and
+    # customs tax - and nothing else. A warning with the same fix, not a blocker.
+    planetary = by_name["planet_industry.json"]
+    planetary_fields = {"path": planetary["path"], "present": planetary["present"], "build": planetary["build"]}
+    if not planetary["present"]:
+        checks.append(_check("data.planet_industry", WARN,
+                             "the planetary industry data is not installed - recipes, fittings and "
+                             "customs tax cannot be answered",
+                             hint="run: eve-skills update-data", **planetary_fields))
+    elif planetary["problem"]:
+        checks.append(_check("data.planet_industry", WARN, f"the planetary industry data is {planetary['problem']}",
+                             hint="re-download it: eve-skills update-data", **planetary_fields))
+    else:
+        checks.append(_check("data.planet_industry", OK,
+                             f"planetary industry data available (SDE build {planetary['build']})", **planetary_fields))
+
     if len(builds) > 1:
         checks.append(_check("data.consistency", WARN,
                              f"the local SDE documents describe different builds ({', '.join(str(b) for b in builds)})",
