@@ -263,6 +263,16 @@ class PlannerTests(unittest.TestCase):
         self.assertIsNone(planner.extraction_rules_warning(verified))
         self.assertIsNotNone(planner.extraction_rules_warning(verified + timedelta(days=181)))
 
+    def test_attribute_rate_is_ccps_formula(self):
+        # Khanid Hotie's live attributes (they sum to exactly EVE's 99-point base allocation):
+        # the two pairs a PI plan spans, charisma/intelligence and intelligence/memory, price
+        # at 1,680 and 2,100 SP/hour - the figures `plan --rate` used to make the user work out.
+        attrs = {"perception": 17, "intelligence": 22, "memory": 26, "charisma": 17, "willpower": 17}
+        self.assertEqual(planner.attribute_rate("charisma", "intelligence", attrs), 1_680.0)
+        self.assertEqual(planner.attribute_rate("intelligence", "memory", attrs), 2_100.0)
+        # CCP support article 203217062: an alpha clone trains at half this speed.
+        self.assertEqual(planner.attribute_rate("intelligence", "memory", attrs, alpha=True), 1_050.0)
+
     def test_calibrated_rate_from_training_item(self):
         ctx = {
             "now": NOW,

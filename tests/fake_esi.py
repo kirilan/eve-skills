@@ -667,19 +667,23 @@ class FakeEsiEnv:
             ],
             VELA: [],
         }
+        # Live shape of /characters/{id}/attributes, checked on two stored characters on
+        # 2026-09-13: remaps are counted by `bonus_remaps`, and the older
+        # `accumulated_remaps`/`accelerator_bonus_days` keys do not exist in the document.
         attributes = {
             ADA: {"perception": 23, "intelligence": 21, "memory": 20, "charisma": 19,
                   "willpower": 22, "last_remap_date": "2025-03-01T12:00:00+00:00",
-                  "accumulated_remaps": 2, "accelerator_bonus_days": 7},
+                  "bonus_remaps": 2},
             VELA: {"perception": 19, "intelligence": 23, "memory": 21, "charisma": 20,
-                   "willpower": 18, "last_remap_date": None, "accumulated_remaps": 0},
+                   "willpower": 18, "last_remap_date": None, "bonus_remaps": 0},
         }
         for char in (ADA, VELA):
             self.server.get(f"/characters/{char.character_id}", doc=public[char])
             self.server.get(f"/characters/{char.character_id}/skills", doc=skills[char], token=char.token)
             self.server.get(f"/characters/{char.character_id}/skillqueue", doc=queues[char], token=char.token)
             self.server.get(f"/characters/{char.character_id}/attributes", doc=attributes[char], token=char.token)
-        self.core_docs = {"public": public, "skills": skills, "queues": queues}
+        self.core_docs = {"public": public, "skills": skills, "queues": queues,
+                          "attributes": attributes}
         # Ada consented to every optional scope, so a watch cycle polls her orders too. Empty documents
         # by default: watch tests that want order events republish them with `install_watch_orders`, and
         # the ones that do not must see neither an unrouted path nor a stray event.
@@ -690,6 +694,14 @@ class FakeEsiEnv:
         """Replace one character's live queue and republish the route (multi-cycle watch)."""
         self.core_docs["queues"][char] = queue
         self.server.get(f"/characters/{char.character_id}/skillqueue", doc=queue, token=char.token)
+
+    def set_attributes(self, char: Character, doc: dict | None = None, error=None):
+        """Republish one character's attributes route - with `error=(status, body)` to exercise
+        the commands that must degrade gracefully when the lookup is refused."""
+        if doc is not None:
+            self.core_docs["attributes"][char] = doc
+        kw = {"doc": self.core_docs["attributes"][char]} if error is None else {"error": error}
+        self.server.get(f"/characters/{char.character_id}/attributes", token=char.token, **kw)
 
     def set_trained_level(self, char: Character, skill_id: int, level: int):
         """Move one trained level on the skills endpoint and republish the route."""

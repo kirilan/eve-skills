@@ -31,7 +31,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 |---|---|---|
 | `skills` (default) | Clone state + evidence, totals, training queue, trained-skill table | no (core login) |
 | `summary` | One row per character: clone state, total SP, queue length, current item time left, grand total | no |
-| `attributes` | Base attributes, remaps available/last remap, accelerator days | no — covered by the standard skills consent |
+| `attributes` | Effective attributes (fitted implant bonuses included), remaps available/last remap | no — covered by the standard skills consent |
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume | no — public ESI; works before you have logged in |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
@@ -403,9 +403,10 @@ currently training item) plus a `TOTAL` row. Characters that fail to fetch are r
 eve-skills attributes --char Somecharacter
 ```
 
-PER/INT/MEM/CHR/WIL, remaps available, last remap date, and accelerator days remaining when nonzero.
-No extra consent is needed; a character whose stored consent somehow lacks the skills scope gets a
-hint line instead of data.
+PER/INT/MEM/CHR/WIL and remaps available with the last remap date. These are **effective** values —
+fitted implant bonuses are already inside them (verified against live training, 2026-09-13), which
+is worth knowing before spending a remap on them. No extra consent is needed; a character whose
+stored consent somehow lacks the skills scope gets a hint line instead of data.
 
 ### `standings`, `jobs`, `travel`, `implants`
 
@@ -1031,22 +1032,35 @@ What the plan does:
   item's start level (marked `*` in `now`), and a target or prerequisite already covered by the
   trained or scheduled level costs nothing and is reported as covered.
 - New items are scheduled after the existing queue drains; that backlog finish time is printed.
-- The rate comes from `--rate <SP/hour>` if given, else a live `TRAINING` queue item (ground
-  truth — the measurement already includes implants, remaps, clone state and the attributes of
-  the skill being trained), else the slope of local SP history over 7 days. The live measurement
-  spans `start_date` to `finish_date` and is paired with ESI's `training_start_sp`, the SP held at
-  that `start_date`: EVE restamps `start_date` on the active item every time the queue is
-  rearranged, so measuring the level's whole SP against it would report a rate several times too
-  fast. An item ESI publishes no `training_start_sp` for is skipped rather than guessed at, and the
-  SP history answers instead. Flat or extraction-dipped history is deliberately rejected as a rate
-  and the command tells you to pass `--rate`.
+- The rate is computed **per skill** from the character's own attributes — CCP's formula,
+  `(primary + secondary/2) × 60` SP/hour for an omega clone, half that for an alpha. Because EVE
+  prices speed by attribute pair, one plan can carry several exact rates: Command Center Upgrades
+  and Planetology each get their own number instead of the user running `plan` twice with two
+  `--rate` values. One `rate:` line prints per pair used, and every row is timed by its own skill's
+  pair. The endpoint reports **effective** attributes — fitted implant bonuses are already included
+  (verified against live queue timings, 2026-09-13). The full precedence:
+  1. `--rate <SP/hour>` prices every row with one hand-picked number;
+  2. the character's attributes, when its stored consent covers them and the lookup answers;
+  3. a live `TRAINING` queue item (ground truth for the skill being trained) — reached when the
+     attributes cannot be fetched: an old login predating the skills consent, or a failed lookup,
+     which is warned about on stderr;
+  4. the slope of local SP history over 7 days;
+  5. an error naming what is missing — including `eve-skills login --scopes attributes` when that
+     character's stored consent is what lacks it.
+  The live measurement spans `start_date` to `finish_date` and is paired with ESI's
+  `training_start_sp`, the SP held at that `start_date`: EVE restamps `start_date` on the active
+  item every time the queue is rearranged, so measuring the level's whole SP against it would
+  report a rate several times too fast. An item ESI publishes no `training_start_sp` for is skipped
+  rather than guessed at, and the SP history answers instead. Flat or extraction-dipped history is
+  deliberately rejected as a rate.
 - Notes flag targets above the character's alpha cap, omega-only skills, and skills CCP no longer
   publishes.
 
-Remaining caveats, stated by the tool itself: one calibrated rate prices every row, so plans
-spanning several primary/secondary attribute pairs are estimates for rows driven by other
-attributes (the output names the pairs involved); remaps or implant changes during training shift
-real time; implants are never modeled into future levels. A prerequisite the local catalog has no
+Remaining caveats, stated by the tool itself: when the plan falls back to one calibrated rate — no
+`--rate` and no fetchable attributes — that single number prices every row, so plans spanning
+several primary/secondary attribute pairs are estimates for rows driven by other attributes (the
+output names the pairs involved); remaps or implant changes during training shift real time;
+implants are never modeled into future levels. A prerequisite the local catalog has no
 row for, or a cyclic prerequisite chain, is an error naming the skill or the cycle.
 
 ### `extract` — Skill Extractor math (one character)
@@ -1061,6 +1075,7 @@ re-training days per extractor at the calibrated rate, and what re-injecting her
 the injector tiers (500k below 5M total SP, 400k to 50M, 300k to 80M, 150k above). Queued/training SP
 is not extractable. These are dated constants verified against CCP on `2026-09-05`; after ~180 days
 the command prints a staleness warning instead of the "rules per CCP" line.
+
 
 `plan` and `extract` require `--char` when more than one character is stored — they are single-character
 operations by design.

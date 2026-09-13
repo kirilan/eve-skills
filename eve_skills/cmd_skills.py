@@ -68,6 +68,10 @@ def gather(args, client: esi_mod.Esi | None = None) -> dict:
     return {
         "now": now,
         "token": token,
+        # The session's client travels with the context so rate sourcing can read the
+        # attributes endpoint without opening a second cache/backoff state (render_json
+        # picks keys explicitly, so an object in here never reaches json.dumps).
+        "client": client,
         "public": public,
         "skills_doc": skills_doc,
         "queue": queue,
@@ -417,6 +421,52 @@ def resolve_skill_id(name: str, catalog: dict[int, alphadata.SkillInfo]) -> int:
     return matches[0]
 
 
+def character_attributes(ctx) -> dict | None:
+    """The ESI attributes document, or None when this command cannot have it.
+
+    Consent is checked with `has_feature`, not by catching a 403: a refresh token minted
+    before esi-skills.read_skills.v1 joined the base scopes is refused on this route, and
+    asking the stored consent what it covers beats guessing from an HTTP status. A refused
+    or unreachable lookup degrades the plan to calibration instead of failing it - optional
+    data must never be an error, the rule `cmd_attributes` follows.
+    """
+    if not sso.has_feature(ctx["token"], "attributes"):
+        return None
+    try:
+        return ctx["client"].get(f"/characters/{ctx['token']['character_id']}/attributes",
+                                 token=ctx["token"]["access_token"])
+    except (esi_mod.EsiError, OSError) as err:
+        print(f"warning: attributes lookup failed ({err}); calibrating the rate instead",
+              file=sys.stderr)
+        return None
+
+
+def attribute_rates(ctx, catalog, items) -> dict[tuple[str, str], float] | None:
+    """{(primary, secondary): SP/hour} for every pair `items` trains on, or None.
+
+    One rate per attribute pair is exactly EVE's own granularity - skills sharing a pair
+    share a speed - so this replaces the single calibrated figure that used to smear one
+    number across pairs with different attributes (a plan holding both Command Center
+    Upgrades and Planetology needed two runs with two `--rate` values). If any pair cannot
+    be priced, no rates come back at all: rows silently mixing attribute-derived and
+    calibrated numbers are worse than one estimate that says so.
+    """
+    attrs = character_attributes(ctx)
+    if attrs is None:
+        return None
+    alpha = ctx["state"].state == "ALPHA"   # CCP halves alpha training; other states train full
+    rates = {}
+    for primary, secondary in sorted({(catalog[i.skill_id].primary, catalog[i.skill_id].secondary)
+                                      for i in items}):
+        try:
+            rates[(primary, secondary)] = planner.attribute_rate(primary, secondary, attrs, alpha=alpha)
+        except KeyError as exc:
+            print(f"warning: the skill catalog wants attribute {exc.args[0]!r}, which the attributes "
+                  "document does not carry; calibrating the rate instead", file=sys.stderr)
+            return None
+    return rates
+
+
 def cmd_plan(args):
     if not args.char and len(sso.list_characters()) > 1:
         raise RuntimeError("plan needs --char (one character at a time)")
@@ -434,10 +484,28 @@ def cmd_plan(args):
     # A plan with no items needs no rate, so it must not be refused for want of one: "every target
     # is already covered" is the answer, and demanding --rate to print it would be an error message
     # standing in for good news. Every consumer of `rate` below is inside the items loop or guarded.
+    pairs = sorted({(catalog[i.skill_id].primary, catalog[i.skill_id].secondary) for i in plan.items})
+    rates: dict[tuple[str, str], float] | None = None
+    rate: float | None = None
     if args.rate is not None:
         rate, rate_src = float(args.rate), "--rate override"
     elif plan.items:
-        rate, rate_src = planner.calibrated_rate(ctx)
+        # The character's own attributes come before calibration: they price every attribute
+        # pair in the plan with CCP's formula, where a calibrated figure measures one skill
+        # once and then gets applied to rows driven by other attributes.
+        rates = attribute_rates(ctx, catalog, plan.items)
+        if rates is None:
+            try:
+                rate, rate_src = planner.calibrated_rate(ctx)
+            except RuntimeError as err:
+                if not sso.has_feature(ctx["token"], "attributes"):
+                    who = ctx["public"].get("name") or ctx["token"]["character_id"]
+                    raise RuntimeError(
+                        f"{err} The stored login for this character carries no attributes consent,"
+                        " so its rate cannot be computed from its attributes either - run:"
+                        f" eve-skills login --scopes attributes  (pick '{who}' in the browser)"
+                    ) from None
+                raise
     else:
         rate, rate_src = None, None
 
@@ -454,7 +522,8 @@ def cmd_plan(args):
           + (f", {len(plan.covered)} already covered" if plan.covered else ""))
     rows, notes = [], []
     for item in plan.items:
-        hours = item.sp / rate
+        info = catalog[item.skill_id]
+        hours = item.sp / (rates[(info.primary, info.secondary)] if rates is not None else rate)
         eta += timedelta(hours=hours)
         why = "requested" if item.requested else "for " + ", ".join(item.required_by[:2]) + (
             f" +{len(item.required_by) - 2}" if len(item.required_by) > 2 else "")
@@ -483,10 +552,16 @@ def cmd_plan(args):
         print(f"note: {covered.name} {how} - its L{covered.target} requirement costs nothing")
     if any(item.from_level > item.trained_level for item in plan.items):
         print("note: * = an existing queue entry raises this skill to that level before the item starts")
-    pairs = sorted({(catalog[i.skill_id].primary, catalog[i.skill_id].secondary) for i in plan.items})
-    if rate is not None:
+    if rates is not None:
+        alpha_tag = ", alpha half rate" if ctx["state"].state == "ALPHA" else ""
+        for primary, secondary in pairs:
+            print(f"rate: {rates[(primary, secondary)]:,.0f} SP/hour"
+                  f" (character attributes{alpha_tag}: {primary}/{secondary})")
+        print("note: attribute rates include fitted implant bonuses - ESI reports the effective"
+              " attributes the trainer uses (verified against live queue timings 2026-09-13)")
+    elif rate is not None:
         print(f"rate: {rate:,.0f} SP/hour ({rate_src})")
-    if len(pairs) > 1:
+    if rates is None and len(pairs) > 1:
         listed = ", ".join(f"{primary}/{secondary}" for primary, secondary in pairs)
         print(f"note: one rate is applied to every row, but these skills are driven by {listed};"
               " rows whose attributes differ from the calibrated skill are estimates")

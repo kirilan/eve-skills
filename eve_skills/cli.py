@@ -46,7 +46,7 @@ def cmd_attributes(args):
     if not records:
         raise RuntimeError("not logged in - run: eve-skills login")
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
-    blocks, missing = [], []
+    blocks, missing, shown = [], [], False
     for cid in records:
         rec = sso.get_access_token(cid)
         name = rec.get("character_name") or str(cid)
@@ -56,12 +56,19 @@ def cmd_attributes(args):
         a = client.get(f"/characters/{cid}/attributes", token=rec["access_token"])
         attrs = "  ".join(f"{k[:3].upper()} {a.get(k)}" for k in ("perception", "intelligence", "memory", "charisma", "willpower"))
         last_remap = (a.get("last_remap_date") or "")[:10] or "never"
-        block = f"{name} (id {cid})\n  {attrs}\n  remaps available: {a.get('accumulated_remaps', '?')}   last remap: {last_remap}"
-        if a.get("accelerator_bonus_days"):
-            block += f"   accelerator days left: {a['accelerator_bonus_days']}"
-        blocks.append(block)
+        # Live ESI (checked on two stored characters, 2026-09-13) sends `bonus_remaps`. Neither
+        # the older `accumulated_remaps` nor `accelerator_bonus_days` read here is in the current
+        # spec and neither key arrives, so every character used to print "remaps available: ?".
+        # Cerebral accelerators still exist in-game; ESI just no longer exposes the day counter.
+        blocks.append(f"{name} (id {cid})\n  {attrs}\n"
+                      f"  remaps available: {a.get('bonus_remaps', 0)}   last remap: {last_remap}")
+        shown = True
     for name in missing:
         blocks.append(f"{name}: no skills consent - run: eve-skills login  (pick '{name}' in the browser)")
+    if shown:
+        # These are not base values, which matters before spending a remap on them; the proof
+        # is in planner.attribute_rate, where the same document prices live training exactly.
+        blocks.append("note: ESI reports effective attributes - fitted implant bonuses are included")
     print("\n\n".join(blocks))
 
 
@@ -164,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_plan = sub.add_parser("plan", help="estimate SP and time to reach target skill levels")
     p_plan.add_argument("--char", help="stored character name or id (required when several are stored)")
-    p_plan.add_argument("--rate", type=float, metavar="SPH", help="override SP/hour instead of calibrating from live training / SP history")
+    p_plan.add_argument("--rate", type=float, metavar="SPH", help="override SP/hour for every row; by default each skill is priced from the character's attributes per attribute pair (falling back to live training / SP history)")
     p_plan.add_argument("target", nargs="+", metavar="SKILL[:LEVEL]",
                         help='e.g. "Astrogeology:5" (default target L5); missing prerequisites are added automatically')
 

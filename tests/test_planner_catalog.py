@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from eve_skills import alphadata, planner
+from eve_skills import alphadata, planner, sso
 from eve_skills.alphadata import SkillInfo
 
 from . import fake_esi
@@ -196,6 +196,81 @@ class PlanCommandTests(unittest.TestCase):
                 self.assertEqual(1, code)
                 self.assertIn("--rate must be a positive SP/hour value", err)
                 self.assertEqual("", out)
+
+    # -- where the rate comes from ---------------------------------------------
+    # Ada: PER 23 INT 21 MEM 20 CHA 19 WIL 22, omega. `Unseen Skill:2` spans two attribute
+    # pairs - Navigation trains on intelligence/perception = (21 + 23/2) * 60 = 1,950 and
+    # Unseen Skill itself on perception/willpower = (23 + 22/2) * 60 = 2,040.
+
+    def plan_without_rate(self, *targets: str) -> tuple[int, str, str]:
+        return self.env.run(["plan", "--char", "Ada Vane", *targets])
+
+    def test_the_attributes_price_every_pair_in_one_plan(self):
+        code, out, err = self.plan_without_rate("Unseen Skill:2")
+        self.assertEqual(0, code, err)
+        self.assertIn("rate: 1,950 SP/hour (character attributes: intelligence/perception)", out)
+        self.assertIn("rate: 2,040 SP/hour (character attributes: perception/willpower)", out)
+        # The live Navigation item measures ~428 SP/hour here; the old single calibrated figure
+        # applied to every row priced Unseen Skill at over three hours instead of ~41 minutes.
+        self.assertNotIn("live training item", out)
+        self.assertNotIn("one rate is applied", out)
+        # Per-row rates are the point: Navigation's 6,586 SP ride 1,950 (3h 22m) while Unseen
+        # Skill's 1,414 ride 2,040 (41m). One calibrated figure made both rows wrong.
+        self.assertIn("3h 22m", self.row(out, "Navigation"))
+        self.assertIn("41m", self.row(out, "Unseen Skill"))
+
+    def test_an_alpha_clone_trains_at_half_rate(self):
+        # CCP support article 203217062: an alpha trains at 0.5 * (pri + sec/2) SP/minute, omega
+        # at double. Vela is ALPHA by live clamp; PER 19 INT 23 MEM 21 CHA 20 WIL 18 give
+        # Navigation (intelligence/perception) (23 + 19/2) * 60 / 2 = 975 and Unseen Skill
+        # (perception/willpower) (19 + 18/2) * 60 / 2 = 840.
+        code, out, err = self.env.run(["plan", "--char", "Vela Krinn", "Unseen Skill:2"])
+        self.assertEqual(0, code, err)
+        self.assertIn("rate: 975 SP/hour (character attributes, alpha half rate:"
+                      " intelligence/perception)", out)
+        self.assertIn("rate: 840 SP/hour (character attributes, alpha half rate:"
+                      " perception/willpower)", out)
+
+    def test_a_rate_override_still_beats_the_attributes(self):
+        code, out, err = self.plan("Unseen Skill:2")   # `plan` passes --rate 5000
+        self.assertEqual(0, code, err)
+        self.assertIn("rate: 5,000 SP/hour (--rate override)", out)
+        self.assertNotIn("character attributes", out)
+        # one hand-picked number across two pairs is an estimate again, so the caveat keeps its job
+        self.assertIn("one rate is applied to every row", out)
+
+    def test_an_old_token_without_attributes_consent_falls_back_to_calibration(self):
+        # A refresh token minted before esi-skills.read_skills.v1 joined the base scopes: the
+        # plan must still price itself off the live training item, silently - missing optional
+        # consent is never an error.
+        old = [s for s in sso.SCOPES if s != "esi-skills.read_skills.v1"]
+        self.env.write_tokens([self.env.token_for(fake_esi.ADA, old), self.env.token_for(fake_esi.VELA)])
+        code, out, err = self.plan_without_rate("Unseen Skill:2")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("live training item", out)
+        self.assertNotIn("character attributes", out)
+
+    def test_the_missing_consent_is_named_when_nothing_else_can_price_the_plan(self):
+        # Vela with an old token: no attributes consent, empty queue, no SP history. The refusal
+        # has to name the one command that can fix it.
+        old = [s for s in sso.SCOPES if s != "esi-skills.read_skills.v1"]
+        self.env.write_tokens([self.env.token_for(fake_esi.ADA), self.env.token_for(fake_esi.VELA, old)])
+        code, out, err = self.env.run(["plan", "--char", "Vela Krinn", "Unseen Skill:2"])
+        self.assertEqual(1, code)
+        self.assertIn("cannot estimate training rate", err)
+        self.assertIn("eve-skills login --scopes attributes", err)
+        self.assertIn("'Vela Krinn'", err)
+
+    def test_a_refused_attributes_lookup_degrades_to_calibration(self):
+        # Consent present but the endpoint refuses (403, not a retryable 5xx): warn on stderr and
+        # price from the live item. Optional data must never fail the plan, and the fallback must
+        # not be silent - the footer says which source priced the rows.
+        self.env.set_attributes(fake_esi.ADA, error=(403, {"error": "Forbidden"}))
+        code, out, err = self.plan_without_rate("Unseen Skill:2")
+        self.assertEqual(0, code, err)
+        self.assertIn("attributes lookup failed", err)
+        self.assertIn("live training item", out)
+        self.assertNotIn("character attributes", out)
 
 
 if __name__ == "__main__":

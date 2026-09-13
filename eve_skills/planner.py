@@ -8,13 +8,14 @@ SP cost model (CCP): what a level is *worth* depends only on the skill's rank (t
     cumulative SP held at level L = round(250 * rank * 2 ** (2.5 * (L - 1)))
     rank 1 -> 250 / 1,414 / 8,000 / 45,255 / 256,000   (the canonical table)
 
-Training time is therefore SP divided by a measured SP/hour rate, which is why calibration
-from a live TRAINING queue item beats any formula - the measurement already includes
-implants, remaps, alpha/omega status and the attributes of the skill being trained.
-Caveat: one calibrated rate is one number for a whole plan, while skills driven by other
-attributes really train at other rates, so plans spanning several attribute pairs are
-estimates (the caller names the attributes involved). Implants are never modeled into
-future levels.
+Training time is SP divided by an SP/hour rate. The primary source for that rate is the
+character's own attributes via CCP's formula (``attribute_rate`` below): EVE prices each
+skill's speed by its primary/secondary attribute pair, so one plan can carry several exact
+rates instead of one estimate smeared across pairs. Calibration from a live TRAINING queue
+item or SP history is the fallback for characters whose attributes cannot be fetched; it is
+a single number, and plans spanning several attribute pairs are then estimates (the caller
+names the attributes involved). Implants are never modeled into future levels: ESI reports
+effective attributes - fitted implant bonuses are already in them (see ``attribute_rate``).
 """
 
 from __future__ import annotations
@@ -220,6 +221,41 @@ def build_plan(targets: dict[int, int], catalog: dict[int, SkillInfo],
             requested=sid in targets, required_by=tuple(sorted(_name(d, catalog) for d in dependents.get(sid, ()))),
         ))
     return TrainingPlan(items=items, covered=covered)
+
+
+# CCP's own training formula (support.eveonline.com article 203217062, read 2026-09-13):
+# "The formula for skill training on an Alpha Clone is:
+#     0.5 * (Primary Attribute + (Secondary Attribute/2)) = SP per minute
+#  An Omega Clone will train at double the speed."
+ALPHA_RATE_FACTOR = 0.5
+
+
+def attribute_rate(primary: str, secondary: str, attributes: dict[str, int],
+                   *, alpha: bool = False) -> float:
+    """SP/hour this character trains a skill driven by `primary`/`secondary`.
+
+    `attributes` is the ESI /characters/{id}/attributes document; its keys are exactly the
+    lowercase attribute names the local skill catalog stores as pri/sec, so no renaming
+    layer is needed. The formula is CCP's (see ALPHA_RATE_FACTOR): (pri + sec/2) SP per
+    minute for an omega clone, halved for alphas.
+
+    Verified against live ESI on 2026-09-13 rather than trusted from the article alone: a
+    character reading PER 23 / INT 30 / MEM 30 / CHA 23 / WIL 23 had five items in its
+    training queue, and every one measured its published start/finish span to within
+    0.01 SP/hour at exactly (pri + sec/2) * 60 - Mining Upgrades (memory/intelligence) at
+    2,700.00 against (30 + 30/2) * 60, four trade skills at 2,280 against charisma over
+    intelligence. That same check settles what the document contains: it reports the
+    attributes the trainer actually uses, implants included - a second character fitted
+    with Cybernetic Subprocessor - Basic and Memory Augmentation - Basic (dogma
+    intelligenceBonus/memoryBonus of 3 each, resolved via /universe/types) read INT 30 /
+    MEM 24, whose base values only sum to EVE's canonical 99-point allocation if those +3s
+    are inside the reported numbers. So callers must not add implant bonuses on top.
+
+    Raises KeyError naming the attribute when `attributes` lacks one of the names - a
+    live attributes document always carries all five, so a miss is broken data upstream.
+    """
+    rate = (attributes[primary] + attributes[secondary] / 2) * 60
+    return rate * ALPHA_RATE_FACTOR if alpha else rate
 
 
 def snapshot_rate(ctx, window_days: float = 7.0) -> tuple[float, float] | None:

@@ -136,16 +136,19 @@ class SummaryCommandTests(CommandTestCase):
 
 
 class AttributesCommandTests(CommandTestCase):
-    def test_base_attributes_remaps_and_accelerator(self):
+    def test_attributes_remaps_and_the_effective_values_note(self):
+        # The accelerator line this used to pin read `accelerator_bonus_days`, a key live ESI
+        # stopped sending (spec + two stored characters checked 2026-09-13); remaps now come
+        # from `bonus_remaps`.
         code, out, err = self.env.run(["attributes"])
         self.assertEqual((code, err), (0, ""))
         self.assertIn("Ada Vane (id 91000001)", out)
         self.assertIn("PER 23", out)
         self.assertIn("remaps available: 2", out)
         self.assertIn("last remap: 2025-03-01", out)
-        self.assertIn("accelerator days left: 7", out)
         self.assertIn("Vela Krinn (id 91000002)", out)
         self.assertIn("last remap: never", out)  # ESI sends null, not an empty date
+        self.assertIn("effective attributes - fitted implant bonuses are included", out)
 
     def test_character_without_consent_degrades_to_a_hint(self):
         self.env.write_tokens([
