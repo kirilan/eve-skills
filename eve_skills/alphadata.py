@@ -37,7 +37,8 @@ SDE_BASE = "https://developers.eveonline.com/static-data/tranquility"
 
 # Every document update() publishes; diagnostics walk this list in order.
 DATA_FILES = ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
-              "blueprint_materials.json", "planet_industry.json", "system_planets.json")
+              "blueprint_materials.json", "planet_industry.json", "system_planets.json",
+              "market_types.json")
 
 # Alpha caps drift out of date with each SDE release; the skills view and doctor warn here.
 STALE_DAYS = 90.0
@@ -131,6 +132,10 @@ FACILITY_CLASSES = ("basic", "advanced", "high_tech")
 # The sections a readable planet_industry.json must carry, in document order.
 PI_SECTIONS = ("planet_types", "resources", "commodities", "schematics", "structures",
                "command_centers", "tax_factors")
+
+# The sections a readable market_types.json must carry: the group index and the category index that
+# points into it. Both are keyed by English name, because that is what a caller types to `market`.
+MARKET_TYPE_SECTIONS = ("groups", "categories")
 
 
 def _read(name: str) -> dict:
@@ -246,6 +251,37 @@ def system_planets() -> dict:
     document = _read("system_planets.json")
     if not isinstance(document.get("planet_types"), dict) or not isinstance(document.get("systems"), dict):
         raise ValueError("the local planet census is not in the expected format - run: eve-skills update-data")
+    return document
+
+
+def market_types() -> dict:
+    """The market-listed type index built by `update-data`, envelope included.
+
+    Whole document again, for the same reason as the census: a group's contents are only worth quoting
+    beside the build they were read from, and the two halves (`groups`, `categories`) are addressed by
+    name rather than unwrapped into one body.
+
+    Raises FileNotFoundError when no index is installed, ValueError when the installed document is not
+    in this shape - `market --group` would otherwise price a silently truncated list of types and look
+    exactly like a run that had been asked for by hand."""
+    document = _read("market_types.json")
+    if any(not isinstance(document.get(key), dict) for key in MARKET_TYPE_SECTIONS):
+        raise ValueError("the local market type index is not in the expected format "
+                         "- run: eve-skills update-data")
+    for key, row in document["groups"].items():
+        if not isinstance(row, dict) or not isinstance(row.get("types"), dict):
+            raise ValueError(f"market type index group {key} is malformed - run: eve-skills update-data")
+    # A category naming a group the index does not hold would expand to a shorter list than the game's
+    # own item list, and `--category` would price that silently. `update-data` only ever writes names it
+    # has just indexed, so a mismatch means this document did not come from it.
+    for key, row in document["categories"].items():
+        groups = row.get("groups") if isinstance(row, dict) else None
+        if not isinstance(groups, list):
+            raise ValueError(f"market type index category {key} is malformed - run: eve-skills update-data")
+        missing = next((name for name in groups if name not in document["groups"]), None)
+        if missing is not None:
+            raise ValueError(f"market type index category {key} names group '{missing}', which the index "
+                             f"has no types for - run: eve-skills update-data")
     return document
 
 
@@ -703,6 +739,98 @@ def _transform_system_planets(planet_docs, type_docs) -> dict:
     }
 
 
+def _transform_market_types(type_docs, group_docs, category_docs) -> dict:
+    """The market-listed type index: `groups` (group name -> its types) and `categories`
+    (category name -> its group names).
+
+    This is what lets `market --group "Basic Commodities - Tier 1"` price its fifteen commodities - or
+    `--category "Planetary Commodities"` all sixty-eight of them - without typing their names, and it
+    exists as a document of its own because none of the three members it comes from ships small:
+    `types.jsonl` is 152.9 MB uncompressed and is only ever
+    streamed, while `groups.jsonl` (0.81 MB) and `categories.jsonl` (0.01 MB) are the whole of the
+    other two. Reduced to what a price run needs - published, market-listed types with an English name
+    - it is 19,551 types in 814 groups across 32 categories, and 0.94 MB on disk (measured, build
+    3494416), so a group lookup costs one JSON parse instead of a 153 MB scan.
+
+    Two rules the shape depends on, both measured on build 3494416:
+
+    * "market-listed" means the type row carries a `marketGroupID`. That flag is what says ESI will
+      price the type at all; it is not the grouping key. Grouping by `groupID` (and only then looking
+      up `groups.jsonl.categoryID`) gives 814 groups in 32 categories, with the four planetary
+      commodity groups landing in "Planetary Commodities" where a player expects them. Grouping by
+      `marketGroupID` instead gives 1,614 groups in 37 categories and leaves about 9,910 types under a
+      category nothing can name - the market groups are a merchandising tree with holes in it.
+    * A type survives when it is published, market-listed, and has both a `groupID` and an English
+      name: 52,999 rows -> 27,116 published -> 19,786 market-listed -> 19,551 of both. Every one of
+      those resolves to a `groups.jsonl` row (zero misses); five of them sit in three groups the SDE
+      itself marks unpublished, and they stay in - the type is published and priced, which is the only
+      thing this command cares about, and dropping it would make "what is in group X" answer different
+      from the game's own item list.
+
+    Group keys are English names because that is what a caller types, and a duplicate name would merge
+    two groups and silently price the wrong items. Measured: none of the 814 listed groups shares an
+    English name (six duplicates exist across all groups - `Asteroid Belt`, `Miscellaneous`,
+    `Laboratory`, `Encounter Surveillance System`, `Services`, `Phased Asteroid` - but each belongs to
+    a family with no market-listed type), and all 32 category names are unique. Rather than trust that
+    forever, a name used by more than one listed group is keyed as `"Name (<id>)"`, which keeps both
+    groups reachable and makes the collision visible in any listing.
+
+    Keys are written sorted - groups and categories by name, types by id - so rebuilding the same build
+    diffs as nothing rather than as a shuffle."""
+    category_names = {int(doc["_key"]): _english(doc.get("name")) for doc in category_docs}
+    group_rows = {int(doc["_key"]): doc for doc in group_docs if doc.get("_key") is not None}
+
+    members: dict[int, dict[int, str]] = {}
+    for doc in type_docs:      # types.jsonl is huge; only listed rows survive it
+        if not doc.get("published", True) or doc.get("marketGroupID") is None:
+            continue
+        group_id, name = doc.get("groupID"), _english(doc.get("name"))
+        if group_id is None or not name or doc.get("_key") is None:
+            continue
+        members.setdefault(int(group_id), {})[int(doc["_key"])] = name
+
+    # Only groups with something to price are indexed; the SDE lists far more groups than trade.
+    listed = sorted(members)
+    group_key = _unique_name_keys({gid: _english(group_rows[gid].get("name")) if gid in group_rows
+                                   else "" for gid in listed})
+    category_of = {gid: group_rows.get(gid, {}).get("categoryID") for gid in listed}
+    category_key = _unique_name_keys({int(cid): category_names.get(int(cid), "")
+                                      for cid in {int(c) for c in category_of.values() if c is not None}})
+
+    groups: dict[str, dict] = {}
+    by_category: dict[int, list[str]] = {}
+    for gid in listed:
+        name = group_key[gid]
+        cid = category_of[gid]
+        groups[name] = {
+            "id": gid,
+            "category_id": None if cid is None else int(cid),
+            # A group whose category row is missing still gets a name here, so the caller can print
+            # what it found instead of a blank: measured zero such rows, so this is only the shape.
+            "category": category_key.get(int(cid)) if cid is not None else None,
+            "types": {str(t): members[gid][t] for t in sorted(members[gid])},
+        }
+        if cid is not None:
+            by_category.setdefault(int(cid), []).append(name)
+    categories = {category_key[cid]: {"id": cid, "groups": sorted(names)}
+                  for cid, names in sorted(by_category.items(), key=lambda item: category_key[item[0]])}
+    return {"groups": {name: groups[name] for name in sorted(groups)}, "categories": categories}
+
+
+def _unique_name_keys(names: dict[int, str]) -> dict[int, str]:
+    """{id: name} where any name used twice becomes `"Name (<id>)"`.
+
+    Iteration order is kept, so a pair of qualified keys lands next to each other in a listing instead
+    of scattered by their suffix; an id with no English name is keyed by its id alone, which is ugly but
+    reachable - dropping it would make a whole group unquotable."""
+    counts: dict[str, int] = {}
+    for name in names.values():
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return {key: (name if name and counts.get(name, 0) == 1 else (f"{name} ({key})" if name else f"id {key}"))
+            for key, name in names.items()}
+
+
 def _fetch(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "eve-skills/0.1 (data update)"})
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -716,10 +844,10 @@ def latest_build() -> int:
 
 def update(build: int | None = None) -> dict:
     """Download the SDE zip and refresh alpha caps, bloodline races, the skill catalog, blueprint
-    material lists, the planetary industry document and the planet census.
+    material lists, the planetary industry document, the planet census and the market type index.
 
     The run holds ``update.lock``: two `update-data` processes would otherwise both pull
-    ~100 MB and interleave, leaving the six files describing different builds (and
+    ~100 MB and interleave, leaving the seven files describing different builds (and
     fighting over one fixed `.tmp` name). Each file is replaced atomically, so a reader
     never sees a half-written snapshot; the set as a whole switches build file by file."""
     dest = Path(paths.data_dir())
@@ -757,6 +885,16 @@ def update(build: int | None = None) -> dict:
                 _jsonl(zf, "mapPlanets.jsonl"),
                 _jsonl(zf, "types.jsonl"),
             )
+            # The market index needs types.jsonl a fourth time, plus groups and categories - two members
+            # nothing else reads, 0.82 MB together. Measured on build 3494416 the whole pass costs 1.6 s of
+            # wall clock, 1.57 s of it streaming the 152.85 MB member and 0.02 s for the other two; only
+            # the 19,551 surviving rows are held. Re-opening a member instead of caching rows across
+            # passes is what keeps the four reads of one file free of memory.
+            market_index = _transform_market_types(
+                _jsonl(zf, "types.jsonl"),
+                _jsonl(zf, "groups.jsonl"),
+                _jsonl(zf, "categories.jsonl"),
+            )
 
         fetched = json.loads(_fetch(f"{SDE_BASE}/latest.jsonl").decode()).get("releaseDate", "")
         payloads = (
@@ -770,6 +908,8 @@ def update(build: int | None = None) -> dict:
             ("planet_industry.json", {"source": src, "build": build, "fetched": fetched, **planet}),
             # Same shape as planet_industry.json: the census sections sit next to the envelope.
             ("system_planets.json", {"source": src, "build": build, "fetched": fetched, **census}),
+            # Both market halves are name-keyed and sit beside the envelope like the two above.
+            ("market_types.json", {"source": src, "build": build, "fetched": fetched, **market_index}),
         )
         for name, payload in payloads:
             storage.atomic_write(str(dest / name), json.dumps(payload))
@@ -793,4 +933,9 @@ def update(build: int | None = None) -> dict:
         "census_systems": len(census["systems"]),
         "census_planets": sum(sum(row.values()) for row in census["systems"].values()),
         "census_planet_types": len(census["planet_types"]),
+        # Types, groups and categories - the three numbers that say what `market --group` and
+        # `--category` can now expand, and the group count is also the number of distinct answers.
+        "market_types": sum(len(row["types"]) for row in market_index["groups"].values()),
+        "market_groups": len(market_index["groups"]),
+        "market_categories": len(market_index["categories"]),
     }

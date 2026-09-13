@@ -16,8 +16,11 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest import mock
 
-from eve_skills import esi, exports, market
+from eve_skills import alphadata, cmd_market, esi, exports, market
+
 
 from tests.fake_esi import (
     ABYSSAL_REGION, INV_TYPE_CONTAINER, INV_TYPE_SHIP, MARKET_BROKEN, MARKET_BOOK_AGE,
@@ -737,6 +740,356 @@ class InventoryQuoteCacheTests(QuoteCacheFixture, MarketTestCase):
         one = exports._valuation_notice(market.Preflight(types=1, cached=0, fetches=1))
         self.assertIn("1 distinct type held: 1 order book to read", one)
 
+
+class MarketIndexFixture(MarketTestCase):
+    """`--group`/`--category` and `--fields`, against a seeded market type index.
+
+    The bundled index is 0.94 MB of live SDE names; quoting it would make every assertion here a bet
+    that CCP does not rename a group before the next build. These four types - all served by
+    tests/fake_esi.py's books, one of them deliberately empty - are the whole world instead."""
+
+    GROUPS = {
+        "Basic Commodities - Tier 1": {"id": 1042, "category_id": 43, "category": "Planetary Commodities",
+                                       "types": {"34": "Tritanium", "36": "Pyerite"}},
+        "Refined Commodities - Tier 2": {"id": 1034, "category_id": 43,
+                                         "category": "Planetary Commodities",
+                                         "types": {"590": "Caldari Ship Blueprint"}},
+        "Account Status": {"id": 517, "category_id": 17, "category": "Commodity",
+                           "types": {"44992": "PLEX"}},
+    }
+    CATEGORIES = {
+        "Planetary Commodities": {"id": 43, "groups": ["Basic Commodities - Tier 1",
+                                                       "Refined Commodities - Tier 2"]},
+        "Commodity": {"id": 17, "groups": ["Account Status"]},
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.seed_index()
+
+    def seed_index(self, **overrides) -> None:
+        """Write the index where `alphadata` looks before the package's own copy."""
+        self.env._write_json(os.path.join(self.env.data_home, "eve-skills", "market_types.json"),
+                             {"source": "synthetic", "build": 2500001, "fetched": "2026-09-01T00:00:00Z",
+                              "groups": self.GROUPS, "categories": self.CATEGORIES, **overrides})
+
+    def without_any_index(self) -> None:
+        """Hide the copy bundled in the package too, so "nothing installed" is provable whatever the
+        wheel ships - the same trick `tests/test_doctor.py` uses."""
+        empty = os.path.join(tempfile.mkdtemp(prefix="eve-skills-no-index-"), "package-data")
+        os.makedirs(empty, exist_ok=True)
+        patcher = mock.patch.object(alphadata, "PACKAGE_DATA_DIR", Path(empty))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def books_read(self) -> list[str]:
+        """Which type ids this run asked ESI for, in request order."""
+        return [call.query["type_id"]
+                for region in (MARKET_FORGE, MARKET_DOMAIN)
+                for call in self.env.server.calls_to(f"/markets/{region}/orders")]
+
+
+class GroupExpansionTests(MarketIndexFixture):
+    def test_a_group_prices_every_type_it_holds(self):
+        code, out, err = self.env.run(["market", "--group", "Basic Commodities - Tier 1"])
+        self.assertEqual(code, 0)
+        self.assertIn("Tritanium (id 34)", out)
+        self.assertIn("Pyerite (id 36)", out)
+        # The index carries the ids, so no `/universe/ids` lookup is needed to know what to price.
+        self.assertEqual(["34", "36"], self.books_read())
+        self.assertEqual('2 types from --group "Basic Commodities - Tier 1": 2 order books to read\n', err)
+
+    def test_a_category_walks_every_group_inside_it(self):
+        code, out, err = self.env.run(["market", "--category", "Planetary Commodities"])
+        self.assertEqual(code, 0)
+        self.assertEqual(["34", "36", "590"], self.books_read())
+        self.assertIn("Caldari Ship Blueprint (id 590)", out)
+        self.assertEqual('3 types from --category "Planetary Commodities": 3 order books to read\n', err)
+
+    def test_a_group_is_reachable_by_its_sde_id_and_in_any_case(self):
+        for spec in ("1042", "basic commodities - tier 1", "  BASIC COMMODITIES - TIER 1  "):
+            with self.subTest(spec=spec):
+                code, _out, err = self.env.run(["market", "--group", spec])
+                self.assertEqual(code, 0)
+                self.assertEqual(["34", "36"], self.books_read()[-2:])   # calls accumulate per subTest
+                # The notice names the index's own spelling, not whatever the caller happened to type.
+                self.assertIn('from --group "Basic Commodities - Tier 1"', err)
+
+    def test_a_group_and_a_category_share_one_deduplicated_run(self):
+        """The `--group` here sits inside the `--category` that was also named; idempotence is the whole
+        point of expanding through one deduplicated list."""
+        code, out, err = self.env.run(["market", "--category", "Planetary Commodities",
+                                       "--group", "Account Status", "--hub", "amarr"])
+        self.assertEqual(code, 0)
+        self.assertEqual(4, out.count("min sell  max buy"))    # one table per type, none printed twice
+        self.assertEqual(1, out.count("Tritanium (id 34)"))
+        self.assertIn('4 types from --group "Account Status", --category "Planetary Commodities"', err)
+
+    def test_a_type_named_twice_is_priced_once_under_the_first_spelling(self):
+        code, out, err = self.env.run(["market", "Pyerite", "--group", "Basic Commodities - Tier 1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(1, out.count("(id 36)"))
+        # The command line is asked first, so its order wins: Pyerite's block before Tritanium's.
+        self.assertLess(out.index("Pyerite (id 36)"), out.index("Tritanium (id 34)"))
+        self.assertTrue(err.startswith("2 types from --group"))
+
+    def test_an_unknown_group_offers_the_names_that_contain_what_was_typed(self):
+        code, _out, err = self.env.run(["market", "--group", "tier"])
+        self.assertEqual(1, code)
+        self.assertIn("no market group named 'tier' in the local market type index (SDE build 2500001)", err)
+        self.assertIn("closest: 'Basic Commodities - Tier 1', 'Refined Commodities - Tier 2'", err)
+        self.assertEqual([], self.books_read())         # a mistyped name costs no request at all
+
+    def test_an_unknown_group_or_category_prints_every_name_when_they_fit(self):
+        code, _out, err = self.env.run(["market", "--group", "Commodity"])
+        self.assertEqual(1, code)
+        # Three groups is a list worth reading out; the real index's 814 would get a count instead.
+        self.assertIn("the groups are: Account Status, Basic Commodities - Tier 1, "
+                      "Refined Commodities - Tier 2", err)
+        code, _out, err = self.env.run(["market", "--category", "Modules"])
+        self.assertEqual(1, code)
+        self.assertIn("the categories are: Commodity, Planetary Commodities", err)
+
+    def test_an_unknown_id_says_so(self):
+        code, _out, err = self.env.run(["market", "--group", "999"])
+        self.assertEqual(1, code)
+        self.assertIn("no market group with id 999 in the local market type index", err)
+
+    def test_an_empty_specifier_is_not_a_search_for_everything(self):
+        # Matching "" against every name would expand to the whole index; that is a typo, not a query.
+        code, _out, err = self.env.run(["market", "--group", ""])
+        self.assertEqual(1, code)
+        self.assertIn("empty market group specifier", err)
+        self.assertEqual([], self.books_read())
+
+    def test_no_index_installed_names_the_command_that_builds_it(self):
+        os.remove(os.path.join(self.env.data_home, "eve-skills", "market_types.json"))
+        self.without_any_index()      # ...and the copy bundled in the package
+        code, _out, err = self.env.run(["market", "--group", "Basic Commodities - Tier 1"])
+        self.assertEqual(1, code)
+        self.assertIn("no local market type index - run: eve-skills update-data", err)
+
+    def test_a_category_naming_an_unindexed_group_is_refused_not_priced_short(self):
+        """Expanding to a shorter list than the game's own would look exactly like a correct run."""
+        self.seed_index(categories={"Planetary Commodities": {"id": 43,
+                                                              "groups": ["Basic Commodities - Tier 1",
+                                                                         "Ghost Group"]}})
+        code, _out, err = self.env.run(["market", "--category", "Planetary Commodities"])
+        self.assertEqual(1, code)
+        self.assertIn("category Planetary Commodities names group 'Ghost Group'", err)
+        self.assertIn("eve-skills update-data", err)
+
+    def test_nothing_to_price_says_what_would_have_worked(self):
+        code, _out, err = self.env.run(["market", "--hub", "jita"])
+        self.assertEqual(1, code)
+        self.assertIn("market needs something to price", err)
+        self.assertIn("--group / --category", err)
+
+    def test_an_expanded_run_announces_itself_on_stderr_only(self):
+        """Machine output must stay parseable, and the point of the line is a human watching a wait."""
+        code, out, err = self.env.run(["market", "--group", "Basic Commodities - Tier 1", "--json"])
+        self.assertEqual((code, 0), (code, json.loads(out)["types"][0]["scopes"] and 0))
+        self.assertIn("2 types from --group", err)
+        code, out, err = self.env.run(["market", "34"])
+        self.assertEqual("", err)      # a typed type has already said how big the run is
+
+
+class RunSizeGuardTests(MarketIndexFixture):
+    """The refusal and its escape hatch, at a threshold low enough for a four-type fixture."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(cmd_market, "MAX_TYPES_PER_RUN", 2)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_run_bigger_than_the_limit_is_refused_with_numbers(self):
+        code, _out, err = self.env.run(["market", "--category", "Planetary Commodities"])
+        self.assertEqual(1, code)
+        self.assertIn("3 types is more than the 2 `market` prices without being asked twice", err)
+        self.assertIn("3 order books to read", err)
+        self.assertIn("narrow it to one --group at a time", err)
+        self.assertIn("--max-types 3", err)
+        # Refused before the first book: an accidental run costs one name lookup, not three reads.
+        self.assertEqual([], self.books_read())
+
+    def test_a_cluster_scan_is_counted_as_its_own_unit(self):
+        """`--global` alone asks for no station scope at all, so the run is three cluster scans - one
+        request each, about eighteen seconds each - and the message has to say that or "3 books in 54s"
+        reads as a contradiction."""
+        code, _out, err = self.env.run(["market", "--category", "Planetary Commodities", "--global"])
+        self.assertEqual(1, code)
+        self.assertIn("3 order books to read (one whole-cluster scan per type", err)
+        # Even the region list a --global run needs is not asked for.
+        self.assertEqual([], self.env.server.calls_to("/universe/regions"))
+
+    def test_max_types_is_the_number_of_types_not_of_requests(self):
+        code, out, _err = self.env.run(["market", "--category", "Planetary Commodities",
+                                        "--max-types", "3"])
+        self.assertEqual(0, code)
+        self.assertEqual(["34", "36", "590"], self.books_read())
+        self.assertEqual(3, out.count(": as of"))
+
+    def test_max_types_still_guards_a_run_of_typed_names(self):
+        code, _out, err = self.env.run(["market", "34", "36", "590", "--max-types", "2"])
+        self.assertEqual(1, code)
+        self.assertIn("name fewer types", err)
+        self.assertEqual([], self.books_read())
+
+    def test_max_types_must_be_positive(self):
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                code, _out, err = self.env.run(["market", "34", "--max-types", value])
+                self.assertEqual(1, code)
+                self.assertIn(f"--max-types needs a positive number of types, not {value}", err)
+
+    def test_the_notice_explains_a_wait_it_cannot_finish_quickly(self):
+        """Under the threshold the line is just a count; over it, silence would look like a hang."""
+        code, _out, err = self.env.run(["market", "--group", "Basic Commodities - Tier 1", "--global"])
+        self.assertEqual(0, code)
+        self.assertIn("2 order books to read (one whole-cluster scan per type", err)
+        self.assertIn("about 36s at this size", err)     # 2 types x the measured 18 s scan
+
+    def test_a_scan_beside_station_scopes_counts_both(self):
+        code, _out, err = self.env.run(["market", "--group", "Basic Commodities - Tier 1",
+                                        "--region", "The Forge", "--global"])
+        self.assertEqual(0, code)
+        # 2 types x (one Forge book + one cluster scan): the phrase says which, not just how many.
+        self.assertIn("4 order books to read (one per type per scope, plus a whole-cluster scan per type)",
+                      err)
+
+    def test_the_first_spelling_of_a_type_is_the_one_kept(self):
+        """A typed name resolves through ESI and a group member comes from the SDE index; after a rename
+        those disagree, and the caller's own spelling is the one that should print."""
+        pairs = [(34, "Tritanium"), (36, "Pyerite"), (34, "TRITANIUM"), (36, "Pyerite")]
+        self.assertEqual([(34, "Tritanium"), (36, "Pyerite")], cmd_market._unique_types(pairs))
+
+
+class FieldSelectionTests(MarketIndexFixture):
+    """`--fields`, including the byte-for-byte defaults it must not disturb."""
+
+    DEFAULT_CSV_HEADER = ("type_id,type_name,scope,region_id,region_name,location_id,location_name,"
+                          "min_sell,max_buy,spread,margin_pct,sell_volume,buy_volume,sell_orders,"
+                          "buy_orders,best_sell_location_id,best_sell_location_name,"
+                          "best_sell_region_id,best_sell_region_name,best_buy_location_id,"
+                          "best_buy_location_name,best_buy_region_id,best_buy_region_name,"
+                          "regions_scanned,regions_failed,last_modified,expires,age_seconds,"
+                          "history_days,history_rows,history_total_volume,history_volume_per_day,"
+                          "history_average_price,history_newest_date,reference_average_price,"
+                          "reference_adjusted_price,reference_last_modified,reference_age_seconds")
+
+    def test_the_default_csv_header_is_the_one_scripts_already_read(self):
+        """Column order is the contract here: a reader that indexes by position breaks silently."""
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
+                                        "--csv"])
+        self.assertEqual(0, code)
+        self.assertEqual(self.DEFAULT_CSV_HEADER, out.splitlines()[0])
+
+    def test_the_default_text_columns_are_the_ones_this_table_has_always_had(self):
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge"])
+        self.assertEqual(0, code)
+        header = out.splitlines()[1]
+        self.assertEqual(["scope", "min sell", "max buy", "spread", "margin %", "sell vol", "buy vol",
+                          "sells", "buys", "best sell at", "best buy at"],
+                         [cell.strip() for cell in header.split("  ") if cell.strip()])
+
+    def test_fields_sets_the_order_in_the_table(self):
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge",
+                                        "--fields", "max_buy,min_sell,scope"])
+        self.assertEqual(0, code)
+        header, row = out.splitlines()[1], out.splitlines()[3]
+        self.assertLess(header.index("max buy"), header.index("min sell"))
+        self.assertLess(header.index("min sell"), header.index("scope"))
+        self.assertNotIn("sells", header)       # selected, not appended to the defaults
+        self.assertLess(row.index("4.30"), row.index("4.98"))
+
+    def test_fields_sets_the_order_in_the_csv(self):
+        code, out, _err = self.env.run(["market", "34", "--hub", "amarr", "--csv",
+                                        "--fields", "max_buy,type_name"])
+        self.assertEqual(0, code)
+        rows = list(csv.reader(io.StringIO(out)))
+        self.assertEqual(["max_buy", "type_name"], rows[0])
+        self.assertEqual(["4.55", "Tritanium"], rows[1])
+
+    def test_a_field_asked_for_twice_is_printed_twice(self):
+        code, out, _err = self.env.run(["market", "34", "--csv", "--fields", "min_sell,min_sell"])
+        self.assertEqual(0, code)
+        self.assertEqual([["min_sell", "min_sell"], ["5.05", "5.05"]],
+                         list(csv.reader(io.StringIO(out))))
+
+    def test_field_names_surround_their_commas_with_spaces(self):
+        code, out, _err = self.env.run(["market", "34", "--csv", "--fields", " scope , region_name "])
+        self.assertEqual(0, code)
+        self.assertEqual(["scope", "region_name"], next(csv.reader(io.StringIO(out))))
+
+    def test_an_unknown_field_names_it_and_lists_every_valid_one(self):
+        code, _out, err = self.env.run(["market", "34", "--fields", "min_price"])
+        self.assertEqual(1, code)
+        self.assertIn("unknown --fields name 'min_price'; valid names: type_id, type_name, scope", err)
+        self.assertTrue(err.rstrip().endswith("reference_age_seconds"))
+        self.assertEqual([], self.books_read())     # a typo costs no order books
+
+    def test_a_field_list_of_nothing_is_not_a_request_for_everything(self):
+        code, _out, err = self.env.run(["market", "34", "--fields", " , "])
+        self.assertEqual(1, code)
+        self.assertIn("--fields needs at least one column name", err)
+
+    def test_fields_does_not_apply_to_json(self):
+        """Silently ignoring it would be worse than refusing: the caller would think they had chosen."""
+        code, _out, err = self.env.run(["market", "34", "--json", "--fields", "min_sell"])
+        self.assertEqual(1, code)
+        self.assertIn("--fields does not apply to --json", err)
+        self.assertEqual([], self.books_read())
+
+    def test_a_history_column_without_a_history_window_is_refused(self):
+        """An empty column here is the misreading this flag exists to prevent, and guessing a window
+        would put a number nobody asked for in the output."""
+        code, _out, err = self.env.run(["market", "34", "--fields", "scope,history_volume_per_day"])
+        self.assertEqual(1, code)
+        self.assertIn("--fields history_volume_per_day reads ESI's daily history", err)
+        self.assertIn("--history 30", err)
+        self.assertEqual([], self.books_read())
+
+    def test_a_history_column_fills_when_the_window_was_asked_for(self):
+        code, out, err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
+                                       "--csv", "--fields", "scope,history_volume_per_day"])
+        self.assertEqual((code, err), (0, ""))
+        rows = list(csv.DictReader(io.StringIO(out)))
+        self.assertEqual({"scope": "The Forge", "history_volume_per_day": "70.0"}, rows[0])
+
+    def test_a_history_column_without_data_is_empty_rather_than_zero(self):
+        """Amarr's region has no history rows at all; the cell must not read as "traded nothing"."""
+        code, out, _err = self.env.run(["market", "34", "--hub", "amarr", "--history", "7", "--csv",
+                                        "--fields", "scope,history_volume_per_day"])
+        self.assertEqual(0, code)
+        self.assertEqual({"scope": "Amarr (station)", "history_volume_per_day": ""},
+                         next(csv.DictReader(io.StringIO(out))))
+
+    def test_the_starred_legend_follows_the_columns_actually_printed(self):
+        """A run that fetched history but prints neither starred column has nothing to explain."""
+        _code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
+                                         "--fields", "scope,min_sell"])
+        self.assertNotIn("one day behind", out)
+        _code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
+                                         "--fields", "scope,history_total_volume"])
+        self.assertIn("one day behind", out)
+
+    def test_a_selected_reference_column_is_blank_when_the_document_was_never_read(self):
+        """A live book means no `/markets/prices` request, so the reference columns have no source."""
+        code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--csv",
+                                        "--fields", "type_name,min_sell,reference_average_price"])
+        self.assertEqual(0, code)
+        self.assertEqual({"type_name": "Tritanium", "min_sell": "5.05", "reference_average_price": ""},
+                         next(csv.DictReader(io.StringIO(out))))
+        self.assertEqual([], self.env.server.calls_to("/markets/prices"))
+
+    def test_a_selected_reference_column_survives_into_the_widest_run(self):
+        code, out, _err = self.env.run(["market", "Nanite Repair Paste", "--global", "--csv",
+                                        "--fields", "type_name,min_sell,reference_average_price"])
+        self.assertEqual(0, code)
+        row = next(csv.DictReader(io.StringIO(out)))
+        self.assertEqual("118.5", row["reference_average_price"])
+        self.assertEqual("", row["min_sell"])
 
 
 if __name__ == "__main__":

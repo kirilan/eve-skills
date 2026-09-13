@@ -32,7 +32,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `skills` (default) | Clone state + evidence, totals, training queue, trained-skill table | no (core login) |
 | `summary` | One row per character: clone state, total SP, queue length, current item time left, grand total | no |
 | `attributes` | Effective attributes (fitted implant bonuses included), remaps available/last remap | no — covered by the standard skills consent |
-| `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume | no — public ESI; works before you have logged in |
+| `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume; `--group`/`--category NAME` prices everything in one of them, `--fields a,b,c` picks the columns | no — public ESI, plus local SDE data (`update-data`) to expand a group name |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
@@ -631,7 +631,27 @@ eve-skills market Tritanium 34 --hub jita   # several types in one run; ids work
 eve-skills market Tritanium --global        # add the best price across every market region
 eve-skills market Tritanium --history 30    # append ESI's daily traded volume
 eve-skills market Tritanium --json          # / --csv for scripting
+eve-skills market --group "Basic Commodities - Tier 1"      # every type in a market group (repeatable)
+eve-skills market --category "Planetary Commodities"        # every type in every group of a category
+eve-skills market --category Module --max-types 500         # raise the size guard, if you meant it
+eve-skills market Tritanium --fields type_name,min_sell,spread    # choose and order the columns
 ```
+
+`--group`/`--category` are resolved from the local SDE snapshot (`update-data`) — a name or an id, in any
+case — and expand to the types that are both published and listed on the market (19,551 of them across
+814 groups and 32 categories in build 3494416). Types named on the command line are asked first, so they
+keep their order and their spelling, and a type inside two things you named is still priced once. Because
+one group can be thousands of types — `--category Module` is 3,873 — a run over 200 types is refused with
+the count, what it would cost and the `--max-types` number that clears it; the refusal happens before the
+first order book is read, so a mistyped name costs nothing. An expanded run prints its size on stderr
+before it starts (`68 types from --category "Planetary Commodities": 68 order books to read; about 17s at
+this size`), never on stdout, so `--csv` stays parseable.
+
+`--fields` takes the column names `--csv` already prints — the same vocabulary for the text table and for
+the CSV, in whatever order you list them — and refuses a name it does not have with the full list, rather
+than dropping the column you thought you had asked for. A `history_*` or `reference_*` name needs the run
+that reads that document (`--history DAYS`, or a scope with no live book), because an empty column would
+otherwise look like "traded nothing".
 
 No login and no consent: the order book is public, so this works on a machine that has never seen
 SSO. Each requested scope is one row — `min sell`, `max buy`, `spread`, `margin %`, listed sell/buy
@@ -1230,7 +1250,7 @@ id,ts,time_utc,kind,character_id,character_name,skill_id,skill_name,finished_lev
 has (never later than the order's own expiry). The text view prints those two as `[history]` and
 `[time estimated]` on the affected lines.
 
-### `update-data` — alpha caps, skill catalog, blueprint recipes, planetary industry and the planet census from the official SDE
+### `update-data` — alpha caps, skill catalog, blueprint recipes, planetary industry, the planet census and the market type index from the official SDE
 
 ```bash
 eve-skills update-data              # latest build (~100 MB download)
@@ -1243,19 +1263,25 @@ the material list of every blueprint — manufacturing runs and reactions alike,
 one makes — and the planetary-industry chain: each planet type with what its extractors pull, every
 recipe with its inputs, outputs, cycle time, plant class and the planets able to run it, the CPU and power
 each structure draws, a command center's output at every upgrade level, and the customs-tax factors —
-and every planet in New Eden grouped by the system it orbits —
-and atomically replaces six files in the data directory
+and every planet in New Eden grouped by the system it orbits — and the market type index, which maps each
+of the 814 groups of market-listed types (and each of their 32 categories) to the types it holds —
+and atomically replaces seven files in the data directory
 (`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That user copy takes
 precedence over the snapshot shipped in the package, so you can refresh caps, the catalog, the recipes and
 the planetary data without touching the checkout. `plan` is built on this catalog — without one it refuses
 with `no local skill catalog - run: eve-skills update-data` — and `build-cost` is built on the recipes,
 which is why a type that nothing makes locally ends by naming `update-data` instead of printing a table of
-dashes; `pi` reads the planetary document and `system` reads the census. The census is deliberately its own
+dashes; `pi` reads the planetary document, `system` reads the census and `market --group` reads the index. The census is deliberately its own
 file rather than another section of `planet_industry.json`: it is 474 KB of per-system counts that `pi fit`
 would have to parse before adding up eight integers, and it counts every planet type in the SDE — including
 the ones nobody can colonise, which `planet_industry.json` has no name for. The whole download runs under `update.lock`, so two concurrent
 runs cannot both pull ~100 MB and interleave builds, and each file is replaced atomically. `skills` warns
 when the local snapshot is more than 90 days old (the age line also names the SDE build in use).
+
+The market type index is its own file for the same reason: it costs 0.94 MB against a 153 MB `types.jsonl`,
+and `pi` would have to parse all of it to answer a question it never asks. Only types that are both
+published and carry a `marketGroupID` are in it — the SDE's own test for "this is something you can buy" —
+which is why `--category Module` names 3,873 types and not the 27,116 published ones.
 
 ### `doctor` — installation diagnostics
 
@@ -1273,7 +1299,7 @@ on (`versions.platform` — a pasted report may be read on a different machine t
 data directories and their permissions (including the state directory the watchers use), config and
 token-store readability, per-character login state (token time left, auto-refresh, granted consent —
 `orders` and `corp-orders` included), SDE document freshness and where each document resolves from — all
-six of them, `system_planets.json` last; as with `blueprint_materials.json`, an absent one is a warning
+seven of them, `market_types.json` last; as with `blueprint_materials.json`, an absent one is a warning
 naming `update-data` rather than a blocker, since it costs one command's subject and not the tool — the
 registered callback URLs, SP-history age, and what the watchers have accumulated:
 
@@ -1374,7 +1400,7 @@ naming the wrong tree beats naming nothing.
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
-| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry,system_planets}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id; `system_planets.json` is the one `system` reads — every planet in New Eden counted per solar system by planet type (68,407 planets over 8,088 systems in build 3503375), with a name for each type it met | Non-secret |
+| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry,system_planets,market_types}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id; `system_planets.json` is the one `system` reads — every planet in New Eden counted per solar system by planet type (68,407 planets over 8,088 systems in build 3503375), with a name for each type it met; `market_types.json` is the one `market --group` reads — every market-listed type under its group and its category (19,551 types over 814 groups and 32 categories in build 3494416) | Non-secret |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
@@ -1668,7 +1694,7 @@ eve_skills/
   exports.py         standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
   data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog,
-                     blueprint_materials, planet_industry, system_planets)
+                     blueprint_materials, planet_industry, system_planets, market_types)
 tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
                      Windows lock backend, path layout on both branches, fake-ESI command integration,
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end

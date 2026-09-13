@@ -658,6 +658,23 @@ def _check_sde(now: float) -> list[dict]:
         checks.append(_check("data.system_planets", OK,
                              f"planet census available (SDE build {census['build']})", **census_fields))
 
+    # The type index is the only local source for what a group or category contains, so its absence
+    # costs `market` the ability to price a list by name - naming types one by one still works, which
+    # is why this is a warning with the same fix rather than a blocker.
+    index = by_name["market_types.json"]
+    index_fields = {"path": index["path"], "present": index["present"], "build": index["build"]}
+    if not index["present"]:
+        checks.append(_check("data.market_types", WARN,
+                             "the market type index is not installed - market --group and --category "
+                             "cannot turn a group or category into the types it contains",
+                             hint="run: eve-skills update-data", **index_fields))
+    elif index["problem"]:
+        checks.append(_check("data.market_types", WARN, f"the market type index is {index['problem']}",
+                             hint="re-download it: eve-skills update-data", **index_fields))
+    else:
+        checks.append(_check("data.market_types", OK,
+                             f"market type index available (SDE build {index['build']})", **index_fields))
+
     if len(builds) > 1:
         checks.append(_check("data.consistency", WARN,
                              f"the local SDE documents describe different builds ({', '.join(str(b) for b in builds)})",

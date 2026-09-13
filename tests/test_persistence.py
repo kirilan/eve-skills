@@ -707,7 +707,8 @@ class AlphadataUpdateTests(XdgTestCase):
         """One skill with a prerequisite, one bare skill, types that are not skills, three blueprint
         rows (manufacturing next to its copying sibling, one reaction, and a run with no materials at
         all), and the smallest planetary industry picture that still resolves: one recipe whose pin is
-        a processor, on one planet, turning one raw resource into one tier-1 commodity."""
+        a processor, on one planet, turning one raw resource into one tier-1 commodity. Three of those
+        types carry a marketGroupID, which is enough to build the market type index from the same rows."""
         members = {
             "cloneGrades.jsonl": '{"_key": 1, "name": "Caldari Alpha Clone", "skills": [{"typeID": 1003, "level": 3}]}\n',
             "bloodlines.jsonl": '{"_key": 402, "raceID": 1}\n',
@@ -739,15 +740,19 @@ class AlphadataUpdateTests(XdgTestCase):
                                ' {"attributeID": 1641, "value": 5.0}]}\n'
                                '{"_key": 3645, "dogmaAttributes": [{"attributeID": 1640, "value": 400.0},'
                                ' {"attributeID": 1641, "value": 400.0}]}\n',
+            # `marketGroupID` is what says ESI will price a type at all, so it is the filter the market
+            # type index is built from - and it is deliberately not also the grouping key. The three
+            # values here are the real ones for these types; the facilities without it (extractor,
+            # processor, spaceport) really do have none in the SDE, so they cannot be priced by name.
             "types.jsonl": '{"_key": 1003, "name": {"en": "Astrogeology", "de": "Astrogeologie"}, "published": true}\n'
                            '{"_key": 1002, "name": {"en": "Science"}, "published": true}\n'
                            '{"_key": 900, "name": {"en": "Reactor Control Unit"}, "published": false}\n'
-                           '{"_key": 2268, "name": {"en": "Aqueous Liquids"}, "groupID": 1032, "published": true}\n'
-                           '{"_key": 3645, "name": {"en": "Water"}, "groupID": 1042, "published": true}\n'
+                           '{"_key": 2268, "name": {"en": "Aqueous Liquids"}, "groupID": 1032, "marketGroupID": 1333, "published": true}\n'
+                           '{"_key": 3645, "name": {"en": "Water"}, "groupID": 1042, "marketGroupID": 1334, "published": true}\n'
                            '{"_key": 2469, "name": {"en": "Barren Basic Industry Facility"}, "groupID": 1028, "published": true}\n'
                            '{"_key": 2247, "name": {"en": "Barren Extractor"}, "groupID": 1026, "published": true}\n'
                            '{"_key": 16239, "name": {"en": "Barren Launchpad"}, "groupID": 1030, "published": true}\n'
-                           '{"_key": 2524, "name": {"en": "Barren Command Center"}, "groupID": 1027, "published": true}\n'
+                           '{"_key": 2524, "name": {"en": "Barren Command Center"}, "groupID": 1027, "marketGroupID": 1322, "published": true}\n'
                            # Planet names only exist on unpublished marker types; the document still has to carry them.
                            '{"_key": 2016, "name": {"en": "Planet (Barren)"}, "groupID": 7, "published": false}\n'
                            '{"_key": 13, "name": {"en": "Planet (Gas)"}, "groupID": 7, "published": false}\n',
@@ -771,10 +776,18 @@ class AlphadataUpdateTests(XdgTestCase):
             "mapPlanets.jsonl": '{"_key": 4001, "solarSystemID": 30000142, "typeID": 2016}\n'
                                 '{"_key": 4002, "solarSystemID": 30000142, "typeID": 13}\n'
                                 '{"_key": 4003, "solarSystemID": 30000135, "typeID": 13}\n',
-            # Category is what separates a structure from a raw resource from a manufactured commodity.
-            "groups.jsonl": '{"_key": 1026, "categoryID": 41}\n{"_key": 1027, "categoryID": 41}\n'
-                            '{"_key": 1028, "categoryID": 41}\n{"_key": 1030, "categoryID": 41}\n'
-                            '{"_key": 1032, "categoryID": 42}\n{"_key": 1042, "categoryID": 43}\n',
+            # Category is what separates a structure from a raw resource from a manufactured commodity,
+            # and the names are what `market --group` is typed; both come from the same SDE rows.
+            "groups.jsonl": '{"_key": 1026, "name": {"en": "Extractors"}, "categoryID": 41}\n'
+                            '{"_key": 1027, "name": {"en": "Command Centers"}, "categoryID": 41}\n'
+                            '{"_key": 1028, "name": {"en": "Processors"}, "categoryID": 41}\n'
+                            '{"_key": 1030, "name": {"en": "Spaceports"}, "categoryID": 41}\n'
+                            '{"_key": 1032, "name": {"en": "Planet Solid - Raw Resource"}, "categoryID": 42}\n'
+                            '{"_key": 1042, "name": {"en": "Basic Commodities - Tier 1"}, "categoryID": 43}\n',
+            # The names behind the category ids; only the three that hold a priced type reach the index.
+            "categories.jsonl": '{"_key": 41, "name": {"en": "Planetary Industry"}}\n'
+                                '{"_key": 42, "name": {"en": "Planetary Resources"}}\n'
+                                '{"_key": 43, "name": {"en": "Planetary Commodities"}}\n',
         }
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -816,7 +829,8 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual(summaries[0]["grades"]["1"], {"name": "Caldari Alpha Clone", "skills": 1})
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
         for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
-                     "blueprint_materials.json", "planet_industry.json", "system_planets.json"):
+                     "blueprint_materials.json", "planet_industry.json", "system_planets.json",
+                     "market_types.json"):
             path = os.path.join(self.data_dir, name)
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
@@ -859,6 +873,29 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual({"name": "Water", "cycle": 1800, "in": {"2268": 3000}, "out": {"3645": 20},
                           "tier": 1, "facility": "basic", "planet_types": [2016]},
                          pi["schematics"]["121"])
+
+        # The market type index is what `market --group` reads, so it holds only what can be priced: the
+        # three types carrying a marketGroupID, each under its own group and that group's category.
+        self.assertEqual({"market_types": 3, "market_groups": 3, "market_categories": 3},
+                         {key: summaries[0][key] for key in ("market_types", "market_groups",
+                                                             "market_categories")})
+        index = alphadata.market_types()
+        self.assertEqual({"Planetary Industry", "Planetary Resources", "Planetary Commodities"},
+                         set(index["categories"]))
+        self.assertEqual({"id": 1042, "category_id": 43, "category": "Planetary Commodities",
+                          "types": {"3645": "Water"}}, index["groups"]["Basic Commodities - Tier 1"])
+        self.assertEqual({"id": 43, "groups": ["Basic Commodities - Tier 1"]},
+                         index["categories"]["Planetary Commodities"])
+        # The extractor, processor and spaceport are indexed nowhere: without a marketGroupID ESI has no
+        # order book to return, so offering `--group Extractors` would be offering a run that cannot work.
+        self.assertEqual({"Basic Commodities - Tier 1", "Command Centers", "Planet Solid - Raw Resource"},
+                         set(index["groups"]))
+        # Keys are written sorted, because these documents are checked in and a rebuild that only shuffled
+        # them would read as a change to the whole file.
+        with open(os.path.join(self.data_dir, "market_types.json"), encoding="utf-8") as fh:
+            written = json.load(fh, object_pairs_hook=list)     # objects stay ordered key/value pairs
+        group_keys = [name for name, _ in dict(written)["groups"]]
+        self.assertEqual(sorted(group_keys), group_keys)
 
 
 class BlueprintMaterialsTests(XdgTestCase):

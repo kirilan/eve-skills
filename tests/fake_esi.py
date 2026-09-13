@@ -378,6 +378,9 @@ MARKET_IDS: dict[str, dict[str, list[int]]] = {
     # ESI answers a name in every category: Tritanium is also a character, and a resolver that
     # takes the first non-empty bucket would price a player.
     "Tritanium": {"characters": [91007777], "inventory_types": [34]},
+    # A second member of the same market group as Tritanium, so a test can name one type, expand the
+    # group around it, and see that the type is still priced once.
+    "Pyerite": {"inventory_types": [36]},
     "Large Skill Injector": {"inventory_types": [40520]},
     "The Forge": {"regions": [MARKET_FORGE]},
     "PLEX": {"inventory_types": [MARKET_PLEX]},

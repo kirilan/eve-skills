@@ -86,6 +86,9 @@ def cmd_update_data(args):
     print(f"  planet census: {summary['census_systems']} solar systems, {summary['census_planets']} planets "
           f"over {summary['census_planet_types']} planet types (per-system planet counts for "
           f"eve-skills system)")
+    print(f"  market type index: {summary['market_types']} market-listed types in "
+          f"{summary['market_groups']} groups across {summary['market_categories']} categories "
+          f"(the lists behind eve-skills market --group / --category)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,8 +182,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help='e.g. "Astrogeology:5" (default target L5); missing prerequisites are added automatically')
 
     p_market = sub.add_parser("market", help="live order-book prices for item types (public ESI, no login)")
-    p_market.add_argument("type", nargs="+", metavar="TYPE",
-                          help="exact type name or numeric id, e.g. Tritanium or 34")
+    # nargs="*" rather than "+": --group/--category can supply the whole list, and cmd_market then
+    # says what is missing in words a user can act on instead of argparse's usage dump.
+    p_market.add_argument("type", nargs="*", metavar="TYPE",
+                          help="exact type name or numeric id, e.g. Tritanium or 34; leave it out when "
+                               "--group or --category names the list")
+    # Both expand from the local SDE index before anything is asked of ESI, so a mistyped name costs
+    # nothing and comes back with the valid names next to it.
+    p_market.add_argument("--group", action="append", metavar="NAME",
+                          help='price every market-listed type in one group: --group '
+                               '"Basic Commodities - Tier 1"; repeatable')
+    p_market.add_argument("--category", action="append", metavar="NAME",
+                          help='price every market-listed type in every group of one category: '
+                               '--category "Planetary Commodities"; repeatable')
+    p_market.add_argument("--max-types", type=int, metavar="N", dest="max_types",
+                          help=f"price up to N types in one run instead of the default "
+                               f"{cmd_market.MAX_TYPES_PER_RUN}; a refusal names the number to pass")
     p_market.add_argument("--region", action="append", metavar="NAME",
                           help='quote this region (exact name or id); repeatable: --region "The Forge"')
     p_market.add_argument("--hub", action="append", metavar="HUB",
@@ -192,6 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="also show traded volume from ESI's daily regional history (daily, one day behind)")
     p_market.add_argument("--json", action="store_true", help="machine-readable output")
     p_market.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
+    p_market.add_argument("--fields", metavar="A,B,C",
+                          help="which columns to print, in this order, for both the table and --csv: "
+                               "the column names of --csv (type_id, min_sell, history_volume_per_day, "
+                               "...); a mistyped name lists them all")
 
     p_build_cost = sub.add_parser("build-cost",
                                   help="ISK cost of manufacturing an item from its blueprint, priced "
