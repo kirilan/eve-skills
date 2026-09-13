@@ -246,6 +246,100 @@ class PriceTable:
                          meta=self.meta)
 
 
+# ---------------------------------------------------------------------------
+# CCP's two cuts off a seller: sales tax, and the broker fee for listing
+# ---------------------------------------------------------------------------
+
+# Every figure below comes from CCP's own support article "Broker Fee and Sales Tax"
+# (https://support.eveonline.com/hc/en-us/articles/203218962-Broker-Fee-and-Sales-Tax, read
+# 2026-09-13), quoted where the wording is what fixes the number:
+#
+#   "Sales taxes are due after an item has been sold, and are payable by the seller. They will be
+#    automatically deducted from the sales transaction and start at 7.5% of the sales price. This
+#    percentage can be reduced down to 3.37% through the "Accounting" skill."
+#   "The broker fee is due on order creation for all non-immediate orders and is based on a
+#    percentage of the total order value. Starting at 3% of the order value, the skill "Broker
+#    Relations" reduces the fee by 0.3% per level. In addition, increased standings with the owner
+#    of the NPC station where the order is placed may reduce it by up to another 0.2% with maximum
+#    standing, and good standings with the owners faction can reduce the fee by further 0.3%, to a
+#    minimal broker fee of 1% of the order value."
+#   "The Broker Fees only take unmodified standings into account, so skills that increase your
+#    effective standing, such as Connections or Diplomacy, do not have an effect on these fees."
+#
+# The article gives Accounting's start and floor but not its step; ESI's own description of the
+# type does - "Each level of skill reduces sales tax by 11%. Sales tax starts at 7.5%."
+# (`GET /universe/types/16622`, read 2026-09-13) - which is what puts Accounting IV on 4.20% and
+# Accounting V exactly on the floor the article rounds to "3.37%".
+
+# Skill ids are inventory type ids on today's `/characters/{id}/skills` (measured against two
+# stored characters on 2026-09-13; `GET /universe/names` names all three back).
+SKILL_ACCOUNTING = 16_622
+SKILL_BROKER_RELATIONS = 3_446
+# Advanced Broker Relations (16597) is deliberately not read: ESI's description says it "adds 6
+# percentage points to the standard Relist Discount of 50%", so it changes what *relisting* costs,
+# never the fee on a first order - which is the only thing this command can price.
+
+BASE_SALES_TAX_PCT = 7.5            # "start at 7.5% of the sales price"
+SALES_TAX_STEP = 0.11               # of the base, per Accounting level (ESI's wording)
+MIN_SALES_TAX_PCT = 3.375           # CCP's floor, printed as "3.37%"
+
+BASE_BROKER_FEE_PCT = 3.0           # "Starting at 3% of the order value"
+BROKER_FEE_STEP_PCT = 0.3           # percentage points off, per Broker Relations level
+CORP_STANDING_STEP_PCT = 0.02       # percentage points off, per point of corp standing
+MIN_BROKER_FEE_PCT = 1.0            # "a minimal broker fee of 1% of the order value"
+
+
+def sales_tax_pct(accounting_level: int) -> float:
+    """What selling costs a character with this Accounting level, in percent of the sale price.
+
+    The step is a fraction of the base rather than a subtraction from it - 7.5 x (1 - 0.11 x 4) =
+    4.20% - which is the only reading that reaches CCP's stated 3.37% floor at level V instead of
+    going under it. Rounded to three decimals because a percentage with more precision than that is
+    not something CCP publishes, and `str()` of an unrounded product reaches a CSV as `4.200002`.
+    """
+    return round(max(MIN_SALES_TAX_PCT, BASE_SALES_TAX_PCT * (1.0 - SALES_TAX_STEP * int(accounting_level))), 3)
+
+
+def broker_fee_pct(broker_relations_level: int, corp_standing: float | None = None) -> float:
+    """What creating one sell order costs at an NPC station, in percent of the order value.
+
+    CCP's formula as printed is
+    `3% - (0.3% x BrokerRelationsLevel) - (0.03% x FactionStanding) - (0.02% x CorpStanding)`,
+    floored at 1%. Two of those four terms are computed here and the third standing term is not,
+    because ESI cannot say which *faction* owns a station - measured 2026-09-13:
+    `GET /universe/stations/60003760` gives owner 1000035 (Caldari Navy) and system 30000142 with
+    no faction field; `GET /corporations/1000035` has `alliance_id: null` and no faction key at
+    all; `GET /universe/factions` answers with an empty `corporation_ids` for every one of its 27
+    factions. The system's sovereignty holder is not a stand-in - `/sovereignty/map` puts Jita
+    under CONCORD Assembly (500006) while Caldari Navy owns its station - so inventing a faction
+    would move the fee by 0.03 percentage points per standing point on no evidence at all, and the
+    term is left out instead. Anything that prints this figure has to say so; `cmd_market` does.
+
+    A negative standing raises the fee exactly as a positive one lowers it: the formula subtracts,
+    it does not clamp at zero first. `corp_standing=None` means "not known" (no standings consent,
+    or no row for that corporation), which is a different claim from 0.0, so that term is skipped
+    rather than entered as zero. At legal inputs the 1% floor never binds - level V and standing
+    +10 still leave 3 - 1.5 - 0.2 = 1.3 - so `max` here is CCP's cap recorded faithfully, not a
+    rule this code depends on.
+    """
+    fee = BASE_BROKER_FEE_PCT - BROKER_FEE_STEP_PCT * int(broker_relations_level)
+    if corp_standing is not None:
+        fee -= CORP_STANDING_STEP_PCT * float(corp_standing)
+    return round(max(MIN_BROKER_FEE_PCT, fee), 3)
+
+
+def net_price(price: float | None, fee_pct: float | None) -> float | None:
+    """What the seller keeps per unit after a percentage cut; either side missing stays None.
+
+    Rounded to ISK cents because a fee factor is not exactly representable in binary: without the
+    rounding `14150 * (1 - 0.06)` reaches a CSV as `13301.000000000002`, which is the same number
+    to a human and a wrong one to anybody comparing two runs.
+    """
+    if price is None or fee_pct is None:
+        return None
+    return round(price * (1.0 - fee_pct / 100.0), 2)
+
+
 def book_path(region_id: int, type_id: int) -> str:
     """The regional book for one type.
 

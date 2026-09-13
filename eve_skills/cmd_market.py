@@ -6,12 +6,12 @@ import csv
 import io
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
-from . import alphadata, esi as esi_mod, exports, market, render, sso
+from . import alphadata, esi as esi_mod, exports, market, render, sso, universe
 
 
 @dataclass
@@ -30,7 +30,13 @@ class MarketRow:
 
 @dataclass(frozen=True)
 class _RowCtx:
-    """Everything a cell can be read from: one type, one scope's answer, and the run around it."""
+    """Everything a cell can be read from: one type, one scope's answer, and the run around it.
+
+    `seller` and `places` are the `--seller` half: the character whose two skills set the fee rates,
+    and what creating an order at each place in this run would cost them. Both stay empty without the
+    flag, which is exactly what makes every fee column print a dash instead of CCP's base case - there
+    is no skill level to compute from, and printing 7.5% / 3% would present a stranger's character.
+    """
 
     type_id: int
     type_name: str
@@ -39,6 +45,8 @@ class _RowCtx:
     history_days: int | None
     reference: object | None      # ESI's published reference for this type, when one was read
     now: float
+    seller: "Seller | None" = None
+    places: Mapping[int, "ListingPlace"] = field(default_factory=dict)
 
     @property
     def q(self) -> market.Quote:
@@ -71,6 +79,16 @@ def _percent(value) -> str:
 def _age(seconds) -> str:
     """Age in the words `market` uses for it; a bare 192 in a column asks the reader to do sums."""
     return "-" if seconds is None else market.format_age(seconds)
+
+
+def _rate_pct(value) -> str:
+    """A fee as CCP states it - `3`, `1.8`, `3.375` - with no precision invented on the way out."""
+    return "-" if value is None else f"{value:g}"
+
+
+def _signed(value) -> str:
+    """A difference in ISK, always with its sign: which way it goes is the whole point of the column."""
+    return "-" if value is None else f"{value:+,.2f}"
 
 
 @dataclass(frozen=True)
@@ -160,8 +178,42 @@ MARKET_FIELDS: tuple[MarketField, ...] = (
                 lambda c: _age(None if c.reference is None or c.reference.meta.last_modified is None
                                 else c.now - c.reference.meta.last_modified)),
 )
-MARKET_FIELDS_BY_NAME = {field.name: field for field in MARKET_FIELDS}
+# The five columns `--seller` adds, kept out of MARKET_FIELDS on purpose. That tuple is the shipped CSV
+# vocabulary: 616090f guarantees a run without the new flags writes byte-identical output, and a reader
+# that indexes by position - the class of bug this file already documents once, a `history_days` figure
+# read where `history_volume_per_day` was meant - breaks silently when five empty cells appear on every
+# row. So the default column list grows only when a character was actually named to price as. Their names
+# stay in the validation vocabulary either way, exactly like the history columns, which are always listed
+# as valid and still refused without --history.
+SELLER_FIELDS: tuple[MarketField, ...] = (
+    MarketField("sales_tax_pct", "sales tax %", lambda c: sales_tax_of(c),
+                lambda c: _rate_pct(sales_tax_of(c))),
+    MarketField("broker_fee_pct", "broker fee %", lambda c: broker_fee_of(c),
+                lambda c: _rate_pct(broker_fee_of(c))),
+    MarketField("net_instant", "net instant", lambda c: net_instant_of(c),
+                lambda c: render.isk(net_instant_of(c))),
+    MarketField("net_listing", "net listing", lambda c: net_listing_of(c),
+                lambda c: render.isk(net_listing_of(c))),
+    # Listing minus instant: positive means the order earns more per unit than dumping the stack into
+    # the best buy order would, negative says the seller pays that much to have the time.
+    MarketField("net_edge", "listing edge", lambda c: net_edge_of(c),
+                lambda c: _signed(net_edge_of(c))),
+)
+MARKET_FIELDS_BY_NAME = {col.name: col for col in (*MARKET_FIELDS, *SELLER_FIELDS)}
 MARKET_CSV_COLUMNS = [field.name for field in MARKET_FIELDS]
+SELLER_CSV_COLUMNS = [field.name for field in SELLER_FIELDS]
+
+# What a mistyped `--fields` name is answered with: every column this command knows, including the five
+# that need --seller. They are listed anyway for the same reason the history columns always were - the
+# name is real and the run is what is short, and the refusal that follows names the missing flag rather
+# than leaving the reader to conclude the column does not exist.
+_FIELD_VOCABULARY = ", ".join(MARKET_CSV_COLUMNS + SELLER_CSV_COLUMNS)
+
+# The columns that only mean something when a character was named to price as. `--fields` refuses them
+# without --seller, exactly as it refuses a history column without --history - an all-empty fee column
+# reads like "no fees", which is a wrong answer rather than a missing one.
+SELLER_FIELD_NAMES = frozenset({"sales_tax_pct", "broker_fee_pct", "net_instant", "net_listing",
+                                "net_edge"})
 
 # The text table's default columns, exactly as they printed before `--fields` existed. The two history
 # columns join them only under `--history`, and the `*` in their headers is what earns the legend.
@@ -169,6 +221,11 @@ MARKET_TEXT_COLUMNS = ["scope", "min_sell", "max_buy", "spread", "margin_pct", "
                        "buy_volume", "sell_orders", "buy_orders",
                        "best_sell_location_name", "best_buy_location_name"]
 MARKET_TEXT_HISTORY_COLUMNS = ["history_volume_per_day", "history_total_volume"]
+
+# The three figures the list-or-dump decision is made on. The two rates stay out of the table - sales
+# tax is one number for the whole run and the broker fee one per station, both spelled out in the
+# footer under the tables with the standing they were computed from.
+MARKET_TEXT_SELLER_COLUMNS = ["net_instant", "net_listing", "net_edge"]
 
 
 def select_fields(args) -> list[MarketField] | None:
@@ -187,11 +244,10 @@ def select_fields(args) -> list[MarketField] | None:
     names = [part for part in wanted if part]
     if not names:
         raise RuntimeError(f"--fields needs at least one column name; valid names: "
-                           f"{', '.join(MARKET_CSV_COLUMNS)}")
+                           f"{_FIELD_VOCABULARY}")
     unknown = next((name for name in names if name not in MARKET_FIELDS_BY_NAME), None)
     if unknown is not None:
-        raise RuntimeError(f"unknown --fields name '{unknown}'; valid names: "
-                           f"{', '.join(MARKET_CSV_COLUMNS)}")
+        raise RuntimeError(f"unknown --fields name '{unknown}'; valid names: {_FIELD_VOCABULARY}")
 
     needs_history = next((name for name in names if name.startswith("history_")), None)
     if needs_history is not None and not args.history:
@@ -199,6 +255,13 @@ def select_fields(args) -> list[MarketField] | None:
         # exists to prevent, and guessing a window would put a number nobody asked for in the output.
         raise RuntimeError(f"--fields {needs_history} reads ESI's daily history, which only --history "
                            f"DAYS asks for - add --history 30 (or another window) to fill it")
+
+    needs_seller = next((name for name in names if name in SELLER_FIELD_NAMES), None)
+    if needs_seller is not None and not args.seller:
+        # The same trap as the history columns just above: naming the column and getting an empty one.
+        # Here it is worse, because an empty fee column looks like a seller who pays nothing.
+        raise RuntimeError(f"--fields {needs_seller} prices the sale through one character's skills - "
+                           f"add --seller NAME to fill it")
     return [MARKET_FIELDS_BY_NAME[name] for name in names]
 
 
@@ -207,8 +270,296 @@ def text_fields(args) -> list[MarketField]:
     chosen = select_fields(args)
     if chosen is not None:
         return chosen
-    names = list(MARKET_TEXT_COLUMNS) + (list(MARKET_TEXT_HISTORY_COLUMNS) if args.history else [])
+    # The seller columns join the defaults only under --seller; without it they would print empty, and
+    # an empty column on the table somebody reads every day looks like a bug rather than a missing input.
+    names = (list(MARKET_TEXT_COLUMNS)
+             + (list(MARKET_TEXT_HISTORY_COLUMNS) if args.history else [])
+             + (list(MARKET_TEXT_SELLER_COLUMNS) if args.seller else []))
     return [MARKET_FIELDS_BY_NAME[name] for name in names]
+
+
+# ---------------------------------------------------------------------------
+# --seller: what one named character keeps per unit
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Seller:
+    """One stored character's fee position: the two skills CCP charges with, and its standings.
+
+    The levels come from `active_skill_level`, not `trained_skill_level`: a remap can leave a trained
+    level inactive, and CCP bills on what the character actually has when the order is placed. A skill
+    missing from ESI's list is untrained - measured 2026-09-13 against a stored character with neither,
+    whose `/characters/{id}/skills` document does not contain either id at all - so it reads as level 0
+    and the base rate rather than as unknown.
+
+    `standings` keeps only `npc_corp` rows keyed by corporation id: that is the owner CCP's formula asks
+    for, and ESI already reports the raw value, which is what the article demands ("The Broker Fees only
+    take unmodified standings into account"). It is empty without the optional `standings` consent, and
+    `standings_consent` records that difference - "no row for this corporation" and "never asked" are not
+    the same claim about a fee.
+    """
+
+    character_id: int
+    name: str
+    accounting: int
+    broker_relations: int
+    standings: Mapping[int, float] = field(default_factory=dict)
+    standings_consent: bool = True
+
+    @property
+    def sales_tax_pct(self) -> float:
+        return market.sales_tax_pct(self.accounting)
+
+    def standing_with(self, owner_corp_id: int | None) -> float | None:
+        """Raw standing with a station's owning corporation; None when it is not known."""
+        if owner_corp_id is None:
+            return None
+        return self.standings.get(owner_corp_id)
+
+    def broker_fee_pct(self, owner_corp_id: int | None) -> float:
+        return market.broker_fee_pct(self.broker_relations, self.standing_with(owner_corp_id))
+
+
+@dataclass(frozen=True)
+class ListingPlace:
+    """One place an order could be created, and what CCP's terms make it cost this seller.
+
+    `fee_pct` is None when ESI cannot support a figure - see `listing_places` for the two ways that
+    happens - and then everything derived from it stays empty too. Falling back to CCP's 3% would be
+    wrong in exactly the case that matters, an Upwell, where the rate is whatever its owner set and the
+    Broker Relations skill does not apply at all.
+    """
+
+    location_id: int
+    npc_station: bool = False
+    owner_corp_id: int | None = None
+    standing: float | None = None
+    fee_pct: float | None = None
+
+
+def _as_int(value) -> int | None:
+    """An id out of an ESI document, or None for anything that is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> float | None:
+    """A number out of an ESI document, or None for a missing or non-numeric field.
+
+    Written out because the obvious `float(value or 0)` would turn a missing standing into 0.0, and 0.0
+    is a real neutral standing that CCP's formula charges for."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_seller(client, spec: str | None) -> tuple[Seller, str | None]:
+    """The character `--seller` names, with everything the fee formulas need from it.
+
+    Returns the seller plus a hint line when that character has no `standings` consent. Missing optional
+    consent is never an error here - same rule as `exports.targets`: the broker fee still comes out of
+    Broker Relations, only without the standing term, and the caller says which of the two happened.
+
+    At most two authenticated reads (skills, plus standings when consented), which is why this runs
+    before the first order book: a name that is not a stored character should cost one request rather
+    than thirty books - the same reasoning that settles the output columns before anything is fetched.
+    """
+    char_id = sso.resolve_character(spec)
+    token = sso.get_access_token(char_id)
+    doc = client.get(f"/characters/{char_id}/skills", token=token["access_token"])
+    levels: dict[int, int] = {}
+    for entry in doc.get("skills", []):
+        ident = _as_int(entry.get("skill_id"))
+        if ident is not None:
+            levels[ident] = _as_int(entry.get("active_skill_level")) or 0
+    name = token.get("character_name") or str(char_id)
+    consent = sso.has_feature(token, "standings")
+    standings: dict[int, float] = {}
+    hint: str | None = None
+    rows: list = []                       # no consent means never asked, so nothing to filter
+    if consent:
+        try:
+            rows = client.get(f"/characters/{char_id}/standings", token=token["access_token"])
+        except esi_mod.EsiError as exc:
+            # Consent recorded but the document unavailable is not the same thing as never having
+            # granted it, and neither is fatal here: a fee from Broker Relations alone is still worth
+            # more to the caller than no fee, and `market`'s job is the price. The footer names which
+            # of the two happened at each station ("no standing recorded with ..."), so nothing in the
+            # output claims a standing this run did not read.
+            rows = []
+            hint = (f"{name}: standing unavailable ({exc}) - broker fees below are computed from "
+                    f"Broker Relations alone.")
+    else:
+        hint = exports.hint(name, "standings")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("from_type") != "npc_corp":
+            continue
+        ident, value = _as_int(row.get("from_id")), _as_float(row.get("standing"))
+        if ident is not None and value is not None:
+            standings[ident] = value
+    seller = Seller(character_id=char_id, name=name,
+                    accounting=levels.get(market.SKILL_ACCOUNTING, 0),
+                    broker_relations=levels.get(market.SKILL_BROKER_RELATIONS, 0),
+                    standings=standings, standings_consent=consent)
+    return seller, hint
+
+
+def listing_places(client, seller: Seller, locations) -> dict[int, ListingPlace]:
+    """What creating one sell order at each of these places would cost `seller`.
+
+    The place priced is wherever the row's cheapest ask sits: that is the order a seller has to beat,
+    and for a station or hub scope it is the very station they are standing in. One public read per
+    distinct place (`/universe/stations/{id}` needs no token), cached on disk like every other document.
+
+    Two kinds of place get no rate:
+      * An id above `universe.INT32_MAX` is item-derived, which is how this tool already tells a player
+        structure from an NPC station (see that constant; verified against live ESI on 2026-09-08). An
+        Upwell's broker fee is set by its owner and CCP states that "The Broker Relations skill does not
+        apply on orders on Upwell structures", so there is nothing here to compute - and no public ESI
+        document publishes it either (ESI's structure endpoints sit behind
+        `esi-universe.read_structures.v1`, and they answer with orders and names, not fees).
+      * A station lookup that fails leaves us unable to say which of the two we are pricing at all.
+    """
+    places: dict[int, ListingPlace] = {}
+    for location_id in sorted({ident for ident in locations if ident is not None}):
+        if location_id > universe.INT32_MAX:
+            places[location_id] = ListingPlace(location_id)
+            continue
+        try:
+            doc = client.get(f"/universe/stations/{location_id}")
+        except esi_mod.EsiError:
+            places[location_id] = ListingPlace(location_id)
+            continue
+        if not isinstance(doc, dict):
+            places[location_id] = ListingPlace(location_id)
+            continue
+        owner = _as_int(doc.get("owner"))
+        standing = seller.standing_with(owner)
+        places[location_id] = ListingPlace(
+            location_id, npc_station=True, owner_corp_id=owner, standing=standing,
+            fee_pct=market.broker_fee_pct(seller.broker_relations, standing))
+    return places
+
+
+def _place(ctx: _RowCtx) -> ListingPlace | None:
+    """The place this row's order would be created at, when the run knows what it is."""
+    return ctx.places.get(ctx.q.best_sell_location)
+
+
+def sales_tax_of(ctx: _RowCtx) -> float | None:
+    return None if ctx.seller is None else ctx.seller.sales_tax_pct
+
+
+def broker_fee_of(ctx: _RowCtx) -> float | None:
+    place = _place(ctx)
+    return None if place is None else place.fee_pct
+
+
+def net_instant_of(ctx: _RowCtx) -> float | None:
+    """Per unit sold straight into the best buy order: sales tax, and nothing else.
+
+    "The broker fee is due on order creation for all non-immediate orders" (CCP), and filling a buy
+    order creates none - which is the entire reason this column sits next to `net_listing` rather than
+    being the same number twice."""
+    if ctx.seller is None:
+        return None
+    return market.net_price(ctx.q.max_buy, ctx.seller.sales_tax_pct)
+
+
+def net_listing_of(ctx: _RowCtx) -> float | None:
+    """Per unit at the current minimum sell, after that station's broker fee and this seller's tax."""
+    if ctx.seller is None:
+        return None
+    fee = broker_fee_of(ctx)
+    if fee is None:
+        return None
+    return market.net_price(ctx.q.min_sell, fee + ctx.seller.sales_tax_pct)
+
+
+def net_edge_of(ctx: _RowCtx) -> float | None:
+    """Listing minus instant, per unit: positive means the order is the better exit."""
+    listing, instant = net_listing_of(ctx), net_instant_of(ctx)
+    if listing is None or instant is None:
+        return None
+    return round(listing - instant, 2)
+
+
+def seller_notes(seller: Seller | None, places: Mapping[int, ListingPlace], names: dict[int, str],
+                 hint: str | None = None, split_scopes: tuple[str, ...] = ()) -> list[str]:
+    """The lines under the tables saying what the fee columns were computed from - and from not.
+
+    A percentage with no provenance is exactly the sort of number this tool refuses to print bare: these
+    depend on one character's skills and on a standing at one corporation, so both are named next to the
+    figure each produced, per station. `split_scopes` names the rows whose best ask and best bid stand in
+    different places - true for any region or cluster row where the two sides were not traded at the same
+    station - because their edge compares two markets rather than one trade."""
+    if seller is None:
+        return []
+    lines = [f"Seller {seller.name} (id {seller.character_id}): Accounting {seller.accounting} -> sales "
+             f"tax {_rate_pct(seller.sales_tax_pct)}% of the sale price; Broker Relations "
+             f"{seller.broker_relations} -> broker fee "
+             f"{_rate_pct(market.broker_fee_pct(seller.broker_relations))}% before standings."]
+    if hint is not None:
+        lines.append(hint)
+    priced = False
+    for place in sorted(places.values(), key=lambda p: p.location_id):
+        where = exports.name_or_id(names, place.location_id)
+        if place.fee_pct is None:
+            lines.append(f"{where}: a player structure sets its own broker fee and CCP exempts it from "
+                         f"Broker Relations, so listing there cannot be priced; that cell stays empty.")
+            continue
+        priced = True
+        owner = names.get(place.owner_corp_id) if place.owner_corp_id is not None else None
+        if place.standing is None:
+            why = ("no standings consent" if not seller.standings_consent
+                   else "no standing recorded" + (f" with {owner}" if owner else ""))
+        else:
+            why = f"standing {place.standing:+.2f}" + (f" with {owner}" if owner else "")
+        lines.append(f"{where}: broker fee {_rate_pct(place.fee_pct)}% ({why}).")
+    lines.append("Selling straight into a buy order pays sales tax alone: CCP charges the broker fee on "
+                 "order creation, so it belongs to the listing side only.")
+    if split_scopes:
+        lines.append("These rows price a listing at one place and an instant sale at another ("
+                     + ", ".join(split_scopes) + "): each figure is what that exit pays where its own best "
+                     "order stands, so the edge compares two markets - reaching that bid means moving the "
+                     "goods there first.")
+    if priced:
+        lines.append("Not applied: the further 0.03 percentage points per standing point CCP takes for "
+                     "the owning faction - ESI does not say which faction owns a station.")
+    return lines
+
+
+def market_seller_doc(seller: Seller | None, places: Mapping[int, ListingPlace], names: dict[int, str],
+                      hint: str | None = None) -> dict | None:
+    """The `--json` twin of `seller_notes`: the same facts as fields instead of prose.
+
+    `faction_standing_applied` is false and stays false on purpose - see `market.broker_fee_pct` for the
+    measurements behind it - so a script can tell that these fees are conservative rather than complete."""
+    if seller is None:
+        return None
+    return {
+        "character_id": seller.character_id,
+        "name": seller.name,
+        "accounting_level": seller.accounting,
+        "broker_relations_level": seller.broker_relations,
+        "sales_tax_pct": seller.sales_tax_pct,
+        "broker_fee_before_standings_pct": market.broker_fee_pct(seller.broker_relations),
+        "standings_consent": seller.standings_consent,
+        "faction_standing_applied": False,
+        "hint": hint,
+        "listing_places": [{
+            "location_id": place.location_id,
+            "location_name": names.get(place.location_id),
+            "npc_station": place.npc_station,
+            "owner_corp_id": place.owner_corp_id,
+            "owner_corp_name": names.get(place.owner_corp_id) if place.owner_corp_id else None,
+            "standing": place.standing,
+            "broker_fee_pct": place.fee_pct,
+        } for place in sorted(places.values(), key=lambda p: p.location_id)],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -563,11 +914,13 @@ def _reference_of(prices, type_id: int):
 
 
 def market_text(client: esi_mod.Esi, type_id: int, type_name: str, rows, names, coverage,
-                history_days, prices, columns) -> str:
+                history_days, prices, columns, seller: Seller | None = None,
+                places: Mapping[int, ListingPlace] | None = None) -> str:
     """One type's block: the requested columns as a table, then what the numbers cannot say alone."""
     now = client.now().timestamp()
     reference = _reference_of(prices, type_id)
-    cells = [_RowCtx(type_id, type_name, row, names, history_days, reference, now) for row in rows]
+    cells = [_RowCtx(type_id, type_name, row, names, history_days, reference, now, seller,
+                     places or {}) for row in rows]
     lines = [f"{type_name} (id {type_id})",
              render.table([field.header for field in columns],
                           [[field.shown(cell) for field in columns] for cell in cells])]
@@ -593,7 +946,9 @@ def market_history_doc(row: MarketRow, names) -> dict | None:
             "average_price": h.average_price, "newest_date": h.newest_date}
 
 
-def market_json(client: esi_mod.Esi, entries, names, history_days, prices) -> dict:
+def market_json(client: esi_mod.Esi, entries, names, history_days, prices,
+                seller: Seller | None = None, places: Mapping[int, ListingPlace] | None = None,
+                seller_hint: str | None = None) -> dict:
     """Machine-readable output: ids and names both, numbers unformatted, ages as real numbers."""
     now = client.now().timestamp()
     scopes = []
@@ -601,7 +956,10 @@ def market_json(client: esi_mod.Esi, entries, names, history_days, prices) -> di
         docs = []
         for row in rows:
             q = row.quote
-            docs.append({
+            # Same `_RowCtx` the columns read, so a JSON fee and a table fee cannot disagree.
+            ctx = _RowCtx(_type_id, _type_name, row, names, history_days,
+                          _reference_of(prices, _type_id), now, seller, places or {})
+            doc = {
                 "scope": q.scope,
                 "region_id": row.region_id,
                 "region_name": names.get(row.region_id),
@@ -629,23 +987,44 @@ def market_json(client: esi_mod.Esi, entries, names, history_days, prices) -> di
                 "expires": market.iso_utc(q.meta.expires),
                 "age_seconds": None if q.meta.last_modified is None else round(now - q.meta.last_modified, 1),
                 "history": market_history_doc(row, names),
-            })
+            }
+            if seller is not None:
+                # These five keys are absent rather than null without --seller. This command's JSON is a
+                # contract too: `net_listing` present-and-null would tell a script "priced, outcome
+                # unknown" when nothing was priced because no character was named - and 616090f shipped
+                # the guarantee that an unflagged run writes what it always wrote. Null inside a run that
+                # did name one keeps a single meaning: this row's listing place cannot support a fee.
+                doc.update({
+                    "sales_tax_pct": sales_tax_of(ctx),
+                    "broker_fee_pct": broker_fee_of(ctx),
+                    "net_instant": net_instant_of(ctx),
+                    "net_listing": net_listing_of(ctx),
+                    "net_edge": net_edge_of(ctx),
+                })
+            docs.append(doc)
         scopes.append(docs)
-    return {
+    doc = {
         "generated": market.iso_utc(now),
         "history_days": history_days,
-        # The reference is per type, not per scope, and the key is present for every requested type -
-        # including the ones with a live book, so a script never has to guess which kind of number it
-        # is holding. null means either that this run had no reason to read ESI's price document at
-        # all (every book had orders, or the empty ones were narrower than a cluster scan, where the
-        # answer is a wider scope rather than a figure), or that the document has no row for the type.
-        "types": [{"type_id": type_id, "name": type_name, "scopes": docs,
-                   "reference": market_reference_doc(_reference_of(prices, type_id), now)}
-                  for (type_id, type_name, _rows), docs in zip(entries, scopes)],
     }
+    if seller is not None:
+        # Whose skills every fee above came from, the broker fee of every station this run priced, and
+        # the re-login hint when standings consent is missing. The key stays out entirely without
+        # --seller, for the reason given on the per-scope keys.
+        doc["seller"] = market_seller_doc(seller, places or {}, names, seller_hint)
+    # The reference is per type, not per scope, and the key is present for every requested type -
+    # including the ones with a live book, so a script never has to guess which kind of number it
+    # is holding. null means either that this run had no reason to read ESI's price document at
+    # all (every book had orders, or the empty ones were narrower than a cluster scan, where the
+    # answer is a wider scope rather than a figure), or that the document has no row for the type.
+    doc["types"] = [{"type_id": type_id, "name": type_name, "scopes": docs,
+                     "reference": market_reference_doc(_reference_of(prices, type_id), now)}
+                    for (type_id, type_name, _rows), docs in zip(entries, scopes)]
+    return doc
 
 
-def market_csv(client: esi_mod.Esi, entries, names, history_days, prices, columns):
+def market_csv(client: esi_mod.Esi, entries, names, history_days, prices, columns,
+               seller: Seller | None = None, places: Mapping[int, ListingPlace] | None = None):
     """Every row of this run as CSV, in the column order `columns` gives.
 
     Cells go through `render.csv_cell`, which leaves a number exactly as `str()` prints it - so the
@@ -660,7 +1039,8 @@ def market_csv(client: esi_mod.Esi, entries, names, history_days, prices, column
         # nothing for this type", which is what a reader of these columns needs either way.
         reference = _reference_of(prices, type_id)
         for row in rows:
-            cell = _RowCtx(type_id, type_name, row, names, history_days, reference, now)
+            cell = _RowCtx(type_id, type_name, row, names, history_days, reference, now, seller,
+                           places or {})
             writer.writerow([field.csv(cell) for field in columns])
     sys.stdout.write(buf.getvalue())
 
@@ -676,9 +1056,22 @@ def cmd_market(args):
     if args.json and chosen is not None:
         raise RuntimeError("--fields does not apply to --json: the JSON output carries every field, "
                            "which is the reason to ask for JSON")
-    columns = chosen if chosen is not None else (list(MARKET_FIELDS) if args.csv else text_fields(args))
+    if chosen is not None:
+        columns = chosen
+    elif args.csv:
+        # The default CSV vocabulary grows only when a character was named: without --seller the header
+        # is exactly the one shipped at 616090f, five empty trailing cells and all. `--fields` is the
+        # exception - naming a fee column is asking for it by name, and that path refuses outright
+        # without --seller rather than printing an empty cell to be misread as "no fees".
+        columns = list(MARKET_FIELDS) + (list(SELLER_FIELDS) if args.seller else [])
+    else:
+        columns = text_fields(args)
     expanded, sources = expanded_types(args)   # local index only - a mistyped group costs no request
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
+    # Resolved here, before the first book, for the same reason the columns are settled above: a name
+    # that is not one of the stored characters should cost one skills request rather than thirty order
+    # books. `market` itself stays a public command - without --seller no token is ever asked for.
+    seller, seller_hint = resolve_seller(client, args.seller) if args.seller else (None, None)
     types = _unique_types([market.resolve_type(client, spec) for spec in args.type] + expanded)
     if not types:
         raise RuntimeError("market needs something to price: name a type (Tritanium or 34), or give "
@@ -705,6 +1098,20 @@ def cmd_market(args):
                      row.quote.best_buy_region, row.history.region_id if row.history else None)
            if i is not None}
     names = esi_mod.resolve_names(client, ids) if ids else {}
+
+    # A broker fee belongs to the station an order is created at, and the place a listing has to beat
+    # is where the cheapest ask already sits - so each row's `best_sell_location` is what gets priced.
+    places = listing_places(client, seller, [row.quote.best_sell_location
+                                             for _tid, _name, rows in entries for row in rows]) \
+        if seller is not None else {}
+    owners = {place.owner_corp_id for place in places.values() if place.owner_corp_id is not None}
+    if owners:
+        # A second name batch, and only under --seller. Corporation ids are far below int32, so unlike
+        # an item-sized structure id they cannot poison the request (`universe.INT32_MAX`), and a corp's
+        # name never changes, so this is one disk-cached call for every later run too. The owner is
+        # printed by name because "standing with 1000035" is not something a player can check.
+        names.update(esi_mod.resolve_names(client, owners))
+
     # `/markets/prices` is one document listing every type CCP prices - over a megabyte - so it is
     # read at most once per run, and only when a footnote is going to quote it: an empty book in a
     # case where no wider order book exists to ask about (a measured vault type, or a whole-cluster
@@ -714,13 +1121,31 @@ def cmd_market(args):
     prices = market.price_table(client) if coverage.needs_reference(entries) else None
     for line in warnings:
         print(f"warning: {line}", file=sys.stderr)
+    if seller_hint is not None and (args.json or args.csv):
+        # Same rule as every other optional-consent hint: stdout stays parseable, so the re-login line
+        # goes to stderr. The text table has room for it in its footer instead.
+        print(seller_hint, file=sys.stderr)
     if args.json:
-        print(json.dumps(market_json(client, entries, names, args.history, prices), indent=2))
+        print(json.dumps(market_json(client, entries, names, args.history, prices, seller, places,
+                                     seller_hint), indent=2))
     elif args.csv:
-        market_csv(client, entries, names, args.history, prices, columns)
+        market_csv(client, entries, names, args.history, prices, columns, seller, places)
     else:
-        blocks = [market_text(client, type_id, name, rows, names, coverage, args.history, prices, columns)
-                  for type_id, name, rows in entries]
+        blocks = [market_text(client, type_id, name, rows, names, coverage, args.history, prices,
+                              columns, seller, places) for type_id, name, rows in entries]
+        # The fee provenance is run-wide - one character's skills, one rate per station - so it goes
+        # under every table rather than repeated on each, like the legend below it.
+        # A region or cluster row can hold its cheapest ask and its best bid at two different stations, and
+        # then `listing edge` is not one trade but a comparison between two markets. Both figures are still
+        # exactly what that exit pays where its own best order stands, so the columns stay filled - but only
+        # the footer can say the two sides are not the same deal.
+        split = sorted({row.quote.scope for _id, _name, rows in entries for row in rows
+                        if row.quote.best_sell_location is not None
+                        and row.quote.best_buy_location is not None
+                        and row.quote.best_sell_location != row.quote.best_buy_location})
+        notes = seller_notes(seller, places, names, seller_hint, tuple(split))
+        if notes:
+            blocks.append("\n".join(notes))
         # The legend follows the stars actually printed rather than `--history` itself: a run can fetch
         # history and select neither starred column, and then it has nothing to explain.
         if any("*" in field.header for field in columns):

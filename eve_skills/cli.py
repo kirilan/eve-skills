@@ -207,6 +207,18 @@ def build_parser() -> argparse.ArgumentParser:
                           help="scan every region with a market and add the best prices across the cluster")
     p_market.add_argument("--history", type=int, metavar="DAYS",
                           help="also show traded volume from ESI's daily regional history (daily, one day behind)")
+    # Only `market` takes a seller. What a sale nets is a property of who sells it: CCP's two cuts come
+    # from that character's Accounting and Broker Relations, plus their standing with the corporation
+    # owning the station - so this reads stored skills, and `/characters/{id}/standings` where that
+    # optional consent exists. Without it the broker fee is still computed from skills alone, and the
+    # run says which of the two it did.
+    p_market.add_argument("--seller", metavar="CHAR",
+                          help="price each sale as one stored character (name or id), after CCP's sales "
+                               "tax and broker fee: reads their Accounting and Broker Relations, and "
+                               "their standing with each station's owning corporation when "
+                               "`login --scopes standings` granted it. Adds net instant / net listing / "
+                               "listing edge - what is left per unit selling straight into the best buy "
+                               "order, or listing at the current minimum sell")
     p_market.add_argument("--json", action="store_true", help="machine-readable output")
     p_market.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
     p_market.add_argument("--fields", metavar="A,B,C",

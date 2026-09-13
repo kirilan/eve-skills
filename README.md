@@ -32,7 +32,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `skills` (default) | Clone state + evidence, totals, training queue, trained-skill table | no (core login) |
 | `summary` | One row per character: clone state, total SP, queue length, current item time left, grand total | no |
 | `attributes` | Effective attributes (fitted implant bonuses included), remaps available/last remap | no — covered by the standard skills consent |
-| `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume; `--group`/`--category NAME` prices everything in one of them, `--fields a,b,c` picks the columns | no — public ESI, plus local SDE data (`update-data`) to expand a group name |
+| `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume; `--group`/`--category NAME` prices everything in one of them, `--fields a,b,c` picks the columns; `--seller CHAR` says what one character keeps per unit after CCP's two cuts and whether listing beats selling now | no for the prices — public ESI, plus local SDE data (`update-data`) to expand a group name; `--seller` needs that character logged in, and its standing with the station's owner comes from the optional `standings` consent |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
@@ -635,6 +635,7 @@ eve-skills market --group "Basic Commodities - Tier 1"      # every type in a ma
 eve-skills market --category "Planetary Commodities"        # every type in every group of a category
 eve-skills market --category Module --max-types 500         # raise the size guard, if you meant it
 eve-skills market Tritanium --fields type_name,min_sell,spread    # choose and order the columns
+eve-skills market Transmitter --seller "Santraginus IX"    # what that character keeps per unit, and which exit pays
 ```
 
 `--group`/`--category` are resolved from the local SDE snapshot (`update-data`) — a name or an id, in any
@@ -651,10 +652,12 @@ this size`), never on stdout, so `--csv` stays parseable.
 the CSV, in whatever order you list them — and refuses a name it does not have with the full list, rather
 than dropping the column you thought you had asked for. A `history_*` or `reference_*` name needs the run
 that reads that document (`--history DAYS`, or a scope with no live book), because an empty column would
-otherwise look like "traded nothing".
+otherwise look like "traded nothing"; a fee name like `net_listing` needs `--seller`, which is the same
+mistake wearing different clothes.
 
-No login and no consent: the order book is public, so this works on a machine that has never seen
-SSO. Each requested scope is one row — `min sell`, `max buy`, `spread`, `margin %`, listed sell/buy
+No login and no consent for the prices themselves: the order book is public, so this works on a machine
+that has never seen SSO — `--seller`, at the end of this section, is the one part that needs a character.
+Each requested scope is one row — `min sell`, `max buy`, `spread`, `margin %`, listed sell/buy
 volume, order counts, and the station holding the best sell and best buy order — and every row gets
 its own freshness line under the table, taken from ESI's `Last-Modified` for that book:
 
@@ -744,6 +747,81 @@ ESI's document has no row; `--csv` appends `reference_average_price`, `reference
 `reference_last_modified` and `reference_age_seconds` at the end — empty cells for both of those cases
 — so a header a script already reads keeps meaning. The text output is where the two are told apart,
 because there the footnote says which of them it was.
+
+`--seller CHAR` is the part that is not a price: what one stored character actually keeps per unit, and
+whether listing beats selling now. CCP takes two cuts on the way and they are not the same cut twice —
+[its own article](https://support.eveonline.com/hc/en-us/articles/203218962-Broker-Fee-and-Sales-Tax)
+says *"The broker fee is due on order creation for all non-immediate orders"* while *"Sales taxes are due
+after an item has been sold, and are payable by the seller"*, so the fee belongs to the listing side only:
+
+| Cut | Base | Floor | Reduced by |
+|---|---|---|---|
+| Sales tax — every sale, both exits | 7.5% of the sale price | 3.375% | Accounting: −11% per level, multiplicatively — so level IV is 4.20% and level V lands exactly on the floor |
+| Broker fee — when a listing is created | 3% of the order value | 1% | Broker Relations: −0.3 percentage points per level; then standing with the corporation that owns the NPC station: −0.02 points per standing point |
+
+`net instant` is `max buy × (1 − sales tax)`, `net listing` is `min sell × (1 − broker fee − sales tax)`,
+both per unit, and `listing edge` is their signed difference — positive meaning a listing at the current
+minimum still clears more than dumping into the bid. The two sides are printed together rather than as one
+"net" column because that difference is the decision being made. Measured live on 2026-09-13 for a
+character with Accounting IV and Broker Relations IV, against a book at 14,020 ask / 13,020 bid:
+
+```text
+$ eve-skills market Transmitter --seller "Santraginus IX"
+Transmitter (id 9840)
+scope               min sell   max buy    spread    margin %  sell vol  buy vol      sells  buys  …
+------------------  ---------  ---------  --------  --------  --------  -----------  -----  ----  …
+Jita 4-4 (station)  14,020.00  13,020.00  1,000.00  7.68      984,889   100,659,636  41     20    …
+  Jita 4-4 (station): as of 10:33:37Z (3m 05s ago; ESI refreshes the book every 5 min)
+
+Seller Santraginus IX (id 105209159): Accounting 4 -> sales tax 4.2% of the sale price; Broker Relations 4 -> broker fee 1.8% before standings.
+Jita IV - Moon 4 - Caldari Navy Assembly Plant: broker fee 1.799% (standing +0.04 with Caldari Navy).
+Selling straight into a buy order pays sales tax alone: CCP charges the broker fee on order creation, so it belongs to the listing side only.
+Not applied: the further 0.03 percentage points per standing point CCP takes for the owning faction - ESI does not say which faction owns a station.
+```
+
+The last two columns of that run are `net instant` 12,473.16 (13,020 × 0.958) and `net listing` 13,178.94
+(14,020 × 0.94001), an edge of +705.78 per unit for the listing — and every rate in it traceable to a
+skill level or a standing this run read. Two of CCP's terms are left out on purpose, and both are said
+under the table rather than being quietly absent:
+
+- **The faction term.** CCP subtracts a further 0.03 percentage points per standing point with the owning
+  *faction*, and ESI cannot supply it: `GET /universe/stations/60003760` (Jita 4-4) answers owner 1000035
+  Caldari Navy with no faction field, `GET /corporations/1000035` has no faction key and a null alliance,
+  and all 27 rows of `GET /universe/factions` carry an empty `corporation_ids`. The system's sovereignty
+  holder is not a stand-in — `/sovereignty/map` puts Jita under CONCORD Assembly (500006) while Caldari
+  Navy owns its station — so guessing would move the fee on no evidence. Every broker fee here is therefore
+  an upper bound, by at most 0.3 percentage points. Measured 2026-09-13.
+- **Player structures.** A location id larger than any universe id is an item id: a citadel or engineering
+  bay whose broker fee its owners set themselves, which CCP exempts from Broker Relations entirely (and of
+  which 0.5% goes to an NPC as an ISK sink). No rate is knowable for those, so the fee and listing cells
+  stay empty and the footer says why instead of assuming the NPC 3%. A station whose ownership ESI would
+  not answer gets the same treatment — a guessed 3% is still a guess.
+
+A broker fee is charged where the order is created, so what is priced is the row's `best sell at` station.
+That is a proxy for your plan, not your plan: list somewhere else, or let the cheapest ask move while you
+decide, and the fee is that station's.
+
+A region or cluster row can hold its cheapest ask and its best bid in two different markets, and then the
+edge is a comparison rather than one trade. Measured 2026-09-13 on `market "Nanite Repair Paste" --global`,
+whose ask stood at Adrallezoen (Freedom Extension) and whose bid at Thashkarai: each net figure is what that
+exit pays where its own best order stands, and the footer says so — reaching that bid means moving the goods
+there first.
+
+Prices stay public; `--seller` is the one part of `market` that needs a login, and it asks nothing new —
+the skill levels come from the skills document every login already reads, and the standing with the
+station's owner from the optional `standings` consent (`eve-skills login --scopes standings`). Without that
+consent nothing fails: fees are computed from Broker Relations alone, and the re-login line appears in the
+footer — on stderr for `--json`/`--csv`, so those stay parseable. The same goes for a character whose
+standings document ESI refuses; the footer distinguishes `no standings consent` from `no standing recorded
+with Caldari Navy`, so a rate is never read as friendlier than it was measured. The five fee columns —
+`sales_tax_pct`, `broker_fee_pct`, `net_instant`, `net_listing`, `net_edge` — and the `seller` object
+(levels, both rates, `standings_consent`, `faction_standing_applied: false`, and one `listing_places` entry
+per place priced) exist only on a run that named one. Without `--seller` none of those keys appear in
+`--json` and no column appears in `--csv`: an unflagged run writes the bytes this command wrote before the
+flag existed, which is a shipped guarantee here — a reader that counts columns breaks on five empty trailing
+cells exactly as one that indexed by position broke reading `history_days` for `history_volume_per_day`.
+Asking for a fee column with `--fields` but no `--seller` is refused before the first order book is read,
+because an empty net column would otherwise read as "this sells for nothing".
 
 ### `build-cost` — what manufacturing an item costs right now
 
@@ -1502,7 +1580,15 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
   records served only while ESI's own `Expires` vouches for them, expired entries dropped on the next
   write, two runs publishing to one file without losing each other's types, a cached figure printed at
   the age ESI stamped rather than the moment it was read, and the run's pre-flight notice — what it
-  counts, when it quotes a duration, and the all-cached form that promises no book is read;
+  counts, when it quotes a duration, and the all-cached form that promises no book is read. The seller side
+  is tested twice over: CCP's published rates as arithmetic on their own (the multiplicative Accounting step
+  and the floor it lands on, Broker Relations and a station's standing as percentage-point deductions, the
+  1% clamp, `net_price`'s rounding), and the CLI around them — base rates for a character holding neither
+  skill, the fee following the station that holds the cheapest ask rather than the one holding the bid or the
+  one the run was scoped to, an Upwell leaving the listing cells empty instead of guessing 3% (and a station
+  whose ownership ESI refuses treated the same way), missing *and* refused `standings` consent degrading to
+  skills alone with the re-login line on stderr and never in stdout, and a fee column asked without
+  `--seller` refused before any order book is read;
 - `tests/test_industry.py` — the cost model on its own, with no transport in sight: ME rounding to two
   decimals then up (and a one-per-run material that research cannot make disappear), job time scaling with
   runs and TE while a reaction ignores TE entirely, EIV built from base quantities so ME provably does not
@@ -1602,6 +1688,25 @@ rather than per run even when one type has earned a figure: `market PLEX "Mystic
 PLEX its vault explanation and number, and Mystic XL — two orders in Heimatar, none at Rens — the wider
 scope instead.
 
+`--seller` was measured live on 2026-09-13 against the two stored characters here, which differ in exactly
+the way the feature turns on. The trained one — Accounting IV, Broker Relations IV — printed sales tax 4.2%
+and a broker fee of 1.799% at Jita (its standing with Caldari Navy is +0.036, worth a third of a hundredth
+of a point), giving `net instant` 12,473.16 against `net listing` 13,178.94 on a Transmitter book at 14,020
+ask / 13,020 bid: +705.78 a unit to list rather than dump. The untrained character on the same book in the
+same minute paid CCP's base 7.5% and 3% for 12,043.50 and 12,547.90 — those two skills are worth 631 ISK a
+unit at this price, which is the entire reason the columns exist. The requests were the expected four: the
+seller's skills document, `/characters/{id}/standings`, one `/universe/stations/60003760` for the station
+holding the cheapest ask, and the order book — and none of the three authenticated ones when `--seller` is
+absent. The faction term is missing because it was measured away, not because it was overlooked; those
+probe results are under [market](#market--live-prices-spread-and-volume).
+
+That `--seller` leaves the unflagged shapes alone was then measured rather than trusted. A worktree at
+616090f and this tree ran `market Tritanium` three ways against live ESI minutes apart: the `--csv` header
+was byte-identical, and the text and `--json` documents were identical once the book's own age was
+normalised — which left only the 23 seconds between the two reads. The five fee columns and the `seller`
+object appear on a run that names a character and nowhere else, so both header shapes are pinned by literal
+in `tests/test_market.py`.
+
 The rewritten `inventory` paths were measured live on one real holding of 518 distinct types, with the
 requests and durations recorded rather than remembered: the type catalogue cold (518 + 168 + 18 requests
 ≈ 125 s) against the same holding warm (9 requests ≈ 3 s), and `--value-at` cold at 100.6 s / 518
@@ -1654,6 +1759,7 @@ settle — order-book depth behind an ask, invention, who owns the blueprint —
 | Traded volume is daily, regional, one day behind | `market --history` comes from a different document than the order book: it has no station granularity (a hub row shows its region's trades), and the newest day is yesterday. The cluster row carries none. |
 | `--global` means k-space + Pochven | The cluster scan walks region ids 10000000-11000000 — 70 regions today. Nullsec, wormhole and unlisted markets are not in it, and a region that fails to answer is reported as missing rather than counted as having no orders. |
 | Market freshness has a floor | ESI regenerates each regional book at most every five minutes, so `Last-Modified` ages below that are not this tool being slow and cannot be improved by polling harder. Nothing here caches a market book to disk: if ESI will not answer, `market` says so instead of showing a stale price. |
+| `--seller`'s broker fee is an upper bound | CCP subtracts a further 0.03 percentage points per standing point with the owning *faction*, and ESI cannot say which faction owns a station: measured 2026-09-13, `/universe/stations/60003760` names owner 1000035 Caldari Navy with no faction field, `/corporations/1000035` has no faction key and a null alliance, all 27 rows of `/universe/factions` carry an empty `corporation_ids`, and `/sovereignty/map` puts Jita under CONCORD Assembly while Caldari Navy owns its station. So every fee printed here is at most 0.3 points high, and the footer says so in the output itself. That fee is also taken from the station holding the cheapest ask — where an order would go, not necessarily where you will put it — and a player-owned structure (a location id too large to be a station) gets no rate at all, because its owners set it and CCP exempts it from Broker Relations. |
 | No third-party price source | Fuzzwork, EVERef and similar aggregators are deliberately not consulted — they are other people's copies of the same public books, with their own staleness, availability and terms, and no way for this tool to be told one is wrong. |
 | Vault-traded items have no book | PLEX (id 44992) trades on the account-wide vault market, which belongs to no region's order book: `GET /markets/{region}/orders?type_id=44992` answered `[]` for all 70 market regions when measured 2026-09-07, while `/markets/prices` carried the type the same minute (`average_price` 4,574,918.36, `adjusted_price` 0.0). ESI publishes no global order-book endpoint, so there is nothing wider to ask; `market` says so for that id and shows the published reference rather than leaving a row of dashes to be read as a broken tool. No other type id has been measured across the cluster, so no other empty book is given that explanation — it gets the wider scope that is still unasked instead. |
 | `build-cost` prices the cheapest ask, not the depth behind it | The material column charges a unit at the lowest standing ask in scope; ESI publishes no cumulative quantity per price level, so nothing here knows how many units that ask actually holds. Measured in Jita the error is ~0-1% even at 1000 runs — Tritanium there is effectively bottomless — but a thin market is another matter: the Hound sell side in Heimatar opens with one unit 8.7% below the blended cost of ten, so a quantity that size has to be swept further up a book this tool cannot see and would cost more than printed. |
@@ -1673,7 +1779,8 @@ eve_skills/
   cli.py             argument parser, the HANDLERS table and main(); one module per command area below
   cmd_skills.py      skills / summary / plan / extract: gather(), the training book, text/JSON/CSV output
   cmd_watch.py       the shared --watch loop, both watch cycles, desktop notifications, the events command
-  cmd_market.py      the market command: scopes asked for, quote tables, empty-book and reference notes
+  cmd_market.py      the market command: scopes asked for, quote tables, empty-book and reference notes,
+                     seller identity, station ownership and what a named character nets
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
   cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
   cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
@@ -1681,7 +1788,8 @@ eve_skills/
   sso.py             OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
   esi.py             stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
   universe.py        asset identities: disk-cached type/group/category catalogue + nested location resolver
-  market.py          public order books: type/scope resolution, quote maths, cluster scan, freshness + history
+  market.py          public order books: type/scope resolution, quote maths, cluster scan, freshness,
+                     history, and CCP's sales tax / broker fee rates
   industry.py        blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
   orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
   classify.py        alpha-cap lookup, per-skill classification, clone-state inference

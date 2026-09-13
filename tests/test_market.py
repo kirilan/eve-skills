@@ -23,9 +23,10 @@ from eve_skills import alphadata, cmd_market, esi, exports, market
 
 
 from tests.fake_esi import (
-    ABYSSAL_REGION, INV_TYPE_CONTAINER, INV_TYPE_SHIP, MARKET_BROKEN, MARKET_BOOK_AGE,
-    MARKET_DOMAIN, MARKET_FORGE, MARKET_PLEX, MARKET_PRICES_AGE, MARKET_UNTRADED, STATION_AMARR,
-    STATION_FORGE_OTHER, STATION_JITA, WORMHOLE_REGION, FakeEsiEnv, http_date,
+    ABYSSAL_REGION, INV_CITADEL_SEEN, INV_TYPE_CONTAINER, INV_TYPE_SHIP, MARKET_BROKEN,
+    MARKET_BOOK_AGE, MARKET_DOMAIN, MARKET_FORGE, MARKET_PLEX, MARKET_PRICES_AGE, MARKET_UNTRADED,
+    STATION_AMARR, STATION_FORGE_OTHER, STATION_JITA, SYSTEM_FORGE, WORMHOLE_REGION, FakeEsiEnv,
+    http_date, _order, ADA, VELA,
 )
 
 
@@ -968,6 +969,11 @@ class RunSizeGuardTests(MarketIndexFixture):
 class FieldSelectionTests(MarketIndexFixture):
     """`--fields`, including the byte-for-byte defaults it must not disturb."""
 
+    # This is the header 616090f shipped, verbatim, and it is a contract rather than a description: an
+    # unflagged run writes these bytes and nothing else. Five trailing empty cells for a feature this run
+    # did not ask for would move no index and still break the reader that counts columns - the same class
+    # of mistake as reading `history_days` where `history_volume_per_day` was meant - so the seller block
+    # joins only when a character was named to price as. See SELLER_CSV_HEADER below.
     DEFAULT_CSV_HEADER = ("type_id,type_name,scope,region_id,region_name,location_id,location_name,"
                           "min_sell,max_buy,spread,margin_pct,sell_volume,buy_volume,sell_orders,"
                           "buy_orders,best_sell_location_id,best_sell_location_name,"
@@ -978,12 +984,39 @@ class FieldSelectionTests(MarketIndexFixture):
                           "history_average_price,history_newest_date,reference_average_price,"
                           "reference_adjusted_price,reference_last_modified,reference_age_seconds")
 
+    # The same header with the fee block appended, pinned as its own literal so that a change to either
+    # shape fails by name. Nothing is inserted ahead of `sales_tax_pct`: every position the header above
+    # fixes keeps its meaning on a run that did use --seller, which is the only reason the block goes last.
+    SELLER_CSV_HEADER = ("type_id,type_name,scope,region_id,region_name,location_id,location_name,"
+                         "min_sell,max_buy,spread,margin_pct,sell_volume,buy_volume,sell_orders,"
+                         "buy_orders,best_sell_location_id,best_sell_location_name,"
+                         "best_sell_region_id,best_sell_region_name,best_buy_location_id,"
+                         "best_buy_location_name,best_buy_region_id,best_buy_region_name,"
+                         "regions_scanned,regions_failed,last_modified,expires,age_seconds,"
+                         "history_days,history_rows,history_total_volume,history_volume_per_day,"
+                         "history_average_price,history_newest_date,reference_average_price,"
+                         "reference_adjusted_price,reference_last_modified,reference_age_seconds,"
+                         "sales_tax_pct,broker_fee_pct,net_instant,net_listing,net_edge")
+
     def test_the_default_csv_header_is_the_one_scripts_already_read(self):
         """Column order is the contract here: a reader that indexes by position breaks silently."""
         code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
                                         "--csv"])
         self.assertEqual(0, code)
         self.assertEqual(self.DEFAULT_CSV_HEADER, out.splitlines()[0])
+
+    def test_the_seller_header_is_the_shipped_one_plus_the_fee_block(self):
+        """Naming a character is the only thing that grows the header, and it appends rather than inserts."""
+        # Two lookups price the fee block that this fixture otherwise never makes. Their answers are not
+        # what is pinned here - only the header's bytes are - so the stock routes will do.
+        self.env.install_standings()
+        self.env.server.get(f"/universe/stations/{STATION_FORGE_OTHER}",
+                            doc={"station_id": STATION_FORGE_OTHER, "system_id": SYSTEM_FORGE,
+                                 "owner": CORP_SYNTHETIC_FORGE})
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--history", "7",
+                                        "--csv", "--seller", ADA.name])
+        self.assertEqual(0, code)
+        self.assertEqual(self.SELLER_CSV_HEADER, out.splitlines()[0])
 
     def test_the_default_text_columns_are_the_ones_this_table_has_always_had(self):
         code, out, _err = self.env.run(["market", "34", "--region", "The Forge"])
@@ -1026,7 +1059,10 @@ class FieldSelectionTests(MarketIndexFixture):
         code, _out, err = self.env.run(["market", "34", "--fields", "min_price"])
         self.assertEqual(1, code)
         self.assertIn("unknown --fields name 'min_price'; valid names: type_id, type_name, scope", err)
-        self.assertTrue(err.rstrip().endswith("reference_age_seconds"))
+        # The fee columns are in that list even though this run named no seller: the names are real and
+        # the run is what is short, so asking for one by name gets its own refusal naming --seller rather
+        # than being told the column does not exist - exactly how the history columns behave.
+        self.assertTrue(err.rstrip().endswith("net_edge"))
         self.assertEqual([], self.books_read())     # a typo costs no order books
 
     def test_a_field_list_of_nothing_is_not_a_request_for_everything(self):
@@ -1090,6 +1126,327 @@ class FieldSelectionTests(MarketIndexFixture):
         row = next(csv.DictReader(io.StringIO(out)))
         self.assertEqual("118.5", row["reference_average_price"])
         self.assertEqual("", row["min_sell"])
+
+
+# ---------------------------------------------------------------------------
+# --seller: what a named character nets after CCP's two cuts
+# ---------------------------------------------------------------------------
+
+# Station ownership exactly as live ESI reports it, measured on 2026-09-13: Jita IV - Moon 4 belongs to
+# corporation 1000035 (Caldari Navy) and Amarr VIII (Oris) to 1000086 (Emperor Family). The fixture's
+# second Forge station is synthetic, so its owner is invented here too - what the tests pin is that the
+# fee follows whichever corporation ESI names, not which corporation that turns out to be.
+CORP_CALDARI_NAVY = 1000035
+CORP_EMPIRER_FAMILY = 1000086
+CORP_SYNTHETIC_FORGE = 90000099
+
+
+class SellerFeeFormulaTests(unittest.TestCase):
+    """CCP's published arithmetic, tested without ESI so that a rate change is one obvious failure."""
+
+    def test_accounting_cuts_the_sales_tax_multiplicatively(self):
+        # "Sales tax starts at 7.5%" and Accounting "reduces sales tax by 11%" per level - 11% of what
+        # is left, not 11 percentage points off, which would make level V free.
+        self.assertEqual([7.5, 6.675, 5.85, 5.025, 4.2],
+                         [market.sales_tax_pct(level) for level in range(5)])
+        # CCP's stated floor lands exactly at level V: 7.5 x 0.45 = 3.375.
+        self.assertEqual(3.375, market.sales_tax_pct(5))
+
+    def test_broker_relations_and_standing_deduct_percentage_points(self):
+        self.assertEqual(3.0, market.broker_fee_pct(0))
+        self.assertEqual(1.8, market.broker_fee_pct(4))
+        # +7.742 is a standing measured against a real NPC corporation on 2026-09-13. The corp term is
+        # 0.02 points per standing point, so it barely moves next to the skill - which is the reason
+        # this column exists: training is worth more than friendship.
+        self.assertEqual(1.645, market.broker_fee_pct(4, 7.742))
+        # A negative standing makes the fee worse rather than better; CCP's formula has no floor at zero.
+        self.assertEqual(1.825, market.broker_fee_pct(4, -1.25))
+
+    def test_the_one_percent_floor_does_not_bite_at_legal_inputs(self):
+        # "to a minimal broker fee of 1% of the order value". Level V alone leaves 1.5%, and even with
+        # a perfect +10 standing at the station it is 1.3%, so the clamp in `broker_fee_pct` is CCP's
+        # cap recorded faithfully rather than live behaviour - pinning both means a future faction term
+        # cannot quietly cross the floor it now shares.
+        self.assertEqual(1.5, market.broker_fee_pct(5))
+        self.assertEqual(1.3, market.broker_fee_pct(5, 10.0))
+        self.assertEqual(1.0, market.broker_fee_pct(9))
+
+    def test_net_price_is_the_price_after_one_cut(self):
+        # The worked case: a 14,150 ISK ask at a 6% total cut nets 13,301 - and not the
+        # 13300.999999999998 that the float product prints into a table cell.
+        self.assertEqual(13301.0, market.net_price(14150, 6.0))
+        self.assertIsNone(market.net_price(None, 6.0))
+        self.assertIsNone(market.net_price(14150, None))     # a place whose fee is not knowable
+
+
+class SellerTests(MarketTestCase):
+    """`--seller`: whose skills set the cut, where a broker fee comes from, and what must stay blank."""
+
+    SELLER_FIELDS = ("min_sell,max_buy,sales_tax_pct,broker_fee_pct,net_instant,net_listing,net_edge")
+
+    def setUp(self):
+        super().setUp()
+        # Ownership is a separate public endpoint from the order book - no token on these routes - and
+        # it is the only way to learn which corporation's standing CCP's formula asks for.
+        self.env.server.get(f"/universe/stations/{STATION_JITA}",
+                            doc={"station_id": STATION_JITA, "system_id": SYSTEM_FORGE,
+                                 "owner": CORP_CALDARI_NAVY})
+        self.env.server.get(f"/universe/stations/{STATION_AMARR}",
+                            doc={"station_id": STATION_AMARR, "system_id": 30002187,
+                                 "owner": CORP_EMPIRER_FAMILY})
+        self.env.names[CORP_CALDARI_NAVY] = "Caldari Navy"
+        self.env.names[CORP_EMPIRER_FAMILY] = "Emperor Family"
+        self.env.names[CORP_SYNTHETIC_FORGE] = "Forge Assembly Force"
+        # Ada consented to standings, so a run that reads them must find something: without this route
+        # the fake server fails loudly rather than silently pricing with no standing term. Tests that
+        # want the other answers override it.
+        self.install_seller_standings(ADA, {CORP_CALDARI_NAVY: 7.742, CORP_EMPIRER_FAMILY: 0.036})
+        self.env.server.get(f"/universe/stations/{STATION_FORGE_OTHER}",
+                            doc={"station_id": STATION_FORGE_OTHER, "system_id": SYSTEM_FORGE,
+                                 "owner": CORP_SYNTHETIC_FORGE})
+
+    def seed_trade_skills(self, char, accounting=None, broker=None):
+        """Give one fixture character the two trade skills CCP charges with.
+
+        `set_trained_level` can only move a row that already exists, and neither fixture character has
+        one for Accounting or Broker Relations - which is precisely the state of a character with no
+        trade training, so the missing row is the starting point these tests vary away from."""
+        doc = self.env.core_docs["skills"][char]
+        for skill_id, level in ((market.SKILL_ACCOUNTING, accounting),
+                                (market.SKILL_BROKER_RELATIONS, broker)):
+            if level is None:
+                continue
+            doc["skills"] = [row for row in doc["skills"] if row["skill_id"] != skill_id] + [
+                {"skill_id": skill_id, "trained_skill_level": level, "active_skill_level": level,
+                 "skillpoints_in_skill": 500_000}]
+        self.env.server.get(f"/characters/{char.character_id}/skills", doc=doc, token=char.token)
+
+    def install_seller_standings(self, char, standings):
+        """`npc_corp` rows for the stations this fixture prices.
+
+        Registered here rather than through `install_standings`, which other suites pin with their own
+        rows. A faction row rides along on purpose: ESI cannot say which faction owns a station, so a
+        fee that quietly moved with it would show up as a wrong number in the tests below."""
+        self.env.server.get(f"/characters/{char.character_id}/standings", token=char.token, doc=[
+            {"from_id": corp_id, "from_type": "npc_corp", "standing": value}
+            for corp_id, value in standings.items()] + [
+            {"from_id": 500001, "from_type": "faction", "standing": 6.6},
+        ])
+
+    def nets(self, argv) -> dict:
+        """One CSV run as a row, so each test reads as numbers rather than as string plumbing."""
+        code, out, _err = self.env.run(["market", *argv, "--csv", "--fields", self.SELLER_FIELDS])
+        self.assertEqual(0, code)
+        return next(csv.DictReader(io.StringIO(out)))
+
+    def test_a_character_without_trade_skills_pays_ccps_base_rates(self):
+        """Neither fixture character has Accounting or Broker Relations at all: the missing row is
+        untrained, so both cuts start where CCP starts them."""
+        # Amarr's book is 6.20 at ask and 4.55 at bid - cut by 7.5% on an instant sale and by 10.5% on
+        # a listing (3% broker fee + 7.5% tax).
+        self.assertEqual({"min_sell": "6.2", "max_buy": "4.55", "sales_tax_pct": "7.5",
+                          "broker_fee_pct": "3.0", "net_instant": "4.21", "net_listing": "5.55",
+                          "net_edge": "1.34"},
+                         self.nets(["34", "--hub", "amarr", "--seller", VELA.name]))
+
+    def test_the_two_skills_move_the_two_cuts(self):
+        """Accounting IV and Broker Relations IV at a station owned by a corporation Ada has +7.742
+        with: 4.2% on the sale, and 3 - 1.2 - 0.155 = 1.645% on the order."""
+        self.seed_trade_skills(ADA, accounting=4, broker=4)
+        row = self.nets(["34", "--hub", "jita", "--seller", ADA.name])
+        # Jita's book: 5.05 ask, 4.20 bid. Listing keeps 94.155% of the ask, instant keeps 95.8%.
+        self.assertEqual(("4.2", "1.645", "4.02", "4.75", "0.73"),
+                         (row["sales_tax_pct"], row["broker_fee_pct"], row["net_instant"],
+                          row["net_listing"], row["net_edge"]))
+        # The +6.6 faction row in the fixture changed nothing above, which is the point: ESI cannot tie
+        # a station to its faction, so that term is left out and said so (see `test_the_footer...`).
+
+    def test_the_broker_fee_follows_the_station_holding_the_cheapest_ask(self):
+        """A broker fee is charged where the order is created, so it belongs to the station holding the
+        cheapest ask. A region scope is what proves the code asks that question rather than assuming:
+        The Forge's cheapest ask (4.98) sits at the region's other station, not at Jita."""
+        self.seed_trade_skills(ADA, broker=4)
+        self.install_seller_standings(ADA, {CORP_CALDARI_NAVY: 7.742, CORP_SYNTHETIC_FORGE: 6.6})
+        row = self.nets(["34", "--region", "The Forge", "--seller", ADA.name])
+        # In The Forge the cheapest ask (4.98) is not at Jita but at the region's other station, so the
+        # fee has to come from that one's owner: Ada is +7.742 with Caldari Navy and only +6.6 here.
+        self.assertEqual("4.98", row["min_sell"])
+        self.assertEqual("1.668", row["broker_fee_pct"])   # 3 - 1.2 - 0.132, not Jita's 1.645
+        self.assertEqual([], self.env.server.calls_to(f"/universe/stations/{STATION_JITA}"))
+
+    def test_a_player_structure_does_not_claim_a_broker_fee(self):
+        """An Upwell sets its own fee and CCP exempts it from Broker Relations, so the honest cell is an
+        empty one - and its item-sized id must never join the name batch, where it would take every
+        station name in that request down with it."""
+        base = self.env._market_orders
+
+        def book(call):
+            rows, headers = base(call)
+            if call.query.get("type_id") in (None, "34"):
+                # Cheaper than the region's 4.98 ask, so it becomes the place a listing has to beat.
+                rows = rows + [_order(9931, 4.90, INV_CITADEL_SEEN, SYSTEM_FORGE)]
+            return rows, headers
+
+        self.env.server.get(f"/markets/{MARKET_FORGE}/orders", handler=book)
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--csv",
+                                        "--fields", "best_sell_location_id,min_sell,broker_fee_pct,"
+                                                    "net_listing,net_instant,net_edge",
+                                        "--seller", ADA.name])
+        self.assertEqual(0, code)
+        row = next(csv.DictReader(io.StringIO(out)))
+        self.assertEqual(str(INV_CITADEL_SEEN), row["best_sell_location_id"])
+        self.assertEqual("4.9", row["min_sell"])
+        self.assertEqual("", row["broker_fee_pct"])
+        self.assertEqual("", row["net_listing"])
+        self.assertEqual("", row["net_edge"])
+        # The instant side needs no station at all, so it is still priced.
+        self.assertEqual("3.98", row["net_instant"])
+        _code, out, _err = self.env.run(["market", "34", "--region", "The Forge",
+                                         "--seller", ADA.name])
+        self.assertIn("a player structure sets its own broker fee", out)
+
+    def test_the_footer_names_the_skills_owner_and_standing_behind_each_fee(self):
+        """A percentage with no provenance is the sort of number this tool refuses to print bare."""
+        self.seed_trade_skills(ADA, accounting=4, broker=4)
+        code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--seller", ADA.name])
+        self.assertEqual(0, code)
+        self.assertIn("Seller Ada Vane (id 91000001): Accounting 4 -> sales tax 4.2% of the sale price; "
+                      "Broker Relations 4 -> broker fee 1.8% before standings.", out)
+        self.assertIn("broker fee 1.645% (standing +7.74 with Caldari Navy)", out)
+        self.assertIn("Selling straight into a buy order pays sales tax alone", out)
+        # The omitted term is said out loud: someone comparing this to their in-game receipt needs to
+        # know why a friendly character's fee is not lower still.
+        self.assertIn("Not applied: the further 0.03 percentage points per standing point", out)
+
+    def test_missing_standings_consent_prices_from_skills_and_hints(self):
+        """Vela never granted standings. The re-login line is the whole degradation - exit 0, fees still
+        computed from Broker Relations, and stdout left parseable."""
+        code, out, err = self.env.run(["market", "34", "--hub", "amarr", "--csv",
+                                       "--fields", "min_sell,broker_fee_pct",
+                                       "--seller", VELA.name])
+        self.assertEqual(0, code)
+        self.assertIn("eve-skills login --scopes standings", err)
+        self.assertNotIn("standings consent", out)
+        self.assertEqual({"min_sell": "6.2", "broker_fee_pct": "3.0"},
+                         next(csv.DictReader(io.StringIO(out))))
+        # Never consented means never asked: no request, not a refused one.
+        self.assertEqual([], self.env.server.calls_to(f"/characters/{VELA.character_id}/standings"))
+
+    def test_the_same_hint_sits_in_the_text_footer(self):
+        code, out, err = self.env.run(["market", "34", "--hub", "amarr", "--seller", VELA.name])
+        self.assertEqual((0, ""), (code, err))
+        self.assertIn("no standings consent", out)
+        self.assertIn("broker fee 3% (no standings consent)", out)
+
+    def test_a_refused_standings_endpoint_leaves_the_skill_rates_in_place(self):
+        """Consent recorded but the document unavailable: the fee from skills alone is still worth
+        printing, and the footer says which of the two it managed to read."""
+        self.seed_trade_skills(ADA, broker=4)
+        self.env.server.get(f"/characters/{ADA.character_id}/standings", token=ADA.token,
+                            error=(404, {"error": "temporarily unavailable"}))
+        row = self.nets(["34", "--hub", "jita", "--seller", ADA.name])
+        self.assertEqual("1.8", row["broker_fee_pct"])        # 3 - 1.2, with no standing term at all
+        _code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--seller", ADA.name])
+        self.assertIn("no standing recorded with Caldari Navy", out)
+
+    def test_json_reports_the_seller_once_and_the_nets_per_scope(self):
+        self.seed_trade_skills(ADA, accounting=4, broker=4)
+        code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--json",
+                                        "--seller", "Ada Vane"])
+        self.assertEqual(0, code)
+        doc = json.loads(out)
+        seller = doc["seller"]
+        self.assertEqual((ADA.character_id, "Ada Vane"), (seller["character_id"], seller["name"]))
+        self.assertEqual((4, 4), (seller["accounting_level"], seller["broker_relations_level"]))
+        self.assertEqual(4.2, seller["sales_tax_pct"])
+        # The rate before standings is published so a reader can see what the standing bought instead
+        # of trusting it, and this flag says which of CCP's two standing terms is missing.
+        self.assertEqual(1.8, seller["broker_fee_before_standings_pct"])
+        self.assertFalse(seller["faction_standing_applied"])
+        self.assertIsNone(seller["hint"])
+        self.assertEqual({"location_id": STATION_JITA, "npc_station": True,
+                          "owner_corp_id": CORP_CALDARI_NAVY, "owner_corp_name": "Caldari Navy",
+                          "standing": 7.742, "broker_fee_pct": 1.645},
+                         {key: seller["listing_places"][0][key]
+                          for key in ("location_id", "npc_station", "owner_corp_id", "owner_corp_name",
+                                      "standing", "broker_fee_pct")})
+        scope = doc["types"][0]["scopes"][0]
+        self.assertEqual((4.2, 1.645), (scope["sales_tax_pct"], scope["broker_fee_pct"]))
+        self.assertEqual((4.02, 4.75, 0.73),
+                         (scope["net_instant"], scope["net_listing"], scope["net_edge"]))
+
+    def test_json_without_a_seller_carries_no_fee_keys_at_all(self):
+        """Absent, not null. A `net_listing` that is present-and-null tells a script "priced, outcome
+        unknown" when the truth is that nothing was priced because no character was named - and an
+        unflagged run writes the document this command shipped before the feature existed, which has no
+        such keys. A zero would be worse still: it reads as a seller who pays nothing."""
+        code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--json"])
+        self.assertEqual(0, code)
+        doc = json.loads(out)
+        self.assertNotIn("seller", doc)
+        scope = doc["types"][0]["scopes"][0]
+        for key in ("sales_tax_pct", "broker_fee_pct", "net_instant", "net_listing", "net_edge"):
+            self.assertNotIn(key, scope)
+
+    def test_the_net_columns_appear_only_for_a_named_seller(self):
+        """The table grows three columns when a seller is named and no column changes otherwise."""
+        _code, out, _err = self.env.run(["market", "34", "--hub", "jita"])
+        self.assertNotIn("net listing", out.splitlines()[1])
+        _code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--seller", ADA.name])
+        header = out.splitlines()[1]
+        self.assertIn("net instant", header)
+        self.assertIn("net listing", header)
+        self.assertLess(header.index("net instant"), header.index("net listing"))
+
+    def test_a_fee_column_without_a_seller_is_refused_before_any_book(self):
+        """An empty net column would read as "this sells for nothing" with no reason attached."""
+        code, _out, err = self.env.run(["market", "34", "--fields", "min_sell,net_listing"])
+        self.assertEqual(1, code)
+        self.assertIn("--fields net_listing prices the sale through one character's skills", err)
+        self.assertIn("--seller", err)
+        self.assertEqual([], self.env.server.calls_to(f"/markets/{MARKET_FORGE}/orders"))
+
+    def test_a_seller_that_is_not_stored_costs_no_order_books(self):
+        code, _out, err = self.env.run(["market", "34", "--region", "The Forge",
+                                        "--seller", "Nobody Here"])
+        self.assertEqual(1, code)
+        self.assertIn("character 'Nobody Here' is unknown", err)
+        self.assertEqual([], self.env.server.calls_to(f"/markets/{MARKET_FORGE}/orders"))
+
+    def test_a_station_esi_cannot_describe_leaves_the_listing_side_blank(self):
+        """A failed ownership lookup cannot say whether this is an NPC station at all, so guessing CCP's
+        3% would be a number invented at the point where being wrong costs ISK."""
+        self.env.server.get(f"/universe/stations/{STATION_JITA}",
+                            error=(500, {"error": "shard unavailable"}))
+        row = self.nets(["34", "--hub", "jita", "--seller", ADA.name])
+        self.assertEqual("", row["broker_fee_pct"])
+        self.assertEqual("", row["net_listing"])
+        # The instant side needs no station, so it is still priced - at Ada's untrained 7.5%.
+        self.assertEqual("3.89", row["net_instant"])
+
+    def test_a_row_whose_two_sides_stand_in_different_places_says_so(self):
+        """A region row can hold its cheapest ask at one station and its best bid at another, and then the
+        edge compares two markets instead of describing one trade - which only the footer can say."""
+        base = self.env._market_orders
+
+        def book(call):
+            rows, headers = base(call)
+            if call.query.get("type_id") in (None, "34"):
+                # The cheapest ask moves to Jita; the best bid stays at the region's other station.
+                rows = rows + [_order(9932, 4.90, STATION_JITA, SYSTEM_FORGE)]
+            return rows, headers
+
+        self.env.server.get(f"/markets/{MARKET_FORGE}/orders", handler=book)
+        code, out, _err = self.env.run(["market", "34", "--region", "The Forge", "--seller", ADA.name])
+        self.assertEqual(0, code)
+        self.assertIn("price a listing at one place and an instant sale at another", out)
+        self.assertIn("reaching that bid means moving the goods there first", out)
+
+    def test_a_row_priced_at_one_place_does_not_apologise(self):
+        """A station row has both sides at its own station, so that note must stay out of it."""
+        code, out, _err = self.env.run(["market", "34", "--hub", "jita", "--seller", ADA.name])
+        self.assertEqual((0, ""), (code, _err))
+        self.assertNotIn("at one place and an instant sale at another", out)
 
 
 if __name__ == "__main__":
