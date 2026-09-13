@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_watch
+from . import cmd_build_cost, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -83,6 +83,9 @@ def cmd_update_data(args):
     print(f"  planetary industry: {summary['pi_schematics']} schematics across "
           f"{summary['pi_planet_types']} planet types, {summary['pi_commodities']} commodities and "
           f"{summary['pi_command_center_levels']} command center levels (facility costs, output rates, customs tax)")
+    print(f"  planet census: {summary['census_systems']} solar systems, {summary['census_planets']} planets "
+          f"over {summary['census_planet_types']} planet types (per-system planet counts for "
+          f"eve-skills system)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -306,6 +309,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_pi_planet.add_argument("--csv", action="store_true",
                              help="CSV rows - one per commodity, tier 0 to tier 3 - on stdout")
 
+    p_system = sub.add_parser("system",
+                              help="true security status, region and planets of one or more solar "
+                                   "systems, with jumps to a hub (planet census from local SDE data, "
+                                   "the rest from public ESI, no login)")
+    p_system.add_argument("systems", nargs="+", metavar="SYSTEM",
+                          help="exact system name or numeric id, e.g. Rairomon or 30002772; several are "
+                               "printed as one comparison table")
+    p_system.add_argument("--route", metavar="HUB",
+                          help=f"add a jumps column to one of the trade hubs ({', '.join(market.HUBS)}) "
+                               f"or to any other named system")
+    p_system.add_argument("--flag", choices=cmd_system.ROUTE_FLAGS, default="shortest", metavar="FLAG",
+                          help="which route the jumps column reports: shortest takes any system on the "
+                               "way, secure avoids lowsec and nullsec, insecure also crosses wormholes; "
+                               "default shortest. The other of shortest/secure is fetched as well, and a "
+                               "difference between the two is reported rather than hidden")
+    p_system.add_argument("--json", action="store_true",
+                          help="machine-readable report: both security figures, the planet breakdown and "
+                               "every route fetched")
+    p_system.add_argument("--csv", action="store_true", help="CSV rows - one per system - on stdout")
+
     p_orders = sub.add_parser("orders",
                               help="open market orders of stored characters or their corps (needs login --scopes orders)")
     p_orders.add_argument("--char", help="stored character name or id (default: every stored character)")
@@ -349,7 +372,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "travel": exports.cmd_travel, "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi}
+            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system}
 
 
 def _use_utf8_streams() -> None:

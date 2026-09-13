@@ -35,6 +35,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume | no — public ESI; works before you have logged in |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
+| `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
@@ -1006,6 +1007,64 @@ pivot on it, while the text says "CPU and powergrid" — and `over_budget`, `fit
 the layout costs from whether it is allowed. `planet-type --csv` writes one row per commodity from tier 0
 down, with each product's inputs in its own cell.
 
+### `system` — security, planets and jump distance for candidate systems
+
+```bash
+eve-skills system Rairomon Outuni Enderailen Kulelen      # one row per system
+eve-skills system Rairomon Outuni Enderailen --route jita # + jumps to a hub
+eve-skills system Enderailen --route jita --flag secure   # the safe road's length instead
+eve-skills system 30002769 --json                         # machine-readable, notes included
+```
+
+No login: security status, constellation and region come from public ESI, the planets from the local
+census `update-data` builds. It exists because picking a staging system for a colony used to mean three
+throwaway scripts — one for exact security, one for planet types, one for jump counts — and because the
+figure EVE prints is not the figure that decides anything.
+
+```
+system      security  shown  class    jumps to Jita  region       planets  planet types
+----------  --------  -----  -------  -------------  -----------  -------  ---------------------------------------------------------------------
+Rairomon    0.6294    0.6    highsec  6              The Citadel  11       Barren x3, Plasma x2, Storm x2, Temperate x2, Lava x1, Oceanic x1
+Outuni      0.7342    0.7    highsec  4              The Forge    12       Gas x5, Barren x2, Lava x1, Oceanic x1, Plasma x1, Storm x1, …
+Enderailen  0.4488    0.4    lowsec   7              The Citadel  9        Gas x5, Storm x2, Ice x1, Lava x1
+Kulelen     0.4754    0.5    highsec  7              The Citadel  7        Gas x2, Lava x2, Plasma x2, Barren x1
+
+  Enderailen 0.4488 -> shows 0.4, Kulelen 0.4754 -> shows 0.5 sit within 0.05 of a class line, and EVE only
+  ever shows the rounded figure; these rows span 0.0266 of true security and are not all one class
+```
+
+(Verbatim from a run on 2026-09-13 against live ESI and SDE build 3494416, notes wrapped.)
+
+**Security is classified on the true value, not the printed one.** CCP's own guide
+([developers.eveonline.com/docs/guides/system-security](https://developers.eveonline.com/docs/guides/system-security/))
+says the client rounds to one decimal — away from zero, with one exception: any positive status below
+`0.05` shows `0.1` rather than `0.0`, because a system that reads 0.0 is shoot-on-sight space. ESI's
+`securityClass` field is documented as having an unknown meaning and is never read here. That rule is why
+Enderailen (measured 0.4487847685813904 on 2026-09-13) is **lowsec** while Kulelen, twenty-six
+thousandths nearer the centre at 0.4753689467906952, is **highsec**: `x >= 0.45` is highsec, and both
+systems print a displayed figure that hides it. Any run whose rows come within `0.05` of a class line says
+so under the table, quoting the true spread — the mistake this command was written to prevent.
+
+**Planets are counted from the local census**, so the printed total always equals the breakdown beside it,
+and types nobody can colonise still get named: 116 systems in build 3494416 contain a Shattered planet, and
+`pi` has nothing to say about those. ESI's own planet count is fetched anyway (it is already in the system
+record); when the two disagree — the census is a build, ESI is now — the run says which said what, quoting
+the census build, and `--csv` keeps both figures as their own columns. A system with no census row prints
+`-` rather than `0`, because 402 of the SDE's systems genuinely have no planets: absence is an answer here.
+
+**`--route HUB`** resolves the hub name to a solar system (`jita`, `amarr`, and anything else ESI will
+resolve) and prints jump counts. `shortest` is what a pilot plans with; `secure` avoids the space a hauler
+cannot fly in, so both are fetched and the cell reads `15 (secure 44)` for Rairomon to Amarr, where the safe road is three times as long. Equal counts over
+different paths are still disclosed — two roads of the same length are not the same road. `--flag insecure`
+has no meaningful sibling, so nothing is compared and nothing is requested for it. One link ESI will not
+route costs that cell a dash and a note quoting ESI's reason; the rest of the table still prints. Routing a
+system to itself answers zero jumps without asking.
+
+The planet column needs the census: with none installed the command refuses with
+`no local planet census - run: eve-skills update-data` and makes no request at all. Security status has
+exactly one source, so a system that will not describe itself ends the run with an error naming it rather
+than a row of dashes.
+
 ### `plan` — training plan (one character)
 
 ```bash
@@ -1171,7 +1230,7 @@ id,ts,time_utc,kind,character_id,character_name,skill_id,skill_name,finished_lev
 has (never later than the order's own expiry). The text view prints those two as `[history]` and
 `[time estimated]` on the affected lines.
 
-### `update-data` — alpha caps, skill catalog, blueprint recipes and planetary industry from the official SDE
+### `update-data` — alpha caps, skill catalog, blueprint recipes, planetary industry and the planet census from the official SDE
 
 ```bash
 eve-skills update-data              # latest build (~100 MB download)
@@ -1184,13 +1243,17 @@ the material list of every blueprint — manufacturing runs and reactions alike,
 one makes — and the planetary-industry chain: each planet type with what its extractors pull, every
 recipe with its inputs, outputs, cycle time, plant class and the planets able to run it, the CPU and power
 each structure draws, a command center's output at every upgrade level, and the customs-tax factors —
-and atomically replaces five files in the data directory
+and every planet in New Eden grouped by the system it orbits —
+and atomically replaces six files in the data directory
 (`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That user copy takes
 precedence over the snapshot shipped in the package, so you can refresh caps, the catalog, the recipes and
 the planetary data without touching the checkout. `plan` is built on this catalog — without one it refuses
 with `no local skill catalog - run: eve-skills update-data` — and `build-cost` is built on the recipes,
 which is why a type that nothing makes locally ends by naming `update-data` instead of printing a table of
-dashes; `pi` reads the planetary document. The whole download runs under `update.lock`, so two concurrent
+dashes; `pi` reads the planetary document and `system` reads the census. The census is deliberately its own
+file rather than another section of `planet_industry.json`: it is 474 KB of per-system counts that `pi fit`
+would have to parse before adding up eight integers, and it counts every planet type in the SDE — including
+the ones nobody can colonise, which `planet_industry.json` has no name for. The whole download runs under `update.lock`, so two concurrent
 runs cannot both pull ~100 MB and interleave builds, and each file is replaced atomically. `skills` warns
 when the local snapshot is more than 90 days old (the age line also names the SDE build in use).
 
@@ -1210,7 +1273,7 @@ on (`versions.platform` — a pasted report may be read on a different machine t
 data directories and their permissions (including the state directory the watchers use), config and
 token-store readability, per-character login state (token time left, auto-refresh, granted consent —
 `orders` and `corp-orders` included), SDE document freshness and where each document resolves from — all
-five of them, `planet_industry.json` last; as with `blueprint_materials.json`, an absent one is a warning
+six of them, `system_planets.json` last; as with `blueprint_materials.json`, an absent one is a warning
 naming `update-data` rather than a blocker, since it costs one command's subject and not the tool — the
 registered callback URLs, SP-history age, and what the watchers have accumulated:
 
@@ -1311,7 +1374,7 @@ naming the wrong tree beats naming nothing.
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
-| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id | Non-secret |
+| `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry,system_planets}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id; `system_planets.json` is the one `system` reads — every planet in New Eden counted per solar system by planet type (68,407 planets over 8,088 systems in build 3503375), with a name for each type it met | Non-secret |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
@@ -1605,7 +1668,7 @@ eve_skills/
   exports.py         standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
   data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog,
-                     blueprint_materials, planet_industry)
+                     blueprint_materials, planet_industry, system_planets)
 tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
                      Windows lock backend, path layout on both branches, fake-ESI command integration,
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end

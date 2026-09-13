@@ -749,7 +749,8 @@ class AlphadataUpdateTests(XdgTestCase):
                            '{"_key": 16239, "name": {"en": "Barren Launchpad"}, "groupID": 1030, "published": true}\n'
                            '{"_key": 2524, "name": {"en": "Barren Command Center"}, "groupID": 1027, "published": true}\n'
                            # Planet names only exist on unpublished marker types; the document still has to carry them.
-                           '{"_key": 2016, "name": {"en": "Planet (Barren)"}, "groupID": 7, "published": false}\n',
+                           '{"_key": 2016, "name": {"en": "Planet (Barren)"}, "groupID": 7, "published": false}\n'
+                           '{"_key": 13, "name": {"en": "Planet (Gas)"}, "groupID": 7, "published": false}\n',
             # The SDE's own row shape; only the two activities that consume goods may survive it.
             "blueprints.jsonl": '{"_key": 681, "maxProductionLimit": 300, "activities": '
                                 '{"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
@@ -766,6 +767,10 @@ class AlphadataUpdateTests(XdgTestCase):
             "planetSchematics.jsonl": '{"_key": 121, "cycleTime": 1800, "name": {"en": "Water"}, '
                                       '"pins": [2469], "types": [{"_key": 2268, "isInput": true, "quantity": 3000}, '
                                       '{"_key": 3645, "isInput": false, "quantity": 20}]}\n',
+            # The census' source: one system with a colonisable and a Gas planet, one with only Gas.
+            "mapPlanets.jsonl": '{"_key": 4001, "solarSystemID": 30000142, "typeID": 2016}\n'
+                                '{"_key": 4002, "solarSystemID": 30000142, "typeID": 13}\n'
+                                '{"_key": 4003, "solarSystemID": 30000135, "typeID": 13}\n',
             # Category is what separates a structure from a raw resource from a manufactured commodity.
             "groups.jsonl": '{"_key": 1026, "categoryID": 41}\n{"_key": 1027, "categoryID": 41}\n'
                             '{"_key": 1028, "categoryID": 41}\n{"_key": 1030, "categoryID": 41}\n'
@@ -811,7 +816,7 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual(summaries[0]["grades"]["1"], {"name": "Caldari Alpha Clone", "skills": 1})
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
         for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
-                     "blueprint_materials.json", "planet_industry.json"):
+                     "blueprint_materials.json", "planet_industry.json", "system_planets.json"):
             path = os.path.join(self.data_dir, name)
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
@@ -839,6 +844,14 @@ class AlphadataUpdateTests(XdgTestCase):
                                                              "pi_command_center_levels")})
         pi = alphadata.planet_industry()
         self.assertEqual({"2016": "Barren"}, pi["planet_types"])
+        # The census is its own document because `pi fit` must never pay for parsing it: it counts every
+        # planet, so the Gas planets that planet_industry.json has no name for are in it too.
+        self.assertEqual({"census_systems": 2, "census_planets": 3, "census_planet_types": 2},
+                         {key: summaries[0][key] for key in ("census_systems", "census_planets",
+                                                             "census_planet_types")})
+        self.assertEqual({"13": "Gas", "2016": "Barren"}, alphadata.system_planets()["planet_types"])
+        self.assertEqual({"30000135": {"13": 1}, "30000142": {"13": 1, "2016": 1}},
+                         alphadata.system_planets()["systems"])
         self.assertEqual({"2016": [2268]}, pi["resources"])
         self.assertEqual({"import": 0.5, "export": 1.0}, pi["tax_factors"])
         # One recipe read end to end: quantities from the SDE, tier from the output's group, plant class

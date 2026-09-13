@@ -642,6 +642,22 @@ def _check_sde(now: float) -> list[dict]:
         checks.append(_check("data.planet_industry", OK,
                              f"planetary industry data available (SDE build {planetary['build']})", **planetary_fields))
 
+    # The census is the only local source for what a system contains, so its absence costs `system`
+    # its planets column - security status and jumps still work. Warning, same fix.
+    census = by_name["system_planets.json"]
+    census_fields = {"path": census["path"], "present": census["present"], "build": census["build"]}
+    if not census["present"]:
+        checks.append(_check("data.system_planets", WARN,
+                             "the planet census is not installed - a solar system's planets "
+                             "(types and counts) cannot be listed",
+                             hint="run: eve-skills update-data", **census_fields))
+    elif census["problem"]:
+        checks.append(_check("data.system_planets", WARN, f"the planet census is {census['problem']}",
+                             hint="re-download it: eve-skills update-data", **census_fields))
+    else:
+        checks.append(_check("data.system_planets", OK,
+                             f"planet census available (SDE build {census['build']})", **census_fields))
+
     if len(builds) > 1:
         checks.append(_check("data.consistency", WARN,
                              f"the local SDE documents describe different builds ({', '.join(str(b) for b in builds)})",

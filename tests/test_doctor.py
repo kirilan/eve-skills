@@ -520,6 +520,41 @@ class OfflineReportTest(DoctorTestCase):
         self.assertEqual("warn", consistency["status"])
         self.assertIn("12345", consistency["detail"])
 
+    def test_the_planet_census_absent_or_damaged_is_a_warning_not_a_blocker(self):
+        """`system` loses its planet column while skills, training, the market and even `pi` keep
+        working, so a missing or half-written census warns with the same fix and exits zero."""
+        self.seed_config()
+        self.seed_store(make_record(ADA, "Ada Vane"))
+        self.without_bundled_data()   # seed_sde seeds three documents; the other three are absent
+        self.seed_sde()
+        missing = self.check(self.report(), "data.system_planets")
+        self.assertEqual("warn", missing["status"])
+        self.assertIn("planets (types and counts)", missing["detail"])
+        self.assertIn("update-data", missing["hint"])
+        with open(os.path.join(self.data_dir, "system_planets.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"build": 3494416, "systems": {"300001')   # a download that stopped mid-write
+        report = self.report()
+        damaged = self.check(report, "data.system_planets")
+        self.assertEqual("warn", damaged["status"])
+        self.assertIn("corrupt", damaged["detail"])
+        self.assertIn("update-data", damaged["hint"])
+        self.assertEqual(0, report["exit_code"])
+
+    def test_the_planet_census_joins_the_build_check(self):
+        """The sixth document is lined up with the rest rather than read off on its own: a census from
+        another build is exactly the drift `system` has to be able to tell me about."""
+        self.seed_healthy()
+        self.write_json(os.path.join(self.data_dir, "system_planets.json"),
+                        {"build": 12345, "fetched": date.fromtimestamp(NOW).isoformat(),
+                         "planet_types": {}, "systems": {}}, mode=0o644)
+        report = self.report()
+        present = self.check(report, "data.system_planets")
+        self.assertEqual("ok", present["status"])
+        self.assertIn("12345", present["detail"])
+        consistency = self.check(report, "data.consistency")
+        self.assertEqual("warn", consistency["status"])
+        self.assertIn("12345", consistency["detail"])
+
     def test_bundled_data_is_reported_when_no_user_data_exists(self):
         self.seed_config()
         self.seed_store(make_record(ADA, "Ada Vane"))
