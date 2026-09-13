@@ -23,7 +23,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from eve_skills import cli, cmd_watch, orders, watchstate
-from tests.fake_esi import (ADA, CORP_SHARED, SKILL_NAV, SKILL_WIDE, VELA, FakeEsiEnv,
+from tests.fake_esi import (ADA, COLONY_PLANET_ICE, CORP_SHARED, PI_EXTRACTOR_HEAVY, PI_PRODUCT_HEAVY,
+                            SKILL_NAV, SKILL_WIDE, VELA, FakeEsiEnv, colony_row, extractor_pin, iso,
                             owner_order)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1064,6 +1065,229 @@ class EventsCommandTests(unittest.TestCase):
                          ("7", "1", "1"))
         self.assertEqual(rows["training_finished"]["order_id"], "")   # shared header, empty cells
 
+    def test_a_finished_extraction_is_listed_filtered_and_exported(self):
+        """`events` reads this kind back months later with no network at all, so the sentence, the `--kind`
+        filter and the CSV columns can only come from the payload written at the time of the transition."""
+        watching = [cobs(colony(50008625, [epin(7001, T0 + 60)]))]
+        watchstate.commit([], colony_observations=watching, now_ts=T0)
+        watchstate.commit([], colony_observations=watching, now_ts=T0 + 120)
+        code, out, err = self.env.run(["events", "--kind", "extractor_expired"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Ada Vane: Ice colony in Ditalren - extraction of Heavy Water finished", out)
+        self.assertIn("15/cycle, 3 heads", out)
+        _, raw, _ = self.env.run(["events", "--json"])
+        rows = json.loads(raw)
+        self.assertEqual(["extractor_expired"], [row["kind"] for row in rows])
+        self.assertEqual((7001, 50008625, "ice"),
+                         (rows[0]["data"]["pin_id"], rows[0]["data"]["planet_id"],
+                          rows[0]["data"]["planet_type"]))
+        _, out, _ = self.env.run(["events", "--csv"])
+        line = {row["kind"]: row for row in csv.DictReader(out.splitlines())}["extractor_expired"]
+        self.assertEqual(("Heavy Water", "3", "Ditalren"),
+                         (line["product_name"], line["heads"], line["solar_system_name"]))
+
+
+def epin(pin_id: int, expiry: float | None, *, name: str = "Heavy Water Extractor Mine",
+         product: str = "Heavy Water") -> watchstate.ExtractorPin:
+    """One extractor pin at an injected expiry; `None` is ESI's own way of saying nothing is programmed."""
+    return watchstate.ExtractorPin(pin_id=pin_id, type_id=24700, type_name=name, product_type_id=3837,
+                                   product_name=product, qty_per_cycle=15, cycle_time=3600, heads=3,
+                                   expiry_time=None if expiry is None else stamp(expiry))
+
+
+def colony(planet_id: int, pins=(), *, planet_type: str = "ice",
+           updated: float | None = None) -> watchstate.ColonySnapshot:
+    """One colony as one poll read it, with the identity a months-later `events` run cannot re-fetch."""
+    return watchstate.ColonySnapshot(planet_id=planet_id, planet_type=planet_type,
+                                     solar_system_id=30002540, solar_system_name="Ditalren",
+                                     last_update=stamp(T0 - 600 if updated is None else updated),
+                                     extractors=tuple(pins))
+
+
+def cobs(*planets, cid: int = ADA.character_id,
+         name: str = "Ada Vane") -> watchstate.ColonyObservation:
+    """One character's whole colony set for one poll - the unit that makes "no colonies" a fact."""
+    return watchstate.ColonyObservation(character_id=cid, character_name=name, colonies=tuple(planets))
+
+
+class ColonyTransitionTests(unittest.TestCase):
+    """`observe_colonies`: one announcement per finished extraction, derived from the clock alone.
+
+    An extractor has no status field. `expiry_time` is an absolute instant, so "it just ran out" is only
+    ever visible as the same pin read before and after that instant - which makes these transitions pure
+    arithmetic against injected timestamps, with no disk and no clock anywhere."""
+
+    PLANET = 50008625
+
+    def first_sight(self, pin_id: int = 7001, expiry: float | None = T0 + 60):
+        """Poll one colony at `T0` and hand back (state, events)."""
+        return watchstate.observe_colonies(watchstate.empty_state(),
+                                           [cobs(colony(self.PLANET, [epin(pin_id, expiry)]))], T0)
+
+    def test_an_extraction_is_announced_once_when_the_clock_crosses_its_expiry(self):
+        state, seen = self.first_sight()
+        self.assertEqual([], seen, "the first sight of a colony is history, not news")
+        again = cobs(colony(self.PLANET, [epin(7001, T0 + 60)]))
+        state, crossing = watchstate.observe_colonies(state, [again], T0 + 120)
+        self.assertEqual(["extractor_expired"], [ev.kind for ev in crossing])
+        self.assertEqual(T0 + 60, crossing[0].ts, "dated to the expiry, not to the poll that noticed")
+        self.assertEqual((self.PLANET, "Heavy Water", "Ditalren"),
+                         (crossing[0].data["planet_id"], crossing[0].data["product_name"],
+                          crossing[0].data["solar_system_name"]))
+        _state, later = watchstate.observe_colonies(state, [again], T0 + 7200)
+        self.assertEqual([], later, "the same finished extraction must never be announced twice")
+
+    def test_a_colony_that_emptied_last_week_is_recorded_without_an_announcement(self):
+        _state, seen = self.first_sight(expiry=T0 - 6 * 86400)
+        self.assertEqual([], seen)
+
+    def test_reprogramming_an_extractor_back_into_the_future_resets_it_in_silence(self):
+        """Moving `expiry_time` forward is only ever caused by the player programming a new run, so the
+        pin goes back to live quietly - and its next expiry is a different fact with a different id."""
+        state, _seen = self.first_sight()
+        state, crossing = watchstate.observe_colonies(state,
+                                                     [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]))],
+                                                     T0 + 120)
+        self.assertEqual(1, len(crossing))
+        state, reset = watchstate.observe_colonies(state,
+                                                  [cobs(colony(self.PLANET, [epin(7001, T0 + 7200)]))],
+                                                  T0 + 130)
+        self.assertEqual([], reset)
+        _state, next_run = watchstate.observe_colonies(state,
+                                                      [cobs(colony(self.PLANET, [epin(7001, T0 + 7200)]))],
+                                                      T0 + 8000)
+        self.assertEqual(["extractor_expired"], [ev.kind for ev in next_run])
+        self.assertNotEqual(crossing[0].id, next_run[0].id)
+
+    def test_a_pin_with_nothing_programmed_can_never_announce(self):
+        """No expiry is "idle", not "just finished" - and it stays not-finished even when a later poll
+        finds an expired run we never saw running."""
+        state, seen = self.first_sight(expiry=None)
+        self.assertEqual([], seen)
+        _state, later = watchstate.observe_colonies(state,
+                                                   [cobs(colony(self.PLANET, [epin(7001, T0 - 60)]))],
+                                                   T0 + 60)
+        self.assertEqual([], later, "a transition nobody witnessed is not an event")
+
+    def test_observing_leaves_the_state_it_was_given_alone(self):
+        """Purity is what lets the watch loop replay a cycle after a crash and land on the same ids."""
+        state, _seen = self.first_sight()
+        before = json.dumps(state, sort_keys=True)
+        poll = [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]))]
+        first_state, first_events = watchstate.observe_colonies(state, poll, T0 + 120)
+        second_state, second_events = watchstate.observe_colonies(state, poll, T0 + 120)
+        self.assertEqual(before, json.dumps(state, sort_keys=True), "the caller's dict was mutated")
+        self.assertEqual([ev.id for ev in first_events], [ev.id for ev in second_events])
+        self.assertEqual(json.dumps(first_state, sort_keys=True),
+                         json.dumps(second_state, sort_keys=True))
+
+    def test_the_dedup_id_survives_a_json_round_trip(self):
+        """A restart reads the state back off disk, so the id a replay computes has to match the one
+        already in `events.jsonl` - which is the only thing standing between a crash and a second
+        announcement of one extraction."""
+        state, _seen = self.first_sight()
+        poll = [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]))]
+        _state, crossing = watchstate.observe_colonies(state, poll, T0 + 120)
+        restarted = json.loads(json.dumps(state))
+        _state, replay = watchstate.observe_colonies(restarted, poll, T0 + 130)
+        self.assertEqual([ev.id for ev in crossing], [ev.id for ev in replay])
+
+    def test_an_unread_layout_keeps_its_timers_while_a_read_colony_still_announces(self):
+        """The poller drops a colony whose pin document failed. That must unwatch nothing: the stored pin
+        stays live and announces when the layout is readable again, while an unrelated colony's finished
+        extraction is still announced in the same cycle."""
+        other = self.PLANET + 1
+        state, _seen = watchstate.observe_colonies(
+            watchstate.empty_state(), [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]),
+                                          colony(other, [epin(8002, T0 + 60)]))], T0)
+        state, crossing = watchstate.observe_colonies(state,
+                                                     [cobs(colony(other, [epin(8002, T0 + 60)]))], T0 + 120)
+        self.assertEqual([8002], [ev.data["pin_id"] for ev in crossing])
+        watched = state["colonies"][str(ADA.character_id)]["extractors"]
+        self.assertEqual("live", watched[f"{self.PLANET}:7001"]["status"],
+                         "an unread layout is not an emptied one")
+        _state, late = watchstate.observe_colonies(
+            state, [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]),
+                          colony(other, [epin(8002, T0 + 60)]))], T0 + 3600)
+        self.assertEqual([7001], [ev.data["pin_id"] for ev in late])
+
+    def test_a_pin_removed_from_a_read_colony_stops_being_watched(self):
+        """Here the layout *was* read, so a missing pin is evidence: it is dropped silently, and coming
+        back later is a first sight rather than a resurrection."""
+        state, _seen = self.first_sight()
+        state, gone = watchstate.observe_colonies(state, [cobs(colony(self.PLANET, []))], T0 + 120)
+        self.assertEqual([], gone)
+        self.assertEqual({}, state["colonies"][str(ADA.character_id)]["extractors"])
+        _state, back = watchstate.observe_colonies(state,
+                                                  [cobs(colony(self.PLANET, [epin(7001, T0 - 60)]))],
+                                                  T0 + 240)
+        self.assertEqual([], back)
+
+    def test_a_character_absent_from_the_poll_keeps_everything(self):
+        """One failed fetch must not retire a character's colonies: the next successful poll still knows
+        which pins were live."""
+        state, _seen = self.first_sight()
+        state, events = watchstate.observe_colonies(state, [cobs(cid=VELA.character_id, name="Vela Krinn")],
+                                                   T0 + 120)
+        self.assertEqual([], events)
+        watched = state["colonies"][str(ADA.character_id)]["extractors"]
+        self.assertEqual("live", watched[f"{self.PLANET}:7001"]["status"])
+        _state, crossing = watchstate.observe_colonies(state,
+                                                     [cobs(colony(self.PLANET, [epin(7001, T0 + 60)]))],
+                                                     T0 + 3600)
+        self.assertEqual([7001], [ev.data["pin_id"] for ev in crossing])
+
+
+class ColonyWatchCliTests(WatchLoopMixin, unittest.TestCase):
+    """`skills --watch` over the real CLI: the transition has to survive transport, state and rendering."""
+
+    def seed_colony(self, expiry: str):
+        """Ada's one colony with one extractor at `expiry`, editable between cycles."""
+        return self.env.install_colonies(ADA, [(colony_row(COLONY_PLANET_ICE, "ice"),
+                                               [extractor_pin(7001, PI_EXTRACTOR_HEAVY, PI_PRODUCT_HEAVY,
+                                                              expiry=expiry)])])
+
+    def test_an_extraction_running_out_between_cycles_is_announced_once(self):
+        state = self.seed_colony(iso(3600))
+
+        def run_out():
+            state.layouts[COLONY_PLANET_ICE].pins[0]["expiry_time"] = iso(-1)
+
+        code, out, err = self.run_watch(3, hooks=[run_out])
+        self.assertEqual(130, code)
+        self.assertIn("extraction of Heavy Water finished", out)
+        self.assertEqual(1, out.count("extraction of Heavy Water finished"), out)
+        self.assertIn("Ice colony in Ditalren", out)
+        history = os.path.join(self.env.state_home, "eve-skills", "events.jsonl")
+        with open(history, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual(["extractor_expired"], [row["kind"] for row in rows])
+
+    def test_the_colony_frame_says_what_is_being_watched(self):
+        self.seed_colony(iso(3600))
+        _code, out, err = self.run_watch(1)
+        self.assertIn("next extraction ends", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_no_colonies_polls_no_planet_route(self):
+        """The opt-out has to be real: a user watching overnight should not pay for endpoints they turned
+        off, and the flag is the escape hatch if ESI's colony routes ever misbehave."""
+        self.seed_colony(iso(3600))
+        code, _out, err = self.run_watch(1, argv=["skills", "--watch", "1", "--no-colonies"])
+        self.assertEqual(130, code)
+        self.assertEqual([], self.env.server.calls_to(f"/characters/{ADA.character_id}/planets"))
+
+    def test_a_run_where_nobody_consented_to_planets_hints_once_and_polls_nothing(self):
+        """Vela's token predates the scope, and a refresh token never gains one silently. Say so once per
+        run - the user may re-consent in another window and this process should be there for it - while
+        training keeps being watched and no refused request is spent."""
+        self.seed_colony(iso(3600))
+        code, out, err = self.run_watch(3, argv=["skills", "--watch", "1", "--char", str(VELA.character_id)])
+        self.assertEqual(130, code)
+        self.assertEqual(1, err.count("no stored character has the planets consent"), err)
+        self.assertIn("(no colony could be polled this cycle", out)
+        self.assertIn("eve-skills login --scopes planets", err)
+        self.assertEqual([], self.env.server.calls_to(f"/characters/{VELA.character_id}/planets"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,10 @@
 """The --watch loops, and the event history they record.
 
 One poll/announce/render/sleep skeleton (`watch_loop`) drives both watches; `skills --watch` and
-`orders --watch` differ only in the cycle function they hand it. `events` reads back what they wrote."""
+`orders --watch` differ only in the cycle function they hand it. `events` reads back what they wrote.
+
+`skills --watch` also polls planetary colonies, so an extractor whose programmed extraction ended is
+announced instead of discovered on the next visit; `--no-colonies` switches that poll off."""
 
 from __future__ import annotations
 
@@ -16,10 +19,10 @@ from dataclasses import dataclass, field
 
 
 from . import esi as esi_mod, exports, orders, paths, render, sso, watchstate
-# One-way by design: the watch loops read the skills and orders command areas, and neither
+# One-way by design: the watch loops read the skills, orders and colonies command areas, and neither
 # imports this module at module level - `skills --watch` and `orders --watch` reach back in
 # from inside their handlers, where this module is fully loaded.
-from . import cmd_orders, cmd_skills
+from . import cmd_colonies, cmd_orders, cmd_skills
 
 
 # What ended the order, in the words ESI is actually entitled to. `order_closed` is the honest one:
@@ -55,6 +58,30 @@ def order_event_text(ev: dict, names: dict[int, str]) -> str:
     return f"{ev['character_name']}: {phrase} - {outcome}"
 
 
+def extractor_event_text(ev: dict, names: dict[int, str]) -> str:
+    """One finished extraction as the sentence a colonist wants: which colony, and what it stopped making.
+
+    Rendered entirely from the payload, so `events` reads it months later with no network - that is why
+    watchstate copies the colony's own identity into every event instead of leaving ids behind. The verb
+    is "finished", not "is idle": ESI's data is only recalculated when the colony is opened in the client,
+    so a player who reprogrammed it minutes later cannot be contradicted by this sentence.
+    """
+    data = ev.get("data") or {}
+    item = (data.get("product_name") or names.get(data.get("product_type_id"))
+            or f"type {data.get('product_type_id')}")
+    unit = (data.get("extractor_name") or names.get(data.get("extractor_type_id")) or "extractor")
+    system = (data.get("solar_system_name") or names.get(data.get("solar_system_id"))
+              or (f"system {data['solar_system_id']}" if data.get("solar_system_id") else None))
+    colony = f"{cmd_colonies.planet_label(str(data.get('planet_type') or 'unknown'))} colony"
+    colony += f" in {system}" if system else f" (planet {data.get('planet_id')})"
+    detail = [unit]
+    if data.get("qty_per_cycle"):
+        detail.append(f"{int(data['qty_per_cycle']):,}/cycle")
+    if data.get("heads"):
+        detail.append(f"{int(data['heads'])} heads")
+    return f"{ev['character_name']}: {colony} - extraction of {item} finished ({', '.join(detail)})"
+
+
 def event_text(ev: dict, names: dict[int, str] | None = None) -> str:
     """Human sentence for one recorded event (watch banner and events table share it).
 
@@ -65,6 +92,8 @@ def event_text(ev: dict, names: dict[int, str] | None = None) -> str:
         return f"{ev['character_name']}: training queue is now empty"
     if str(ev["kind"]).startswith("order_"):
         return order_event_text(ev, names or {})
+    if ev["kind"] == "extractor_expired":
+        return extractor_event_text(ev, names or {})
     return f"{ev['character_name']}: {ev['skill_name']} to L{ev['finished_level']} - finished training"
 
 
@@ -129,14 +158,16 @@ def render_watch_status(ctxs, failures, last_good: dict[int, dict]) -> str:
 class WatchCycle:
     """One poll of a watch loop, whatever it was watching.
 
-    `warnings` are this cycle's problems that do not stop the run; `observations` and
-    `order_observations` are what gets claimed against persisted state; `body` is the status view to
-    print under the announcements; `names` lets the sentences name types and stations; `idle` is the
-    line for a cycle that could observe nothing at all."""
+    `warnings` are this cycle's problems that do not stop the run. The three observation tuples are what
+    gets claimed against persisted state - one per watched subject kind, and a kind this cycle did not
+    observe claims nothing rather than emptying what is stored. `body` is the status view printed under
+    the announcements, `names` lets the sentences name types, stations and systems, and `idle` is the line
+    for a cycle that could observe nothing at all."""
     title: str = "watch"
     warnings: tuple = ()
     observations: tuple = ()
     order_observations: tuple = ()
+    colony_observations: tuple = ()
     body: str = ""
     names: dict = field(default_factory=dict)
     idle: str | None = None
@@ -225,8 +256,10 @@ def watch_loop(args, poll) -> int:
                 print(f"warning: {cycle.idle}", file=sys.stderr)
             # Transitions are claimed against the persisted state, so alerts fire
             # once per event across polls, restarts and concurrent watchers.
-            events = (watchstate.commit(cycle.observations, cycle.order_observations)
-                      if (cycle.observations or cycle.order_observations) else [])
+            events = (watchstate.commit(cycle.observations, cycle.order_observations,
+                                        cycle.colony_observations)
+                      if (cycle.observations or cycle.order_observations
+                          or cycle.colony_observations) else [])
             if sys.stdout.isatty():
                 print(watch_clear(), end="")
             print(f"eve-skills {cycle.title} - {time.strftime('%Y-%m-%d %H:%M:%S')} (every {args.watch}m, Ctrl-C to stop)")
@@ -245,27 +278,39 @@ def watch_loop(args, poll) -> int:
 
 
 def skills_cycle(args, client: esi_mod.Esi, session: WatchSession) -> WatchCycle:
-    """One `skills --watch` turn: the training book, plus order events wherever consent allows."""
+    """One `skills --watch` turn: the training book, plus order and colony events wherever consent allows."""
     ctxs, failures = cmd_skills.gather_all(args, client=client)
     warnings = [f"skipped {f}" for f in failures]
     poll = OrderPoll() if args.no_orders else poll_order_observations(args, client, session.warned)
     warnings += poll.warnings
+    # Colonies are opt-in twice over: the consent has to exist, and --no-colonies switches the poll off for
+    # somebody who has it. Neither case may read as a colony that stopped extracting, so a skipped poll
+    # claims nothing at all rather than an empty observation.
+    colonies = (ColonyPoll(asked=False) if getattr(args, "no_colonies", False)
+                else poll_colony_observations(args, client, session.warned))
+    warnings += colonies.warnings
+    if colonies.asked and not colonies.eligible:
+        warnings += warn_once(session.warned, "colonies:no-consent", colonies_watch_hint())
     names = order_names(client, poll.books)
+    names.update(colonies.names)
     if args.full:
         body = ("\n" + "=" * 72 + "\n").join(cmd_skills.render_text(ctx, args) for ctx in ctxs)
     else:
         body = render_watch_status(ctxs, failures, session.last_good)
+    if colonies.asked:
+        body += "\n\n" + render_colonies_watch_status(colonies.observations, names, client.now())
     return WatchCycle(warnings=tuple(warnings),
                       observations=tuple(cmd_skills.observation_from_ctx(c) for c in ctxs),
                       order_observations=tuple(watchstate.OrderObservation.from_book(b, names)
                                                for b in poll.books),
+                      colony_observations=colonies.observations,
                       body=body, names=names,
                       # a transient ESI/network outage must not kill an overnight session
                       idle=None if ctxs else "no character data this cycle - retrying next poll")
 
 
 def cmd_watch(args):
-    """`skills --watch`: training transitions, plus market order events wherever consent allows."""
+    """`skills --watch`: training transitions, order events and finished extractions."""
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
     session = WatchSession()
     return watch_loop(args, lambda: skills_cycle(args, client, session))
@@ -280,6 +325,13 @@ EVENTS_CSV_ORDER_COLUMNS = ["order_id", "owner_key", "owner_name", "type_id", "t
                             "price", "volume_total", "volume_remain", "filled", "region_id",
                             "location_id", "issued", "expires", "wallet_division", "issued_by",
                             "backfill", "ts_estimated"]
+# Colony events keep the same flat-table shape: one block of columns per event family, empty where the
+# event is of another kind. `colony_last_update` is there because it is the reader's only way to see how
+# stale ESI's view of that colony was when the extraction was declared finished.
+EVENTS_CSV_COLONY_COLUMNS = ["planet_id", "planet_type", "solar_system_id", "solar_system_name", "pin_id",
+                             "extractor_type_id", "extractor_name", "product_type_id", "product_name",
+                             "qty_per_cycle", "cycle_seconds", "heads", "expiry_time",
+                             "colony_last_update"]
 
 
 def matches_owner(event: dict, spec: str) -> bool:
@@ -323,7 +375,7 @@ def cmd_events(args):
     if args.csv:
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
-        writer.writerow(EVENTS_CSV_COLUMNS + EVENTS_CSV_ORDER_COLUMNS)
+        writer.writerow(EVENTS_CSV_COLUMNS + EVENTS_CSV_ORDER_COLUMNS + EVENTS_CSV_COLONY_COLUMNS)
         for ev in page:
             writer.writerow([ev["id"], f"{ev['ts']:.3f}",
                              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ev["ts"])),
@@ -333,12 +385,13 @@ def cmd_events(args):
                              "" if ev.get("finished_level") is None else ev["finished_level"],
                              ev.get("finish_date") or "",
                              *[render.csv_cell((ev.get("data") or {}).get(col))
-                               for col in EVENTS_CSV_ORDER_COLUMNS]])
+                               for col in EVENTS_CSV_ORDER_COLUMNS + EVENTS_CSV_COLONY_COLUMNS]])
         sys.stdout.write(buf.getvalue())
         return
     if not page:
-        print("no recorded events yet - eve-skills skills --watch records finished training and empty "
-              "queues, eve-skills orders --watch records filled, expired and cancelled orders")
+        print("no recorded events yet - eve-skills skills --watch records finished training, empty queues "
+              "and planetary extractors whose extraction has run out; eve-skills orders --watch records "
+              "filled, expired and cancelled orders")
         return
     rows = [[time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev["ts"])),
              ev.get("character_name") or str(ev["character_id"]), event_text(ev)] for ev in page]
@@ -493,3 +546,140 @@ def cmd_orders_watch(args):
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
     session = WatchSession()
     return watch_loop(args, lambda: orders_watch_cycle(args, client, session))
+
+
+# ---------------------------------------------------------------------------
+# Colonies: polled by `skills --watch`; a new fact, the same discipline as orders
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ColonyPoll:
+    """One colony poll: what ESI answered, the warnings standing in for what it did not, and whether any
+    stored character could be asked at all.
+
+    `asked=False` is a different thing from `eligible=False`: the watch was told to leave colonies alone
+    (--no-colonies), so neither a status table nor a consent hint belongs on screen."""
+    observations: tuple = ()
+    names: dict = field(default_factory=dict)
+    warnings: tuple = ()
+    eligible: bool = True
+    asked: bool = True
+
+
+def colonies_watch_hint() -> str:
+    """What to tell a watcher when nobody can be asked about colonies - and how to fix it."""
+    return (f"no stored character has the {cmd_colonies.FEATURE} consent - run: "
+            f"eve-skills login --scopes {cmd_colonies.FEATURE} (pick the character in the browser)")
+
+
+def colony_snapshot(colony, names: dict[int, str]) -> watchstate.ColonySnapshot:
+    """One `cmd_colonies.Colony` as the pure observation watchstate diffs.
+
+    Names are resolved by the caller and handed in: this module is the only place that may talk to ESI,
+    and `observe_colonies` has to stay reproducible from a JSON file alone."""
+    return watchstate.ColonySnapshot(colony.planet_id, colony.planet_type, colony.solar_system_id,
+                                     names.get(colony.solar_system_id), colony.last_update,
+                                     tuple(watchstate.ExtractorPin(
+                                         pin_id=ex.pin_id, type_id=ex.type_id,
+                                         type_name=names.get(ex.type_id),
+                                         product_type_id=ex.product_type_id,
+                                         product_name=names.get(ex.product_type_id),
+                                         qty_per_cycle=ex.qty_per_cycle, cycle_time=ex.cycle_time,
+                                         heads=ex.heads, expiry_time=ex.expiry_time)
+                                         for ex in colony.layout.extractors))
+
+
+def colony_names(client: esi_mod.Esi, colonies) -> dict[int, str]:
+    """System, extractor and product names for these colonies, resolved once per cycle.
+
+    ESI's colony rows carry ids only. `resolve_names` is disk-cached and leaves out whatever it cannot
+    resolve, so a type added this week shows as an id instead of failing the poll - which matters more
+    here than in `colonies --detail`: an overnight watch has no chance to ask the user anything, and it
+    deliberately does not need an SDE snapshot installed to keep working."""
+    ids = set()
+    for colony in colonies:
+        if colony.solar_system_id:
+            ids.add(int(colony.solar_system_id))
+        for ex in colony.layout.extractors:
+            ids.update(int(ident) for ident in (ex.type_id, ex.product_type_id) if ident)
+    return esi_mod.resolve_names(client, ids) if ids else {}
+
+
+def poll_colony_observations(args, client: esi_mod.Esi, warned: set) -> ColonyPoll:
+    """Every character this cycle can be asked for colonies, plus a warning line per one it could not.
+
+    Deliberately quieter than `eve-skills colonies`, exactly as order polling is: missing consent stops
+    all polling and so is said once per run (`colonies_watch_hint`), ESI's refusal of a token that claims
+    the scope is remembered for the session because only a browser login changes it, and a transport
+    failure is warned about every cycle and retried, because the next one may well work.
+
+    The cost is bounded by ESI's own headers, measured 2026-09-13 against /meta/openapi.json: both colony
+    routes publish `x-client-cache-ttl: 600` inside the `char-industry` group (advertised limit 600
+    requests per 15 min), and `Esi.get` will not re-request inside that window. At the default 5-minute
+    interval every other cycle is therefore answered from the in-process cache, a character with four
+    colonies costs at most five conditional GETs per ten minutes, and nothing here polls faster than the
+    endpoint's own stated freshness. Nothing here writes either: ESI implements GET only on both routes."""
+    wanted = sso.resolve_character(args.char) if getattr(args, "char", None) else None
+    warnings, polled, eligible = [], [], False
+    for rec in sso.list_characters():
+        cid = int(rec["character_id"])
+        if wanted is not None and cid != wanted:
+            continue
+        tok = sso.get_access_token(cid)
+        name = tok.get("character_name") or str(cid)
+        if not sso.has_feature(tok, cmd_colonies.FEATURE):
+            continue
+        eligible = True
+        try:
+            report = cmd_colonies.character_colonies(client, tok, detail=True)
+        except cmd_colonies.ColonyAccess as err:
+            warnings += warn_once(warned, f"colonies:{cid}", f"{name}: {err}")
+            continue
+        except (esi_mod.EsiError, RuntimeError) as err:
+            warnings.append(f"{name}: {err}")
+            continue
+        # A colony whose layout could not be read is left out of the observation, so watchstate keeps the
+        # pins it stored for that planet untouched: a failed read must never look like an emptied colony.
+        # Its warning still appears this cycle, because the next poll may well succeed.
+        warnings += list(report.warnings)
+        polled.append((cid, name, [colony for colony in report.colonies if colony.layout is not None]))
+    names = colony_names(client, [colony for _cid, _name, colonies in polled for colony in colonies])
+    observations = tuple(watchstate.ColonyObservation(cid, name,
+                                                      tuple(colony_snapshot(c, names) for c in colonies))
+                         for cid, name, colonies in polled)
+    return ColonyPoll(observations, names, tuple(warnings), eligible)
+
+
+COLONIES_WATCH_COLUMNS = ["character", "colonies", "extractors", "next extraction ends", "oldest layout"]
+
+
+def render_colonies_watch_status(observations, names: dict[int, str], now) -> str:
+    """The colony line of a `skills --watch` frame: what is being watched and when it wants attention.
+
+    `next extraction ends` is the earliest expiry across every colony of that character - the pin to go
+    reprogram first, which is the whole reason to watch planets overnight. `oldest layout` repeats ESI's
+    own caveat where a watcher can see it: a colony nobody has opened in the client for a week reports
+    pins as of then, so its countdown is only as good as that view."""
+    rows, stale = [], False
+    for obs in observations:
+        pins = [pin for colony in obs.colonies for pin in colony.extractors]
+        epochs = [epoch for epoch in (cmd_colonies.epoch_seconds(pin.expiry_time) for pin in pins)
+                  if epoch is not None]
+        ages = [age for age in (cmd_colonies.age_seconds(colony.last_update, now) for colony in obs.colonies)
+                if age is not None]
+        if not epochs:
+            soonest = "-"
+        elif min(epochs) <= now.timestamp():
+            soonest = "due"
+        else:
+            soonest = render.format_duration(min(epochs) - now.timestamp()) + " left"
+        oldest = "-" if not ages else (render.format_duration(max(ages)) + " ago"
+                                       + (" *" if cmd_colonies.is_stale(max(ages)) else ""))
+        stale = stale or cmd_colonies.is_stale(max(ages) if ages else None)
+        rows.append([obs.character_name, str(len(obs.colonies)), str(len(pins)), soonest, oldest])
+    out = [render.table(COLONIES_WATCH_COLUMNS, rows)] if rows else \
+        ["(no colony could be polled this cycle - the warnings above say why)"]
+    if stale:
+        out.append("* ESI recalculates a colony only when it is opened in the game client; an old layout "
+                   "reports pins as of then, not as of now.")
+    return "\n".join(out)

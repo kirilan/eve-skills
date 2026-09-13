@@ -35,9 +35,10 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume; `--group`/`--category NAME` prices everything in one of them, `--fields a,b,c` picks the columns; `--seller CHAR` says what one character keeps per unit after CCP's two cuts and whether listing beats selling now | no for the prices — public ESI, plus local SDE data (`update-data`) to expand a group name; `--seller` needs that character logged in, and its standing with the station's owner comes from the optional `standings` consent |
 | `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
+| `colonies` | Live planetary industry per character: every colony with its planet type, command-centre level, pin count and how old ESI's view of it is; `--detail` adds each extractor with what it produces and when the programmed run ends, plus every facility running a schematic | `--scopes planets` |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
-| `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled | offline (no network) |
+| `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
 | `jobs` | Personal or `--corp` industry jobs | `--scopes jobs` |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
@@ -327,7 +328,7 @@ into in the browser, so run one `login` per character.
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `structures`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `planets`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
@@ -337,6 +338,11 @@ into in the browser, so run one `login` per character.
   prints the fix once (`eve-skills login --scopes structures`). A token that provably lacks the scope is
   never sent probing at all — every refusal costs ESI error-window budget that throttles the rest of the
   run.
+- **Colonies are read-only, and need their own consent.** `colonies` and the colony half of `skills --watch`
+  use `esi-planets.manage_planets.v1`. The name is misleading — ESI's own OpenAPI description (checked
+  2026-09-13) implements **GET only** on both colony routes, so this scope cannot write anything to the game.
+  Without it every colony command prints `Ada Vane: no planets consent - run: eve-skills login --scopes planets`
+  and exits 0, because a token minted before the scope existed is the normal state, not a failure.
 - **Market prices need no consent at all** — `market`, `build-cost` and `pi chain` read the public
   order books, so they work on a fresh install with nothing configured. Only *your own* orders are
   private: `orders` needs the `orders` consent, and `orders --corp` additionally needs `corp-orders`
@@ -1105,6 +1111,54 @@ pivot on it, while the text says "CPU and powergrid" — and `over_budget`, `fit
 the layout costs from whether it is allowed. `planet-type --csv` writes one row per commodity from tier 0
 down, with each product's inputs in its own cell.
 
+### `colonies` — what is actually on your planets right now
+
+```bash
+eve-skills login --scopes planets          # once, per character, in the browser
+eve-skills colonies                        # every colony of every stored character
+eve-skills colonies --char AdaVane --detail
+eve-skills colonies --csv > colonies.csv
+```
+
+`pi` answers what a colony *could* make from the local SDE; `colonies` answers what you have and what it is
+doing. One row per colony: system, planet id, planet type, command-centre level (`upgrade_level`), ESI's own
+pin count, and how long ago that view was taken. `--detail` fetches each colony's pins and adds two tables —
+every extractor with its product, quantity per cycle, cycle time, head count and the instant its programmed
+run ends (`expired 2h 00m ago`, `in 2d 23h`), sorted so the ones that ran out come first, and every facility
+running a schematic with what it makes. Pins that are neither (ECUs, command centres) are counted in one line
+instead of listed.
+
+Two properties of ESI's planetary data shape everything else here:
+
+- **A colony is only recalculated when someone opens it.** Verbatim from ESI's own description of the endpoint
+  (fetched 2026-09-13): *"Note: Planetary information is only recalculated when the colony is viewed through
+  the client. Information will not update until this criteria is met."* `last_update` can lag by months, and a
+  stale stamp does not mean the colony is gone — it means nobody has looked at it in game. Rows whose layout is
+  older than 7 days carry a `*`, explained under the table. Seven days was set against the cycle times in the
+  shipped data (1800–3600 s): a week without a client view is 168 to 336 cycles of drift, and it is also a full
+  planetary-industry round for most chains.
+- **Everything about an extractor comes from ESI itself.** `extractor_details` carries the product type,
+  `qty_per_cycle`, `cycle_time`, the heads and the absolute `expiry_time`; the local snapshot only puts names on
+  ids and says what a facility's schematic produces. So `--detail` still works with no SDE installed: it prints
+  a notice that names came from `/universe/names` and that no recipe is published there, rather than refusing
+  over a ~100 MB download. The same applies to a schematic the snapshot has never heard of — its name comes
+  from `/universe/schematics/<id>`, which publishes no recipe, and the row says so instead of showing an empty
+  `makes` cell.
+
+Cost: the summary is one request per consenting character; `--detail` adds one per colony. Both routes publish
+`x-client-cache-ttl: 600` inside the `char-industry` group and the transport will not re-request inside that
+window, so nothing here polls faster than ESI says its own data is fresh — and both routes are GET only, so
+nothing here can write to the game. A character whose token lacks the scope prints a hint instead of failing the
+run (see [adding consent](#adding-characters-extra-consent-logging-out)).
+
+Machine output: `--json` gives one entry per character with each colony's ESI fields plus `age_seconds`, `stale`
+and `layout_fetched`, and — where a layout was read — `pins_read`, `extractors` (each with `seconds_to_expiry`,
+negative once the run ended) and `facilities`; consent hints, per-colony fetch warnings and naming notices
+travel as the `hints`, `warnings` and `notices` arrays. `--csv` follows the flag: one row per colony by default,
+one row per extractor with `--detail`, where the colony columns repeat so every row says where that extractor
+stands and a colony without one keeps its row with those cells empty. A colony whose pin document ESI refused
+keeps its summary row, loses only its own pins, and says why on stderr; the run still exits 0.
+
 ### `system` — security, planets and jump distance for candidate systems
 
 ```bash
@@ -1243,8 +1297,8 @@ operations by design.
 eve-skills skills --watch          # refresh every 5 minutes (training + your market orders)
 eve-skills skills --watch 1        # every minute (minimum 1)
 eve-skills skills --watch 10 --notify
-eve-skills skills --watch --full   # full per-character views instead of the compact table
 eve-skills skills --watch --no-orders   # training only: leave the order books alone
+eve-skills skills --watch --no-colonies   # leave the planets alone too
 eve-skills orders --watch 1        # the order books on their own, every minute
 eve-skills orders --watch --corp   # corporation orders as well (needs corp-orders consent)
 ```
@@ -1290,6 +1344,17 @@ same corporation can be watched through any colleague's token. Two rules follow 
   way: the open book is refreshed and a disappearance still starts its wait, but nothing is declared
   closed on a cycle that could not check.
 
+`skills --watch` also polls colonies for every character holding the `planets` consent, and `--no-colonies`
+opts out of that the same way. An extraction that ends while the watch is open announces
+`Ice colony in Ditalren - extraction of Heavy Water finished (15/cycle, 3 heads)` once, as
+`extractor_expired`. Two things make that trustworthy without any in-game marker: `expiry_time` is an
+absolute instant, so "it just ended" is a witnessed crossing of the clock rather than a data change, and
+reprogramming an extractor forces ESI to recalculate — a pin moved back into the future returns to being
+watched quietly and its next expiry is a separate event with its own id. The first sight of a colony never
+announces, even for pins that ran out weeks ago. Requests stay inside ESI's stated freshness: both routes
+publish `x-client-cache-ttl: 600`, so at the default interval a character with four colonies costs at most
+five conditional GETs per ten minutes.
+
 ### `events` — recorded watch history
 
 ```bash
@@ -1298,13 +1363,14 @@ eve-skills events --char Somecharacter --limit 200
 eve-skills events --kind order_filled  # repeatable: one kind per flag
 eve-skills events --owner "corp:98356123"      # one owner's order events, by exact key…
 eve-skills events --owner ledger               # …or by part of its name, case-insensitive
+eve-skills events --kind extractor_expired   # extractions that ended while a watch was open
 eve-skills events --json
 eve-skills events --csv > events.csv
 ```
 
 A read-only view of the alert history the watchers record: it never fetches and never writes. Kinds
-are `training_finished`, `queue_empty`, `order_filled`, `order_expired`, `order_cancelled` and
-`order_closed`; `--kind` filters to any subset and composes with the other filters.
+are `training_finished`, `queue_empty`, `order_filled`, `order_expired`, `order_cancelled`,
+`order_closed` and `extractor_expired`; `--kind` filters to any subset and composes with the other filters.
 
 `--char` accepts a stored name or id; a bare numeric id also finds events for characters already
 logged out. Order events belong to an *owner*, not necessarily to a character — a corporation
@@ -1472,8 +1538,8 @@ naming the wrong tree beats naming nothing.
 | `tokens.json` | config | Access + refresh tokens per character, granted scopes, client id/secret | **Secret — live credentials on both platforms.** Written `0600` where mode bits exist and private by inherited profile ACL on Windows; atomic replace, read-modify-write under `tokens.lock` so a running `--watch` and a manual command cannot corrupt each other's write |
 | `config.json` | config | Client id/secret, optional `user_agent` | **Secret** when it holds a secret — written private, updated under `config.lock` |
 | `sp-history.jsonl` | config | `{ts, char_id, total_sp}` rows, last 60 days | Non-secret, local-only SP history; pruned rewrites hold `sp-history.lock` |
-| `watch-state.json` | state | Last queue observations per character, **plus the order owners being watched** under `owners` — one entry per `char:<id>` / `corp:<id>` with its open, pending and already-settled order ids (30-day retention). Both halves are what make watch alerts fire exactly once | Non-secret; deleting it only re-announces whatever was in flight |
-| `events.jsonl` | state | Watch alert history shown by `events` — training and order kinds alike, 365-day retention | Non-secret; append-only JSONL, always written in binary mode so no platform can rewrite its newlines |
+| `watch-state.json` | state | Last queue observations per character, **the order owners being watched** under `owners` — one entry per `char:<id>` / `corp:<id>` with its open, pending and already-settled order ids — **and the colonies being watched** under `colonies`, one entry per character keyed `<planet_id>:<pin_id>` for each extractor with its `expiry_time` and whether it is still live (30-day retention on all three). Those halves are what make watch alerts fire exactly once | Non-secret; deleting it only re-announces whatever was in flight |
+| `events.jsonl` | state | Watch alert history shown by `events` — training, order and planetary-extraction kinds alike, 365-day retention | Non-secret; append-only JSONL, always written in binary mode so no platform can rewrite its newlines |
 | `endpoints.json` | cache | SSO discovery document, cached 24 h | Non-secret |
 | `names.json` | cache | Resolved id→name cache (skills, stations, systems, item types), merged under `names.lock` | Non-secret |
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
@@ -1756,6 +1822,7 @@ settle — order-book depth behind an ask, invention, who owns the blueprint —
 | Order fill state is derived | ESI's order history only states `cancelled` or `expired`. An order that sold out matches neither, so a filled state is inferred from `volume_remain` reaching zero — and an order ESI explains with no history row at all is reported as `order_closed, reason unknown`, never guessed at. |
 | No closure timestamp | ESI publishes no closed-at time. Fills witnessed between two polls are timed at the poll that saw them; closures read out of history are bounded by the order's own expiry and marked `[time estimated]`. In the `--closed` table, `expires` for a cancelled order is when it would have run out, not when it was pulled. |
 | Order history is ~90 days | `orders --closed` and the watch backfill can only reach ESI's history window; older orders are simply gone from ESI. The first watch poll ingests that whole window silently — those rows are marked `[history]` in `events`, not announced as news. |
+| Colony data is only as fresh as the last client view | ESI's own words: *"Planetary information is only recalculated when the colony is viewed through the client."* So `last_update` on a colony can be months old while the extraction timers on it are months out of date; `colonies` marks rows older than 7 days with `*` and says why, and an `extractor_expired` announcement reads "extraction of X finished", never "this extractor is idle", because a player who reprogrammed it minutes ago cannot be contradicted from ESI's stale view. |
 | Traded volume is daily, regional, one day behind | `market --history` comes from a different document than the order book: it has no station granularity (a hub row shows its region's trades), and the newest day is yesterday. The cluster row carries none. |
 | `--global` means k-space + Pochven | The cluster scan walks region ids 10000000-11000000 — 70 regions today. Nullsec, wormhole and unlisted markets are not in it, and a region that fails to answer is reported as missing rather than counted as having no orders. |
 | Market freshness has a floor | ESI regenerates each regional book at most every five minutes, so `Last-Modified` ages below that are not this tool being slow and cannot be improved by polling harder. Nothing here caches a market book to disk: if ESI will not answer, `market` says so instead of showing a stale price. |

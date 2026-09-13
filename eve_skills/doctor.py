@@ -68,6 +68,12 @@ MARKET_PROBE_PATH = market.book_path(MARKET_PROBE_REGION_ID, MARKET_PROBE_TYPE_I
 # The event kinds `events` splits the history by; derived from the vocabulary itself so a future
 # kind is counted under the right heading without anyone remembering to edit this file.
 ORDER_EVENT_KINDS = tuple(k for k in watchstate.EVENT_KINDS if k.startswith("order_"))
+COLONY_EVENT_KINDS = tuple(k for k in watchstate.EVENT_KINDS if k.startswith("extractor_"))
+
+# The optional consent `colonies` and the extraction watcher need. Named here rather than imported from
+# the command module: doctor sits below the commands and must not depend on one, and the scope list this
+# key selects lives in sso.OPTIONAL_SCOPES, which is the single source of truth either way.
+PLANETS_FEATURE = "planets"
 
 
 # ---------------------------------------------------------------------------
@@ -764,16 +770,20 @@ def _check_watch_state(now: float) -> dict:
                            "(transitions since the last readable poll will not be announced)", **fields)
 
     characters, owners = _section(doc, "characters"), _section(doc, "owners")
+    colonies = _section(doc, "colonies")
     corporations = sum(1 for key in owners if str(key).startswith("corp:"))
     open_orders = sum(len(_section(entry, "open")) for entry in owners.values())
     newest = _newest_update([*characters.values(), *owners.values()])
     fields.update(characters=len(characters), order_owners=len(owners),
                   character_order_owners=len(owners) - corporations, corporation_order_owners=corporations,
-                  open_orders=open_orders, state_version=_number(doc.get("version")),
+                  open_orders=open_orders, colony_characters=len(colonies),
+                  watched_extractors=sum(len(_section(entry, "extractors")) for entry in colonies.values()),
+                  state_version=_number(doc.get("version")),
                   newest_update=_iso(newest),
                   age_days=None if newest is None else round((now - newest) / 86400.0, 1))
     detail = (f"watch state: {len(characters)} watched character(s), {len(owners)} order owner(s) "
-              f"({corporations} of them corporations), {open_orders} open order(s) known")
+              f"({corporations} of them corporations), {open_orders} open order(s) known, "
+              f"{len(colonies)} character(s) with colonies watched")
     hint = None
     if characters and not owners:
         detail += "; no order owner yet, so nothing has been watched for fills or expiries"
@@ -790,9 +800,12 @@ def _check_watch_events(now: float) -> dict:
     for row in rows:
         counts[row["kind"]] = counts.get(row["kind"], 0) + 1
     order_events = sum(count for kind, count in counts.items() if kind in ORDER_EVENT_KINDS)
+    colony_events = sum(count for kind, count in counts.items() if kind in COLONY_EVENT_KINDS)
+    training_events = len(rows) - order_events - colony_events
     newest = max((row["ts"] for row in rows), default=None)
-    fields = {"path": _display_path(path), "events": len(rows), "training_events": len(rows) - order_events,
-              "order_events": order_events, "kinds": dict(sorted(counts.items())),
+    fields = {"path": _display_path(path), "events": len(rows), "training_events": training_events,
+              "order_events": order_events, "colony_events": colony_events,
+              "kinds": dict(sorted(counts.items())),
               "unreadable_lines": skipped, "newest": _iso(newest),
               "age_days": None if newest is None else round((now - newest) / 86400.0, 1)}
     try:
@@ -803,8 +816,8 @@ def _check_watch_events(now: float) -> dict:
         return _check("watch.events", OK,
                       "no recorded events yet - the first transition a watcher witnesses is appended here",
                       **fields)
-    detail = (f"event history: {len(rows)} event(s) - {len(rows) - order_events} training, "
-              f"{order_events} market order")
+    detail = (f"event history: {len(rows)} event(s) - {training_events} training, "
+              f"{order_events} market order, {colony_events} planetary extraction")
     if newest is not None:
         detail += f", newest {_duration(now - newest)} ago"
     if skipped:
@@ -813,6 +826,42 @@ def _check_watch_events(now: float) -> dict:
                            f"{_shell_path(path)} "
                            "to silence this; every command reads the rest of the history normally", **fields)
     return _check("watch.events", OK, detail, **fields)
+
+
+def _check_planets_consent(store: dict, now: float) -> dict:
+    """Which stored characters can be asked about planetary colonies - and what the rest will be told.
+
+    `esi-planets.manage_planets.v1` is opt-in (`sso.OPTIONAL_SCOPES["planets"]`) and a refresh token keeps
+    the scopes it was minted with, so an existing login cannot gain it by waiting; only a browser visit
+    adds it. Worth knowing before running `colonies` or letting `skills --watch` go overnight - and no
+    more than worth knowing: every other command works without it, `colonies` prints this same hint per
+    character instead of failing, and ESI implements GET only on both colony routes, so the consent can
+    read a colony but never write to one. Hence warn, never fail.
+    """
+    records = store["records"]
+    holding, unknown = [], []
+    for record in records:
+        view = _character_view(record, now)
+        if not view["scopes_known"]:
+            unknown.append(view["name"])
+        elif sso.has_feature(record, PLANETS_FEATURE):
+            holding.append(view["name"])
+    fields = {"feature": PLANETS_FEATURE, "characters": len(records), "granted": sorted(holding),
+              "unknown_consent": len(unknown)}
+    if not records:
+        return _check("consent.planets", OK,
+                      "no character is stored yet, so there is nothing to grant the planets consent to - "
+                      f"eve-skills login --scopes {PLANETS_FEATURE} asks for it at the first login", **fields)
+    note = (f"; {len(unknown)} record(s) store no scope list, so their consent is unknown" if unknown else "")
+    if holding:
+        return _check("consent.planets", OK,
+                      f"{len(holding)} of {len(records)} stored character(s) hold the planets consent "
+                      f"({', '.join(sorted(holding))}){note}", **fields)
+    return _check("consent.planets", WARN,
+                  f"no stored character has the planets consent - colonies cannot list a planetary colony "
+                  f"and skills --watch cannot announce a finished extraction until one does{note}",
+                  hint=f"run: eve-skills login --scopes {PLANETS_FEATURE} (pick the character in the browser)",
+                  **fields)
 
 # ---------------------------------------------------------------------------
 # network probes (opt-in, unauthenticated, bounded)
@@ -1064,6 +1113,7 @@ def collect(network: bool = False, timeout: float = NET_TIMEOUT, now: float | No
     _guard(checks, "sde", lambda: _check_sde(moment))
     _guard(checks, "callback", _check_callback)
     _guard(checks, "roles", _check_roles)
+    _guard(checks, "consent.planets", lambda: _check_planets_consent(store, moment))
     _guard(checks, "history", lambda: _check_history(moment))
     _guard(checks, "watch", lambda: [_check_watch_state(moment), _check_watch_events(moment)])
 

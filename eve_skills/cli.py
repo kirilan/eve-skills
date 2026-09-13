@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--port", type=int, help="exact loopback callback port (must match the registered redirect URL; default tries 8635-8637)")
     p_login.add_argument("--manual", action="store_true", help="paste the localhost callback URL manually (for remote hosts reached over ssh)")
     p_login.add_argument("--attributes", action="store_true", help="include character attributes (already covered by the standard skills consent)")
-    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,all (each re-authenticates the chosen character only)")
+    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,all (each re-authenticates the chosen character only)")
 
     p_logout = sub.add_parser("logout", help="remove stored tokens")
     p_logout.add_argument("--char", help="only this character (name or id); default removes all")
@@ -124,12 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills.add_argument("--full", action="store_true", help="with --watch: keep the full per-character view instead of the compact status table")
     p_skills.add_argument("--no-orders", action="store_true",
                           help="with --watch: watch training only; do not poll market orders")
+    p_skills.add_argument("--no-colonies", action="store_true",
+                          help="with --watch: skip planetary colonies (no extractor-expiry events); needs login --scopes planets")
 
     sub.add_parser("chars", help="list logged-in characters")
 
     sub.add_parser("summary", help="one line per character (clone state, SP, queue) plus totals")
 
-    p_events = sub.add_parser("events", help="show recorded watch events (training and market orders)")
+    p_events = sub.add_parser("events", help="show recorded watch events (training, market orders and planetary extractions)")
     p_events.add_argument("--char", help="stored character name or id; a bare numeric id also matches logged-out characters")
     p_events.add_argument("--owner", metavar="VALUE",
                           help="only order events of one owner: its exact key (char:90000001, "
@@ -283,6 +285,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_cost.add_argument("--csv", action="store_true",
                               help="CSV material rows on stdout; the notes go to stderr")
 
+    p_colonies = sub.add_parser("colonies", help="live planetary colonies of stored characters (read-only ESI; needs login --scopes planets)")
+    p_colonies.add_argument("--char", help="stored character name or id (default: every stored character)")
+    p_colonies.add_argument("--detail", action="store_true",
+                            help="read each colony's pins too: extractors with the time their extraction "
+                                 "ends, facilities with what they are making, and a count of the rest. "
+                                 "With --csv this switches a row from one colony to one extractor")
+    p_colonies.add_argument("--json", action="store_true", help="machine-readable output")
+    p_colonies.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the table")
+
     p_pi = sub.add_parser("pi", help="planetary industry: recipe trees, a colony's CPU/powergrid budget "
                                      "and what one planet type can make alone (recipes from local SDE "
                                      "data; prices from public ESI, no login)")
@@ -405,7 +416,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "travel": exports.cmd_travel, "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system}
+            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:

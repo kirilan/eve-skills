@@ -22,7 +22,7 @@ directories.
 The persisted payload is character ids/names, skill ids/names/levels and ESI
 timestamps.
 
-Two documents, one discipline. Orders follow the same rules as training, because the traps have the
+One discipline for every poll. Orders follow the same rules as training, because the traps have the
 same shape:
 
 - A first sight of an owner ingests ESI's ~90 days of order history as *backfilled* events: recorded
@@ -35,6 +35,13 @@ same shape:
 - An order that left the live book but is missing from history waits out a grace period before its
   reason is declared unknown, and a cycle whose history fetch failed concludes nothing at all: a
   partial fetch must not look like a transition either.
+
+Colonies add a third poll and one new kind of fact: an extractor's programmed extraction has ended. It
+is detected by comparing ESI's absolute `expiry_time` against the clock instead of diffing two
+documents - which is what makes it reliable even though CCP recalculates a colony only when a player
+opens it in the client (quoted in `cmd_colonies`). Nothing has to change server-side for the fact to
+become true: poll N reads an expiry in the future, poll N+1 reads the same unchanged field and `now`
+has passed it.
 
 A watch cycle is read -> diff -> append -> write, and it can be interrupted at any point: the diff is
 pure, state is written only after events are claimed, and event ids are derived from the transition
@@ -63,7 +70,8 @@ ORDER_MEMORY_DAYS = 120      # slightly past ESI's ~90-day history: longer, and 
 
 # Every kind this module can emit; `events --kind` validates against this list.
 EVENT_KINDS = ("training_finished", "queue_empty",
-               "order_filled", "order_expired", "order_cancelled", "order_closed")
+               "order_filled", "order_expired", "order_cancelled", "order_closed",
+               "extractor_expired")
 
 OWNER_KINDS = ("char", "corp")             # the two halves of an owner key, e.g. "corp:98356123"
 STILL_OPEN = "open"                        # a history row ESI still calls open is not a closure
@@ -156,7 +164,10 @@ def _parse_key(key: str) -> tuple[int, int] | None:
 
 
 def empty_state() -> dict:
-    return {"version": SCHEMA_VERSION, "characters": {}, "owners": {}}
+    """A state with one section per poll kind: `characters` for the training queue, `owners` for market
+    orders, `colonies` for planetary extractors. Each is keyed by the id its poll addresses it by, and
+    each observe function rewrites only its own."""
+    return {"version": SCHEMA_VERSION, "characters": {}, "owners": {}, "colonies": {}}
 
 
 def _characters(state: dict) -> dict[int, dict]:
@@ -553,6 +564,202 @@ def observe_orders(state: dict, observations: Sequence[OrderObservation],
 
 
 # ---------------------------------------------------------------------------
+# Colonies: the same discipline over a clock instead of a document change
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ExtractorPin:
+    """One extractor pin as one poll saw it.
+
+    `expiry_time` is ESI's own ISO stamp for the end of the programmed extraction and the only field a
+    transition is derived from. The rest exist so an announcement can say *what* ran out without a
+    second fetch: this module resolves nothing over the network, so names arrive with the pin."""
+
+    pin_id: int
+    type_id: int | None = None
+    type_name: str | None = None
+    product_type_id: int | None = None
+    product_name: str | None = None
+    qty_per_cycle: int | None = None
+    cycle_time: int | None = None
+    heads: int | None = None
+    expiry_time: str | None = None
+
+
+@dataclass(frozen=True)
+class ColonySnapshot:
+    """One colony's identity plus the extractors on it, as one poll read them."""
+
+    planet_id: int
+    planet_type: str = "unknown"
+    solar_system_id: int | None = None
+    solar_system_name: str | None = None
+    last_update: str | None = None
+    extractors: tuple = ()
+
+
+@dataclass(frozen=True)
+class ColonyObservation:
+    """Everything one successful pair of fetches says about one character's colonies.
+
+    Per character, not per colony - the same reason `OrderObservation` is per owner. An empty
+    `colonies` tuple is ESI's answer "this character owns no planet", which is a fact worth recording
+    (it retires every pin that character had watched); a failed call produces no observation at all and
+    must change nothing. Colonies whose *layout* could not be read are left out of the snapshot by the
+    poller, so an unread layout cannot look like an emptied one."""
+
+    character_id: int
+    character_name: str
+    colonies: tuple = ()
+
+
+def _epoch(value) -> float | None:
+    """An ESI ISO stamp as epoch seconds; absent or unparseable is unknown, never a guessed instant."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = render.parse_opt(value)
+    except ValueError:
+        return None
+    if moment is None:
+        return None
+    return moment.timestamp() if moment.tzinfo else moment.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _extractor_entry(pin: ExtractorPin, colony: ColonySnapshot, status: str, epoch: float | None,
+                     now_ts: float) -> dict:
+    """What we keep about one extractor pin: the pin, its colony, and what we concluded about it.
+
+    The colony fields are copied into every entry because `events.jsonl` is read back on its own - by
+    `events`, possibly a year later and with no network - and a payload saying only "pin 7811 of planet
+    60012526" describes nothing a player could act on."""
+    return {
+        "planet_id": colony.planet_id, "planet_type": colony.planet_type,
+        "solar_system_id": colony.solar_system_id, "solar_system_name": colony.solar_system_name,
+        "colony_last_update": colony.last_update,
+        "pin_id": pin.pin_id, "extractor_type_id": pin.type_id, "extractor_name": pin.type_name,
+        "product_type_id": pin.product_type_id, "product_name": pin.product_name,
+        "qty_per_cycle": pin.qty_per_cycle, "cycle_seconds": pin.cycle_time, "heads": pin.heads,
+        "expiry_time": pin.expiry_time, "status": status, "epoch": epoch, "seen": now_ts,
+    }
+
+
+def _extractor_event(character_id: int | None, character_name: str | None, pin_key: str,
+                     entry: Mapping[str, object], now_ts: float) -> WatchEvent:
+    """The event for one extractor whose programmed extraction has just ended.
+
+    The id names the fact - this pin, on this planet, of this character, ran out at this instant - and
+    never a wall clock, exactly as `_order_event` does. A crash replay before the state write, or a
+    second watcher polling the same character, therefore lands on the same id and `_append_events`
+    refuses the duplicate; reprogramming the extractor moves `expiry_time`, so its next expiry is a
+    different fact that deserves its own row.
+
+    `ts` is the expiry itself rather than the detection time: it is arithmetic on ESI's own field, and
+    a poll that runs late should not date the game event to the poll. `min()` with `now_ts` only matters
+    for a clock disagreement (a machine whose clock ran ahead and was corrected)."""
+    planet_id, _, pin_id = str(pin_key).partition(":")
+    expiry = _float(entry.get("epoch"))
+    return WatchEvent(
+        id=_event_id("extractor_expired", character_id, planet_id, pin_id, entry.get("expiry_time")),
+        ts=now_ts if expiry is None else min(expiry, now_ts),
+        kind="extractor_expired", character_id=character_id, character_name=character_name,
+        data={"planet_id": _int(entry.get("planet_id")), "planet_type": entry.get("planet_type"),
+              "solar_system_id": _int(entry.get("solar_system_id")),
+              "solar_system_name": entry.get("solar_system_name"),
+              "pin_id": _int(pin_id), "extractor_type_id": _int(entry.get("extractor_type_id")),
+              "extractor_name": entry.get("extractor_name"),
+              "product_type_id": _int(entry.get("product_type_id")),
+              "product_name": entry.get("product_name"), "qty_per_cycle": entry.get("qty_per_cycle"),
+              "cycle_seconds": entry.get("cycle_seconds"), "heads": entry.get("heads"),
+              "expiry_time": entry.get("expiry_time"),
+              "colony_last_update": entry.get("colony_last_update")},
+    )
+
+
+def _extractor_status(epoch: float | None, now_ts: float) -> str:
+    """live / done / unknown for one pin, from its expiry alone.
+
+    `unknown` is a state that can never announce: no parseable expiry means either nothing is
+    programmed or ESI stopped saying, and neither is evidence that something ended."""
+    if epoch is None:
+        return "unknown"
+    return "done" if epoch <= now_ts else "live"
+
+
+def observe_colonies(state: dict, observations: Sequence[ColonyObservation],
+                     now_ts: float) -> tuple[dict, list[WatchEvent]]:
+    """(new_state, events) for one colony poll. Pure: no disk, no clock, no side effects.
+
+    Rules the watch loop depends on:
+    - First sight of a character records every pin and announces nothing, pins that already ran out
+      included. A colony that emptied last month is history, not something that just happened - the
+      same rule an owner's order backlog follows.
+    - An event needs a witnessed `live` -> `done` transition. `expiry_time` moving back into the future
+      means the player reprogrammed the extractor in-game, so the pin returns to `live` and nothing
+      fires; its next expiry is a new fact with a new id.
+    - Pins are keyed `<planet_id>:<pin_id>`, so two colonies of one character cannot collide and ESI
+      reusing a pin id on another planet stays distinct.
+    - A planet absent from the observation keeps its stored pins: an unread layout is not an emptied
+      one, and dropping them would silently unwatch the colony until it was read again.
+    - A character absent from the poll keeps its prior entry: a failed fetch is not a transition.
+    """
+    # A copy, never the caller's dict: this function is pure, and a cycle replayed against one state
+    # object - or a state kept around for the next poll - must see exactly what it saw the first time.
+    raw = state.get("colonies")
+    stored = {str(key): entry for key, entry in raw.items()} if isinstance(raw, dict) else {}
+    events: list[WatchEvent] = []
+    touched: set[str] = set()
+
+    for obs in observations:
+        ident = _int(obs.character_id)
+        if ident is None:
+            continue                      # without an id there is nothing to key the entry on
+        key = str(ident)
+        touched.add(key)
+        prior = stored.get(key) or {}
+        prior_pins = prior.get("extractors")
+        known = ({str(k): v for k, v in prior_pins.items() if isinstance(v, dict)}
+                 if isinstance(prior_pins, dict) else {})
+
+        live_now: dict[str, dict] = {}
+        read_planets: set[int] = set()
+        for colony in obs.colonies:
+            planet_id = _int(colony.planet_id)
+            if planet_id is None:
+                continue
+            read_planets.add(planet_id)    # this layout *was* read, so its pins may legitimately be gone
+            for pin in colony.extractors:
+                pin_id = _int(pin.pin_id)
+                if pin_id is None:
+                    continue
+                epoch = _epoch(pin.expiry_time)
+                status = _extractor_status(epoch, now_ts)
+                live_now[f"{planet_id}:{pin_id}"] = _extractor_entry(pin, colony, status, epoch, now_ts)
+
+        for pin_key, entry in live_now.items():
+            was = str(known.get(pin_key, {}).get("status") or "")
+            if entry["status"] == "done" and was == "live":
+                events.append(_extractor_event(ident, obs.character_name, pin_key, entry, now_ts))
+
+        # Pins on planets this poll did not read carry over untouched. Two reasons: an unread layout is
+        # not an emptied one, so dropping them would silently unwatch the colony until it was readable
+        # again; and a pin nobody read this cycle is not evidence that anything ended, so carrying it
+        # back in after the transition check above keeps a stale `live` from announcing on its own.
+        for pin_key, entry in known.items():
+            if _int(entry.get("planet_id")) not in read_planets:
+                live_now[pin_key] = entry
+
+        stored[key] = {"name": obs.character_name, "extractors": live_now, "updated": now_ts}
+
+    kept = {key: entry for key, entry in stored.items()
+            if key in touched or now_ts - float(entry.get("updated") or 0) <= STATE_RETENTION_DAYS * 86400}
+    # Colonies live in their own section: `characters` holds queue observations with a different shape,
+    # and each poll preserves what the others wrote.
+    return {**state, "version": SCHEMA_VERSION,
+            "colonies": {key: entry for key, entry in kept.items()}}, events
+
+
+# ---------------------------------------------------------------------------
 # Persistence: claim + append under one lock, exactly once
 # ---------------------------------------------------------------------------
 
@@ -625,6 +832,7 @@ def _append_events(events: Sequence[WatchEvent], now_ts: float) -> list[WatchEve
 
 def commit(observations: Sequence[CharacterObservation],
            order_observations: Sequence[OrderObservation] = (),
+           colony_observations: Sequence[ColonyObservation] = (),
            now_ts: float | None = None) -> list[WatchEvent]:
     """Persist one poll and return only the transitions this caller newly claimed.
 
@@ -634,15 +842,16 @@ def commit(observations: Sequence[CharacterObservation],
     which this function then withholds from its caller, so the replay is silent
     rather than a second announcement of one transition.
 
-    Both document pairs share that one lock, one state file and one event stream, so a cycle that
-    saw training finish *and* an order fill cannot claim one half and lose the other to a crash in
-    between. Each half preserves what the other wrote.
+    Every poll kind shares that one lock, one state file and one event stream, so a cycle that saw
+    training finish, an order fill *and* an extractor run out cannot claim some halves and lose the rest
+    to a crash in between. Each half preserves what the others wrote.
     """
     now_ts = time.time() if now_ts is None else float(now_ts)
     with _commit_lock():
         new_state, events = observe(load_state(), observations, now_ts)
         new_state, order_events = observe_orders(new_state, order_observations, now_ts)
-        events = events + order_events
+        new_state, colony_events = observe_colonies(new_state, colony_observations, now_ts)
+        events = events + order_events + colony_events
         if events:
             events = _append_events(events, now_ts)
         storage.atomic_write_json(state_file(), new_state)

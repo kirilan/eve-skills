@@ -402,6 +402,27 @@ MARKET_IDS: dict[str, dict[str, list[int]]] = {
 # collapse into one set of rows instead of reporting them twice.
 CORP_SHARED = 98356123
 
+# Planetary universe. The ids are invented like every other id in this file; the *shape* of the two
+# documents is not - both were read out of ESI's published /meta/openapi.json on 2026-09-13, which lists
+# GET as the only method either path implements and marks `expiry_time`, `extractor_details` and
+# `factory_details` optional. Two colonies in one system plus one elsewhere covers every branch
+# `colonies` has: extractors with and without a programmed cycle, a schematic the local snapshot knows
+# and one it has never heard of, and pins that are neither.
+COLONY_SYSTEM_A = 30002540     # both of Ada's colonies
+COLONY_SYSTEM_B = 30002788     # Vela's, so a per-character view has two systems to place
+COLONY_PLANET_ICE = 50008625
+COLONY_PLANET_STORM = 50008626
+COLONY_PLANET_BARREN = 50011977
+PI_EXTRACTOR_HEAVY = 24700     # a pin whose `heads` arrive as a list of positions
+PI_EXTRACTOR_LIGHT = 24698     # a pin whose `heads` arrive as a count
+PI_PRODUCT_HEAVY = 3837
+PI_PRODUCT_WATER = 3831
+PI_FACILITY_PROCESSOR = 20041
+PI_PIN_COMMAND = 4354          # neither extractor nor running a schematic: counted, not listed
+PI_PIN_ECU = 2468              # and a second of those, so the count is what has to print
+SCHEMATIC_KNOWN = 7001         # named by the synthetic snapshot test_colonies installs
+SCHEMATIC_UNKNOWN = 9999       # nameable only by /universe/schematics
+
 
 NAMES: dict[int, str] = {
     SKILL_CAPPED: "Capped Skill",
@@ -429,6 +450,15 @@ NAMES: dict[int, str] = {
     91000001: "Ada Vane",
     91000002: "Vela Krinn",
     91000003: "Mira Solen",
+    COLONY_SYSTEM_A: "Ditalren",
+    COLONY_SYSTEM_B: "Okagaiken",
+    PI_EXTRACTOR_HEAVY: "Heavy Water Extractor Mine",
+    PI_EXTRACTOR_LIGHT: "Light Water Extractor Mine",
+    PI_PRODUCT_HEAVY: "Heavy Water",
+    PI_PRODUCT_WATER: "Water",
+    PI_FACILITY_PROCESSOR: "Basic Processor Factory",
+    PI_PIN_COMMAND: "Command Center",
+    PI_PIN_ECU: "Extractor Control Unit",
 }
 
 
@@ -534,6 +564,71 @@ class OrderBook:
     history_error: tuple | None = None    # (status, payload): the history call fails this cycle
 
 
+@dataclass
+class ColonyLayout:
+    """One colony's pin document, mutable between watch cycles.
+
+    `pins` is served verbatim, so dragging an extractor's `expiry_time` across `now` between two polls
+    is one assignment - the exact transition the `extractor_expired` event exists for."""
+    pins: list = field(default_factory=list)
+    links: list = field(default_factory=list)
+    routes: list = field(default_factory=list)
+    error: tuple | None = None        # (status, payload): this colony's pins fail this cycle
+
+
+@dataclass
+class Colonies:
+    """One character's colony list plus every planet's layout."""
+    rows: list = field(default_factory=list)
+    layouts: dict = field(default_factory=dict)
+
+
+def colony_row(planet_id: int, planet_type: str, solar_system_id: int = COLONY_SYSTEM_A, *,
+               owner_id: int = 91000001, ccu: int = 4, pins: int = 3, age: float = -3600) -> dict:
+    """One row of `/characters/{id}/planets`, stamped `age` seconds ago.
+
+    `last_update` is the field the stale marker reads, so a test needs to place it in the past without
+    hard-coding today's date - hence an offset rather than a literal."""
+    return {"solar_system_id": solar_system_id, "planet_id": planet_id, "planet_type": planet_type,
+            "owner_id": owner_id, "last_update": iso(age), "upgrade_level": ccu, "num_pins": pins}
+
+
+def extractor_pin(pin_id: int, type_id: int, product_type_id: int | None, *, qty: int = 15,
+                  cycle: int = 3600, heads=None, expiry: str | None = None) -> dict:
+    """One extractor pin, with ESI's nested `extractor_details`.
+
+    `heads` is left as the caller sent it - a list of positions or a plain count - because both appear
+    in the wild and only their length is ever printed. `expiry=None` is the documented shape for an
+    extractor with nothing programmed, not a missing field to paper over."""
+    details: dict = {"product_type_id": product_type_id}
+    if qty is not None:
+        details["qty_per_cycle"] = qty
+    if cycle is not None:
+        details["cycle_time"] = cycle
+    if heads is not None:
+        details["heads"] = heads
+    pin = {"pin_id": pin_id, "type_id": type_id, "latitude": -12.5, "longitude": 140.2}
+    if expiry is not None:
+        pin["expiry_time"] = expiry
+    pin["extractor_details"] = details
+    return pin
+
+
+def facility_pin(pin_id: int, type_id: int, schematic_id: int | None, *, nested: bool = True) -> dict:
+    """One facility pin. `nested=False` puts the schematic where rows have historically carried it."""
+    pin = {"pin_id": pin_id, "type_id": type_id, "latitude": 3.25, "longitude": -88.5}
+    if schematic_id is not None and nested:
+        pin["factory_details"] = {"schematic_id": schematic_id}
+    elif schematic_id is not None:
+        pin["schematic_id"] = schematic_id
+    return pin
+
+
+def plain_pin(pin_id: int, type_id: int) -> dict:
+    """A pin with no timer at all - command centre, ECU, storage, launchpad."""
+    return {"pin_id": pin_id, "type_id": type_id, "latitude": 0.0, "longitude": 0.0}
+
+
 class FakeEsiEnv:
     """Temporary XDG tree + fake transport + two seeded stored characters.
 
@@ -555,6 +650,7 @@ class FakeEsiEnv:
         self.state_home = os.path.join(root, "state")
         self.server = FakeEsiServer()
         self.order_books: dict[str, OrderBook] = {}
+        self.colony_books: dict[int, Colonies] = {}
         self.names = dict(NAMES)
         self._patchers = []
 
@@ -692,6 +788,10 @@ class FakeEsiEnv:
         # the ones that do not must see neither an unrouted path nor a stray event.
         self.install_watch_orders(ADA)
         self.install_watch_corp_orders(CORP_SHARED, ADA.token)
+        # The same reasoning for planets: Ada holds the `planets` consent, so a watch cycle asks her for
+        # colonies whether or not the test is about them. Serve none by default - unrouted paths are a loud
+        # AssertionError in this fake, and a stray colony event would poison an unrelated assertion.
+        self.install_colonies(ADA)
 
     def set_queue(self, char: Character, queue: list[dict]):
         """Replace one character's live queue and republish the route (multi-cycle watch)."""
@@ -929,6 +1029,53 @@ class FakeEsiEnv:
                         doc=CORP_HISTORY)
         self.server.get(f"/characters/{ADA.character_id}/roles", token=ADA.token,
                         doc={"roles": {"Station_Manager": 1}, "titles": []})
+
+    # -- colony routes ------------------------------------------------------------
+
+    def install_colonies(self, char: Character, planets=()) -> "Colonies":
+        """Both colony documents for one stored character, editable between cycles.
+
+        `planets` is a list of (colony-list row, layout pins) pairs. Like `install_order_book`, both
+        routes are handlers over live state rather than frozen fixtures: an extraction has to be *seen*
+        to run out across two polls, and only a handler can serve the same pin with an expiry that has
+        just crossed `now`. A planet's pin route is registered for every planet in `pairs`, so a colony
+        discovered later needs one more call here - loudly, which is the point.
+        """
+        state = Colonies([dict(row) for row, _pins in planets],
+                         {row["planet_id"]: ColonyLayout(list(pins)) for row, pins in planets})
+        self.colony_books[char.character_id] = state
+        cid = char.character_id
+
+        def rows_handler(_call: Call):
+            return list(state.rows)
+
+        self.server.get(f"/characters/{cid}/planets", token=char.token, handler=rows_handler)
+
+        def layout_handler_for(planet_id: int):
+            def handler(call: Call):
+                layout = state.layouts[planet_id]
+                if layout.error is not None:
+                    # One colony's pins can fail on their own while the list still answers - the case
+                    # `character_colonies` collects into warnings instead of losing the whole report.
+                    raise http_error(call.url, *layout.error)
+                return {"pins": list(layout.pins), "links": list(layout.links),
+                        "routes": list(layout.routes)}
+            return handler
+
+        for row, _pins in planets:
+            self.server.get(f"/characters/{cid}/planets/{row['planet_id']}", token=char.token,
+                            handler=layout_handler_for(row["planet_id"]))
+        return state
+
+    def colony_book(self, char: Character) -> "Colonies":
+        """The live colony documents a previous `install_colonies` registered for that character."""
+        return self.colony_books[char.character_id]
+
+    def install_schematic(self, schematic_id: int, name: str, cycle_time: int = 1800):
+        """The public schematic fallback, which publishes a name and a cycle and no recipe."""
+        self.server.get(f"/universe/schematics/{schematic_id}",
+                        doc={"schematic_id": schematic_id, "schematic_name": name,
+                             "cycle_time": cycle_time})
 
     # -- market routes ----------------------------------------------------------
 
