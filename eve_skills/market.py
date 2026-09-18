@@ -13,6 +13,7 @@ import os
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 
 from . import esi as esi_mod, paths, storage
 
@@ -476,30 +477,51 @@ def quote_cluster(client: esi_mod.Esi, type_id: int, regions: Sequence[tuple[int
     return _reduce(label, rows, esi_mod.fold_meta(metas), regions_scanned=scanned, regions_failed=failed)
 
 
-def history_stats(client: esi_mod.Esi, region_id: int, type_id: int, days: int) -> HistoryStats | None:
-    """Daily traded volume for the last `days` days a region reported; None when it never traded.
+def _history_day(value) -> date | None:
+    """The calendar day of one history row's `date` - ESI sends `2026-08-10`, fixtures a full stamp."""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def history_stats(client: esi_mod.Esi, region_id: int, type_id: int, days: int,
+                  now: float | None = None) -> HistoryStats | None:
+    """Traded volume over the last `days` calendar days a region reported; None when it never traded.
 
     Read with `get_meta` rather than the paginated helper: this endpoint answers with every day it
     has in one response and sends no `X-Pages`, so appending `page=` would be guessing at a
-    behaviour that was not verified. Rows are sorted before the window is taken - live ESI returns
-    them oldest-first, and the newest days are what "last N days" must mean if that ever changes.
-    Per-day averages divide by the rows actually present, so a type with a short history is not
-    made to look quieter than it was."""
+    behaviour that was not verified.
+
+    ESI omits the days nothing traded, so the window is calendar days, never the last `days` rows:
+    for a type that trades once a week, 30 rows reach back seven months, and dividing by the rows
+    present called a handful of sales a month "one a day". The window ends on the newest day the
+    document covers - the day before `Last-Modified`, since history is one day behind, or the day
+    before `now` when the header is missing - or on the newest row if that is later, so a clock
+    or header that runs behind the data cannot drop a day it did report. Per-day figures divide by
+    `days` for the same reason, and a type that traded before the window but not within it reports
+    zero volume, not None: "nothing sold this month" is an answer."""
     rows, meta = client.get_meta(f"/markets/{region_id}/history?type_id={type_id}")
-    dated = sorted((row for row in rows if row.get("date")), key=lambda row: str(row["date"]))
-    window = dated[-days:] if days > 0 else dated
-    if not window:
+    dated = sorted(((day, row) for row in rows if (day := _history_day(row.get("date"))) is not None),
+                   key=lambda pair: pair[0])
+    if not dated:
         return None
+    stamp = meta.last_modified if meta.last_modified is not None else (time.time() if now is None else now)
+    covered = datetime.fromtimestamp(stamp, timezone.utc).date() - timedelta(days=1)
+    end = max(covered, dated[-1][0])
+    start = end - timedelta(days=days - 1) if days > 0 else dated[0][0]
+    window = [row for day, row in dated if start <= day <= end]
     total = sum(int(row.get("volume") or 0) for row in window)
     prices = [float(row["average"]) for row in window if row.get("average") is not None]
+    span = days if days > 0 else (end - start).days + 1
     return HistoryStats(
         region_id=region_id,
         days=days,
         rows=len(window),
         total_volume=total,
-        volume_per_day=total / len(window),
+        volume_per_day=total / span,
         average_price=sum(prices) / len(prices) if prices else None,
-        newest_date=str(window[-1]["date"]),
+        newest_date=str(dated[-1][1]["date"]),
         meta=meta,
     )
 

@@ -68,8 +68,11 @@ def _grouped(value) -> str:
 
 
 def _rate(value) -> str:
-    """Units per day: ESI's own figure is a float, and a daily rate wants no decimals."""
-    return "-" if value is None else f"{value:,.0f}"
+    """Units per day: whole units for a busy type, two decimals below ten a day - a carrier that sells
+    eight times in ninety days trades 0.09 a day, and rounding that to `0` says nothing sold at all."""
+    if value is None:
+        return "-"
+    return f"{value:,.0f}" if value >= 10 else f"{value:.2f}"
 
 
 def _percent(value) -> str:

@@ -244,6 +244,7 @@ MARKET_HISTORY: dict[int, list[dict]] = {
                     "type_id": 34} for day in range(1, 11)],
     MARKET_DOMAIN: [],
 }
+MARKET_HISTORY_MODIFIED = "Tue, 11 Aug 2026 11:05:00 GMT"
 
 # PLEX trades on the account-wide vault market, which no regional order book exposes - so its book
 # is empty in every region here exactly as it is live, and only `/markets/prices` knows it at all.
@@ -1117,7 +1118,9 @@ class FakeEsiEnv:
         wanted = call.query.get("type_id")
         if wanted is not None:
             rows = [r for r in rows if str(r["type_id"]) == wanted]
-        return rows, {"Last-Modified": http_date(-86400)}
+        # Pinned to the fixture's own calendar rather than the wall clock: ESI's history document is
+        # stamped the morning after the newest day it covers, and the window counts back from there.
+        return rows, {"Last-Modified": MARKET_HISTORY_MODIFIED}
 
     # -- build-cost routes ------------------------------------------------------
 
