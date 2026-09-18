@@ -684,7 +684,9 @@ separately. `--global` scans every region with a market (k-space plus Pochven �
 adds a `global (70 regions)` row whose freshness line is the *oldest* book that fed it, and prints
 `warning: … N of M regions did not answer; their orders are missing from the numbers above` when part
 of the cluster stayed silent. `--history DAYS` appends `traded/day*` and `traded total*`, which come
-from a different ESI document with real caveats — hence the asterisk and the footnote:
+from a different ESI document with real caveats — hence the asterisk and the footnote. `DAYS` is
+calendar days ending on the newest day that document covers: ESI leaves out the days nothing traded,
+so a quiet type's missing days count as zero rather than stretching the window back months.
 
 ```text
 * ESI traded volume is daily and one day behind, and only exists per region: a hub row shows its

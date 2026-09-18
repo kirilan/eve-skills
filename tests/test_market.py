@@ -1449,5 +1449,69 @@ class SellerTests(MarketTestCase):
         self.assertNotIn("at one place and an instant sale at another", out)
 
 
+class HistoryWindowTests(unittest.TestCase):
+    """`--history N` is N calendar days, because ESI leaves out the days nothing traded."""
+
+    # 11:05 UTC on 2026-09-18: the document covers through 2026-09-17.
+    MODIFIED = 1_789_729_500.0
+
+    class Client:
+        def __init__(self, rows, last_modified):
+            self.rows, self.last_modified = rows, last_modified
+
+        def get_meta(self, path, token=None, cache=True):
+            return self.rows, esi.Meta(last_modified=self.last_modified)
+
+    @staticmethod
+    def row(day, volume, average=2.0e9):
+        return {"date": day, "volume": volume, "average": average, "highest": average,
+                "lowest": average, "order_count": 1}
+
+    def stats(self, rows, days, last_modified=MODIFIED, now=None):
+        return market.history_stats(self.Client(rows, last_modified), 10000002, 23757, days, now=now)
+
+    def test_a_thin_type_is_not_one_sale_a_day(self):
+        # A carrier that sold on 30 separate days spread over eight months: the old row-count window
+        # took all 30 rows and reported 35 sales in "30 days" - 1.17 a day.
+        rows = [self.row(f"2026-{month:02d}-{day:02d}", 1) for month in range(2, 10)
+                for day in (1, 9, 17, 25) if (month, day) <= (9, 9)][-30:]
+        rows[-1]["volume"] = 6
+        stats = self.stats(rows, 30)
+        self.assertEqual(sum(row["volume"] for row in rows), 35)
+        # 30 days back from 09-17 starts at 08-19: only 08-25, 09-01 and 09-09 fall inside.
+        self.assertEqual((stats.rows, stats.total_volume), (3, 8))
+        self.assertAlmostEqual(stats.volume_per_day, 8 / 30)
+
+    def test_the_window_ends_on_the_day_before_last_modified_not_on_the_newest_trade(self):
+        rows = [self.row("2026-06-01", 5), self.row("2026-09-17", 2)]
+        stats = self.stats(rows, 7)
+        self.assertEqual((stats.rows, stats.total_volume), (1, 2))
+        self.assertAlmostEqual(stats.volume_per_day, 2 / 7)
+
+    def test_a_type_that_traded_only_before_the_window_reports_zero_not_none(self):
+        stats = self.stats([self.row("2026-03-01", 4)], 30)
+        self.assertEqual((stats.rows, stats.total_volume, stats.volume_per_day), (0, 0, 0.0))
+        self.assertIsNone(stats.average_price)
+        self.assertEqual(stats.newest_date, "2026-03-01")
+
+    def test_a_type_that_never_traded_is_none(self):
+        self.assertIsNone(self.stats([], 30))
+
+    def test_a_row_newer_than_the_header_still_counts(self):
+        # A header that runs behind the rows must not cut off a day the document did report.
+        stats = self.stats([self.row("2026-09-20", 3)], 1)
+        self.assertEqual(stats.total_volume, 3)
+
+    def test_a_slow_rate_keeps_its_decimals_in_the_text_table(self):
+        self.assertEqual(cmd_market._rate(8 / 90), "0.09")
+        self.assertEqual(cmd_market._rate(70.0), "70")
+        self.assertEqual(cmd_market._rate(None), "-")
+
+    def test_without_last_modified_the_clock_stands_in(self):
+        stats = self.stats([self.row("2026-09-17", 3), self.row("2026-09-10", 5)], 2,
+                           last_modified=None, now=self.MODIFIED)
+        self.assertEqual(stats.total_volume, 3)
+
+
 if __name__ == "__main__":
     unittest.main()
