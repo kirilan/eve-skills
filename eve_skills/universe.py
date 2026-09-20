@@ -45,8 +45,10 @@ UNKNOWN = "unknown"
 # overflows it, and 404 for the whole batch when one id is not a nameable universe id (both
 # verified against live ESI on 2026-09-08). Item-derived ids - structures, ships, containers -
 # are far above this bound, so they must never join a names request: one citadel would cost every
-# station name in the batch.
-INT32_MAX = 2 ** 31 - 1
+# station name in the batch. `esi.resolve_names` enforces the same bound for every caller; this
+# module still applies it itself, because it decides which ids are worth probing as structures
+# before any of them reach a names request.
+INT32_MAX = esi_mod.INT32_MAX
 
 # The assets/names endpoints take at most 1000 ids per call.
 ASSET_NAMES_CHUNK = 1000

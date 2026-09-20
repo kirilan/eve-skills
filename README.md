@@ -430,6 +430,20 @@ stays machine-readable. Corporation variants (`jobs --corp`, `inventory --corp`)
 the matching director / Account-Manager role on that character; without it ESI refuses and the tool
 prints a per-character warning rather than failing the whole command.
 
+`jobs` rows are chronological by end date, and the columns mean:
+
+| column | what it says |
+| --- | --- |
+| `status` | ESI's own status, plus two it does not send. **`ready`** is a job whose `end_date` has passed while ESI still calls it `active` - built and waiting for somebody to click deliver, which is the state worth acting on. **`paused`** is a job whose clock has stopped (its structure lost power, say); its `end_date` went stale when it stopped, so no time is quoted for it. |
+| `activity` | manufacturing, copying, invention, reaction, or ME/TE research. An activity code CCP adds later shows as `activity N` rather than being guessed at. |
+| `product` | what the job hands back. Research and copy jobs produce no new item, so that is the blueprint itself. |
+| `runs` | how many times the job runs. `1 x60` is one copy licensed for sixty runs; a finished job shows `3/10` - three successful runs out of ten attempted, the figure that decides whether an invention job paid. |
+| `time` | time left for a running job, otherwise when it ended. |
+| `installed in` | the facility. Player structures are not nameable through `/universe/names`, so those stay a bare id. |
+
+Both endpoints answer with running jobs only; `--completed` is what adds the delivered and
+cancelled ones.
+
 ### `inventory` — what you own, where it is, what it is worth
 
 ```bash

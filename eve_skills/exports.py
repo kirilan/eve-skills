@@ -15,8 +15,18 @@ from dataclasses import dataclass, field
 
 from . import esi as esi_mod, market, render, sso, universe
 
-ACTIVITY = {1: "manufacturing", 2: "time efficiency research", 3: "material efficiency research",
-            4: "copying", 5: "invention", 8: "reaction"}
+# CCP's industry activity codes, as the SDE's `industryActivities` numbers them - ESI sends the
+# number, never a name. 2 and 6 were never used and 7 (reverse engineering) went away with T3
+# invention, so a live job carries one of these six; any other code stays visible as itself rather
+# than being guessed at.
+ACTIVITY = {1: "manufacturing", 3: "time efficiency research", 4: "material efficiency research",
+            5: "copying", 8: "invention", 9: "reaction"}
+
+# Where the job is installed, best-named id first. `facility_id` is on every job from both
+# endpoints; `station_id` is the character endpoint's NPC-station spelling and `location_id` the
+# corporation endpoint's. `blueprint_location_id` is deliberately absent: it is a hangar division
+# inside the facility, not the facility.
+FACILITY_FIELDS = ("facility_id", "station_id", "location_id")
 
 
 def hint(name: str, feature: str) -> str:
@@ -67,6 +77,13 @@ def name_or_id(names: dict[int, str], ident) -> str:
     return names.get(int(ident), f"id {ident}")
 
 
+def _ident(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _standing_entries(doc: list[dict], names: dict[int, str]) -> list[tuple[str, int, str, float]]:
     kind_labels = {"agent": "agent", "npc_corp": "npc corp", "faction": "faction"}
     entries = [
@@ -103,23 +120,77 @@ def cmd_standings(args):
         print("\n\n".join(blocks))
 
 
+def _job_ident(job: dict, *fields: str) -> int | None:
+    """The first of `fields` carrying a real id, or None.
+
+    ESI writes an id it has nothing to say about as 0 about as often as it omits the key, and
+    `id 0` names nothing, so both spellings of absent are treated the same way."""
+    for name in fields:
+        ident = _ident(job.get(name))
+        if ident:
+            return ident
+    return None
+
+
+def _job_status(job: dict, end, now) -> str:
+    """What the job is actually doing, which is not always what `status` says.
+
+    ESI leaves a finished job `active` until somebody delivers it - its own `ready` value is one
+    live jobs are not seen to carry - and that difference is most of what this view is for:
+    `ready` means the thing is built and waiting to be collected. A paused job (its structure
+    dropped out of power, say) keeps the `end_date` it had when the clock stopped, so it is
+    neither running nor ready and must not be read as either."""
+    status = job.get("status") or "?"
+    if status != "active":
+        return status
+    if job.get("pause_date"):
+        return "paused"
+    return "ready" if end is not None and end <= now else "active"
+
+
+def _runs_cell(job: dict) -> str:
+    """The job's run count, plus what one run is worth where that is a second number.
+
+    `runs` is how many times the job runs: units manufactured, copies cut, invention attempts
+    made. `licensed_runs` is the run count stamped on each copy or invented blueprint that comes
+    out, shown as `1 x60` - one copy, licensed for sixty runs. A finished job also reports
+    `successful_runs`, the figure that decides whether an invention job was worth installing, so
+    that leads when it is there: `3/10` is three inventions out of ten attempts."""
+    runs = _ident(job.get("runs"))
+    if runs is None:
+        return "-"
+    done = _ident(job.get("successful_runs"))
+    if done is not None:
+        return f"{done}/{runs}"
+    licensed = _ident(job.get("licensed_runs"))
+    return f"{runs} x{licensed}" if licensed else str(runs)
+
+
 def _job_rows(jobs, now):
-    """Rows with raw ids in columns 2/5; the caller resolves names."""
-    ids = {int(j["output_type_id"]) for j in jobs if j.get("output_type_id")}
-    ids |= {int(j["installed_in"]) for j in jobs if j.get("installed_in")}
-    rows = []
-    for j in sorted(jobs, key=lambda j: j.get("finish_date") or "9999"):
-        finish = render.parse_opt(j.get("finish_date"))
-        if j.get("status") == "active" and finish:
-            time_left = f"{render.format_duration(max((finish - now).total_seconds(), 0))} left"
-        elif finish:
-            time_left = finish.strftime("%b %d %H:%M")
+    """Rows with raw ids in columns 2/5 (None when unknown); the caller resolves names.
+
+    Every field read here is ESI's own spelling: `activity_id`, `product_type_id`, `end_date`.
+    Research and copy jobs produce no separate item, so ESI repeats the blueprint in
+    `product_type_id`; `blueprint_type_id` backs it up for the jobs that leave it empty, because
+    naming the blueprint is always better than naming nothing."""
+    rows, ids = [], set()
+    for job in sorted(jobs, key=lambda j: j.get("end_date") or "9999"):
+        product = _job_ident(job, "product_type_id", "blueprint_type_id")
+        facility = _job_ident(job, *FACILITY_FIELDS)
+        ids.update(ident for ident in (product, facility) if ident is not None)
+        end = render.parse_opt(job.get("end_date"))
+        status = _job_status(job, end, now)
+        if status == "paused":
+            when = "-"          # that end_date stopped counting down; quoting it would promise a time
+        elif status == "active" and end:
+            when = f"{render.format_duration((end - now).total_seconds())} left"
+        elif end:
+            when = end.strftime("%b %d %H:%M")
         else:
-            time_left = "-"
-        runs = (f"{j.get('installed_runs', '?')}/{j.get('runs', '?')}"
-                if j.get("runs") or j.get("installed_runs") else "-")
-        rows.append([j.get("status", "?"), ACTIVITY.get(j.get("activity"), f"activity {j.get('activity')}"),
-                     int(j.get("output_type_id") or 0), runs, time_left, int(j.get("installed_in") or 0)])
+            when = "-"
+        activity = job.get("activity_id")
+        rows.append([status, ACTIVITY.get(_ident(activity), f"activity {activity}"),
+                     product, _runs_cell(job), when, facility])
     return rows, ids
 
 
@@ -131,29 +202,28 @@ def cmd_jobs(args):
     for tok, public in chars:
         cid = tok["character_id"]
         cname = public.get("name") or str(cid)
+        corp_id = corp_of(public) if args.corp else None
+        if args.corp and not corp_id:
+            failures.append(f"{cname}: no corporation id on the public record")
+            continue
+        # Both endpoints answer with running jobs only. `include_completed` is what adds the
+        # delivered and cancelled ones, and it is the whole of what --completed does.
+        path = (f"/corporations/{corp_id}/industry/jobs" if args.corp
+                else f"/characters/{cid}/industry/jobs")
+        if args.completed:
+            path += "?include_completed=true"
         try:
-            if args.corp:
-                corp_id = corp_of(public)
-                if not corp_id:
-                    failures.append(f"{cname}: no corporation id on the public record")
-                    continue
-                path = f"/corporations/{corp_id}/industry/jobs"
-                if args.completed:
-                    path += "?include_completed=true"
-                jobs = client.get_all(path, token=tok["access_token"])
-            else:
-                path = f"/characters/{cid}/industry/jobs"
-                if args.completed:
-                    path += "?include_completed=true"
-                jobs = client.get(path, token=tok["access_token"])
+            # Only the corporation endpoint pages.
+            jobs = (client.get_all(path, token=tok["access_token"]) if args.corp
+                    else client.get(path, token=tok["access_token"]))
         except esi_mod.AuthError as err:
             failures.append(f"{cname}: ESI refused ({err}) - corporation endpoints need the matching director/Account-Manager role")
             continue
         rows, ids = _job_rows(jobs, now)
         names = esi_mod.resolve_names(client, ids) if ids else {}
         for r in rows:
-            r[2] = name_or_id(names, r[2] or None)
-            r[5] = name_or_id(names, r[5] or None)
+            r[2] = name_or_id(names, r[2])
+            r[5] = name_or_id(names, r[5])
         all_rows.append((cname, rows))
     for line in failures:
         print(f"warning: {line}", file=sys.stderr)
@@ -194,13 +264,6 @@ REFERENCE_BASIS = "esi_reference"
 BOOK_BASIS = "max_buy"
 REFERENCE_LABEL = ("ESI's published reference price - a figure CCP publishes about an item, "
                    "not an order anybody will fill")
-
-
-def _ident(value) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _quantity(asset: dict) -> int:

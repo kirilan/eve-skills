@@ -588,6 +588,26 @@ class NameCacheReuseTests(unittest.TestCase):
                 self.assertEqual(json.load(fh), {"1": "name 1", "2": "name 2"})
         self.assertEqual(first.fetched, [[1]])   # the cached id was never re-resolved
 
+    def test_item_sized_ids_never_join_a_names_request(self):
+        """Live ESI 400s the *whole* batch when one id overflows int32, so a single structure id
+        would cost every station and type name posted beside it. Those ids name nothing here
+        anyway: they are dropped before the request and left for the caller to print as ids."""
+        class Client:
+            def __init__(self):
+                self.fetched = []
+
+            def post(self, _path, ids):
+                self.fetched.append(sorted(ids))
+                if any(ident > esi.INT32_MAX for ident in ids):
+                    raise esi.EsiError("HTTP 400: id out of int32 range")
+                return [{"id": ident, "name": f"name {ident}"} for ident in ids]
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as tmp:
+            names = esi.resolve_names(client, {34, 1035466617946}, cache_dir=tmp)
+        self.assertEqual(client.fetched, [[34]])
+        self.assertEqual(names, {34: "name 34"})   # the station name survived the structure id
+
 
 class ExportLogicTests(unittest.TestCase):
     def test_live_standings_shape_is_normalized_and_named(self):
@@ -601,24 +621,87 @@ class ExportLogicTests(unittest.TestCase):
             ("npc corp", 2, "Corp Two", -1.25),
         ])
 
-    def test_job_rows_status_runs_and_activity(self):
+    def test_job_rows_read_esis_own_field_names(self):
+        """The field names are the whole bug this test exists for.
+
+        ESI sends `activity_id`, `product_type_id`, `end_date` and a facility id; reading
+        `activity`, `output_type_id`, `finish_date` or `installed_in` instead renders every row as
+        "activity None" with no product, runs or time, which is what shipped.
+        """
         jobs = [
-            {"activity": 1, "status": "active", "output_type_id": 34, "installed_in": 60003760,
-             "installed_runs": 2, "runs": 10, "finish_date": "2026-09-05T15:00:00Z"},
-            {"activity": 8, "status": "finished", "output_type_id": 36, "installed_in": 60003760,
-             "finish_date": "2026-09-01T00:00:00Z"},
-            {"activity": 42, "status": "cancelled", "installed_in": 1048236548577},
+            {"activity_id": 1, "status": "active", "product_type_id": 34, "facility_id": 60003760,
+             "runs": 10, "end_date": "2026-09-05T15:00:00Z"},
+            {"activity_id": 9, "status": "delivered", "product_type_id": 36,
+             "station_id": 60003760, "runs": 4, "successful_runs": 4,
+             "end_date": "2026-09-01T00:00:00Z"},
+            {"activity_id": 42, "status": "cancelled", "location_id": 1048236548577},
         ]
         rows, ids = exports._job_rows(jobs, NOW)
         self.assertEqual(ids, {34, 36, 60003760, 1048236548577})
-        # rows are chronological: finished Sep 1, then active (Sep 5), then dateless cancelled
-        self.assertEqual(rows[0][:2], ["finished", "reaction"])
-        self.assertEqual(rows[0][3], "-")
+        # chronological: delivered Sep 1, then the active job (Sep 5), then the dateless one
+        self.assertEqual(rows[0][:2], ["delivered", "reaction"])
+        self.assertEqual(rows[0][3], "4/4")
         self.assertEqual(rows[0][4], "Sep 01 00:00")
         self.assertEqual(rows[1][:2], ["active", "manufacturing"])
-        self.assertEqual(rows[1][3], "2/10")
+        self.assertEqual(rows[1][3], "10")
         self.assertTrue(rows[1][4].endswith("left"))
-        self.assertIn("activity 42", rows[2][1])  # unknown CCP activity codes stay visible
+        self.assertIn("activity 42", rows[2][1])   # unknown CCP activity codes stay visible
+        self.assertEqual(rows[2][3:5], ["-", "-"])
+
+    def test_activity_codes_are_ccps_own(self):
+        """1/3/4/5/8/9, not 1..5 and 8: reading them off by one mislabels every research job."""
+        self.assertEqual(
+            [exports.ACTIVITY.get(code) for code in (1, 3, 4, 5, 8, 9)],
+            ["manufacturing", "time efficiency research", "material efficiency research",
+             "copying", "invention", "reaction"])
+        self.assertNotIn(2, exports.ACTIVITY)   # never used by CCP; a code, not an activity
+
+    def test_a_finished_job_esi_still_calls_active_is_ready(self):
+        past, future = NOW - timedelta(hours=2), NOW + timedelta(hours=2)
+        jobs = [{"activity_id": 5, "status": "active", "product_type_id": 590,
+                 "facility_id": 60003760, "runs": 1, "licensed_runs": 60,
+                 "end_date": past.isoformat()},
+                {"activity_id": 5, "status": "active", "product_type_id": 590,
+                 "facility_id": 60003760, "runs": 1, "licensed_runs": 60,
+                 "end_date": future.isoformat()}]
+        rows, _ = exports._job_rows(jobs, NOW)
+        self.assertEqual([r[0] for r in rows], ["ready", "active"])
+        # the one that is ready says when it finished; the one still running counts down
+        self.assertEqual(rows[0][4], past.strftime("%b %d %H:%M"))
+        self.assertEqual(rows[1][4], "2h 00m left")
+        self.assertEqual([r[3] for r in rows], ["1 x60", "1 x60"])   # one copy, 60 runs on it
+
+    def test_a_paused_job_is_neither_running_nor_ready(self):
+        """A paused job keeps the end_date it had when its clock stopped, and that date goes
+        stale: read as `ready` it would send somebody to collect a job that has not been built."""
+        rows, _ = exports._job_rows([
+            {"activity_id": 1, "status": "active", "product_type_id": 34, "facility_id": 60003760,
+             "runs": 5, "end_date": (NOW - timedelta(hours=6)).isoformat(),
+             "pause_date": (NOW - timedelta(hours=7)).isoformat()},
+        ], NOW)
+        self.assertEqual(rows[0][0], "paused")
+        self.assertEqual(rows[0][4], "-")   # no time is promised for a stopped clock
+
+    def test_a_job_with_no_separate_product_falls_back_to_its_blueprint(self):
+        """Research and copy jobs produce no new item; ESI repeats the blueprint, or sends 0."""
+        rows, ids = exports._job_rows([
+            {"activity_id": 4, "status": "active", "product_type_id": 0,
+             "blueprint_type_id": 590, "facility_id": 0, "end_date": "2026-09-06T00:00:00Z"},
+        ], NOW)
+        self.assertEqual(ids, {590})            # id 0 names nothing and never gets looked up
+        self.assertEqual(rows[0][2], 590)
+        self.assertIsNone(rows[0][5])
+        self.assertEqual(rows[0][1], "material efficiency research")
+
+    def test_facility_prefers_the_id_both_endpoints_send(self):
+        """`facility_id` is on every job; `station_id` is the character endpoint's spelling and
+        `location_id` the corporation endpoint's, so either alone has to work."""
+        rows, _ = exports._job_rows([
+            {"activity_id": 1, "status": "active", "facility_id": 1, "station_id": 2, "location_id": 3},
+            {"activity_id": 1, "status": "active", "station_id": 2},
+            {"activity_id": 1, "status": "active", "location_id": 3},
+        ], NOW)
+        self.assertEqual([r[5] for r in rows], [1, 2, 3])
 
     def test_corp_id_flat_and_nested(self):
         self.assertEqual(exports.corp_of({"corporation_id": 980}), 980)

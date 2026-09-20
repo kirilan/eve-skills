@@ -21,9 +21,9 @@ import unittest
 from eve_skills import cli, sso
 
 from tests.fake_esi import (
-    ADA, CORP_SHARED, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM, INV_CITADEL_BLIND,
-    INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY, SKILL_UNSTARTED, SKILL_WIDE,
-    FakeEsiEnv,
+    ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
+    INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
+    SKILL_UNSTARTED, SKILL_WIDE, FakeEsiEnv,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -189,28 +189,73 @@ class StandingsCommandTests(CommandTestCase):
 
 
 class JobsCommandTests(CommandTestCase):
-    def test_active_and_finished_jobs(self):
+    """`jobs` against jobs spelled the way ESI spells them (`fake_esi.industry_jobs`).
+
+    The view used to read `activity`, `output_type_id`, `installed_in` and `finish_date`, none of
+    which ESI sends, so every row rendered as "activity None" with the product, runs and time
+    columns empty. These tests pin each of those four columns to a real payload."""
+
+    def rows(self, *args):
+        self.env.install_jobs()
+        code, out, err = self.env.run(["jobs", "--csv", *args])
+        self.assertEqual(code, 0)
+        self.assertIn("no jobs consent", err)   # Vela's hint stays off stdout in CSV mode
+        return list(csv.DictReader(out.splitlines()))
+
+    def test_running_jobs_are_named_counted_and_timed(self):
         self.env.install_jobs()
         code, out, _ = self.env.run(["jobs"])
         self.assertEqual(code, 0)
+        self.assertNotIn("activity None", out)  # the bug, in the words it printed
         self.assertIn("manufacturing", out)
-        self.assertIn("2/10", out)      # installed_runs/runs
-        self.assertIn("left", out)      # active job counted down against ESI time
-        self.assertIn("reaction", out)  # finished job activity
-        self.assertIn("Tritanium", out)
-        self.assertIn("no jobs consent", out)  # Vela hint
+        self.assertIn("material efficiency research", out)
+        self.assertIn("copying", out)
+        self.assertIn("Tritanium", out)         # product_type_id, resolved
+        self.assertIn("left", out)              # counted down against ESI's clock
+        self.assertIn("Jita - Mradd", out)      # facility_id, resolved
+        self.assertIn("no jobs consent", out)   # Vela hint
 
-    def test_csv_rows_are_chronological_and_named(self):
-        self.env.install_jobs()
-        code, out, err = self.env.run(["jobs", "--csv"])
-        self.assertEqual(code, 0)
-        self.assertIn("no jobs consent", err)
-        rows = list(csv.DictReader(out.splitlines()))
-        self.assertEqual([r["status"] for r in rows], ["finished", "active"])
-        self.assertEqual(rows[1]["product"], "Tritanium")
-        self.assertEqual(rows[1]["runs"], "2/10")
-        self.assertTrue(rows[1]["time"].endswith("left"))
-        self.assertEqual(rows[0]["installed_in"], "Rens - Datauri")
+    def test_a_finished_job_esi_still_calls_active_reads_as_ready(self):
+        statuses = [r["status"] for r in self.rows()]
+        # Running jobs only, chronological: the paused one, the copy that is ready, then the two
+        # still running. The delivered invention job needs --completed to appear at all.
+        self.assertEqual(statuses, ["paused", "ready", "active", "active"])
+
+    def test_columns_are_chronological_and_named(self):
+        rows = self.rows()
+        ready = rows[1]
+        self.assertEqual(ready["activity"], "copying")
+        self.assertEqual(ready["product"], "Field Extender I Blueprint")
+        self.assertEqual(ready["runs"], "1 x60")          # one copy, licensed for 60 runs
+        self.assertEqual(ready["installed_in"], "Rens - Datauri")
+        running = rows[-1]
+        self.assertEqual(running["product"], "Tritanium")
+        self.assertEqual(running["runs"], "10")
+        self.assertTrue(running["time"].endswith("left"))
+
+    def test_a_paused_job_promises_no_time_and_names_its_structure_by_id(self):
+        paused = self.rows()[0]
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["time"], "-")   # its end_date went stale when the clock stopped
+        # A player structure is not nameable through /universe/names; the id is the honest answer.
+        self.assertEqual(paused["installed_in"], f"id {JOB_STRUCTURE}")
+
+    def test_completed_adds_the_delivered_jobs(self):
+        rows = self.rows("--completed")
+        self.assertEqual([r["status"] for r in rows],
+                         ["delivered", "paused", "ready", "active", "active"])
+        delivered = rows[0]
+        self.assertEqual(delivered["activity"], "invention")
+        self.assertEqual(delivered["product"], "Field Extender II Blueprint")
+        self.assertEqual(delivered["runs"], "3/10")   # successful_runs out of attempts
+        self.assertFalse(delivered["time"].endswith("left"))
+
+    def test_corp_jobs_read_the_endpoints_own_location_field(self):
+        """The corporation endpoint sends `location_id` and no `station_id` at all."""
+        rows = self.rows("--corp")
+        self.assertEqual([r["status"] for r in rows], ["paused", "ready", "active", "active"])
+        self.assertEqual(rows[1]["installed_in"], "Rens - Datauri")
+        self.assertEqual(rows[-1]["product"], "Tritanium")
 
 
 class InventoryCommandTests(CommandTestCase):

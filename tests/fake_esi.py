@@ -437,6 +437,8 @@ NAMES: dict[int, str] = {
     MARKET_PLEX: "PLEX",
     590: "Caldari Ship Blueprint",
     32874: "Memory Augmentation",
+    31803: "Field Extender I Blueprint",
+    31813: "Field Extender II Blueprint",
     60003760: "Jita - Mradd",
     30000142: "The Forge",
     60015129: "Rens - Datauri",
@@ -552,6 +554,70 @@ CORP_OPEN = [
 ]
 CORP_HISTORY = [owner_order(700301, state="expired", remain=0, total=500, wallet_division=2,
                             issued=iso(-50 * 86400), duration=7)]
+
+
+# ---------------------------------------------------------------------------
+# Industry jobs, in ESI's own field names
+# ---------------------------------------------------------------------------
+
+JOB_RIG_BP = 31803        # a blueprint that is copied and researched in place
+JOB_T2_BPC = 31813        # the invented blueprint an invention job hands back
+JOB_STRUCTURE = 1035466617946   # a player structure: /universe/names cannot name it
+
+
+def industry_jobs() -> list[dict]:
+    """One job per shape the view has to render, with the keys live ESI actually sends.
+
+    Built per call rather than at import so every timestamp is relative to the clock the client
+    reads, exactly like `iso` elsewhere in this file. End dates are spread far enough apart that
+    the chronological order of the rendered rows is unambiguous.
+
+    The interesting ones are the last two dated in the past: ESI leaves a finished job `active`
+    until somebody delivers it, and a paused job keeps the `end_date` it had when its clock
+    stopped - so a past `end_date` means `ready` in one case and nothing at all in the other.
+    """
+    return [
+        # Invention, delivered: 3 of 10 attempts took, each yielding a one-run T2 blueprint copy.
+        {"job_id": 672100001, "activity_id": 8, "status": "delivered",
+         "installer_id": ADA.character_id, "completed_character_id": ADA.character_id,
+         "blueprint_id": 1055717845488, "blueprint_type_id": JOB_RIG_BP,
+         "blueprint_location_id": 60015129, "product_type_id": JOB_T2_BPC,
+         "output_location_id": 60015129, "facility_id": 60015129, "station_id": 60015129,
+         "runs": 10, "licensed_runs": 1, "successful_runs": 3, "probability": 0.34,
+         "cost": 1250000.0, "duration": 3600,
+         "start_date": iso(-90000), "end_date": iso(-86400), "completed_date": iso(-80000)},
+        # Manufacturing, paused: the end_date below is six hours stale and means nothing.
+        {"job_id": 672100002, "activity_id": 1, "status": "active",
+         "installer_id": ADA.character_id, "blueprint_id": 1055717845489,
+         "blueprint_type_id": 590, "blueprint_location_id": JOB_STRUCTURE,
+         "product_type_id": 36, "output_location_id": JOB_STRUCTURE,
+         "facility_id": JOB_STRUCTURE, "runs": 5, "cost": 90000.0, "duration": 7200,
+         "start_date": iso(-30000), "end_date": iso(-21600), "pause_date": iso(-25000)},
+        # Copying, finished half an hour ago and still called `active`: this one is ready.
+        {"job_id": 672100003, "activity_id": 5, "status": "active",
+         "installer_id": ADA.character_id, "blueprint_id": 1055717863075,
+         "blueprint_type_id": JOB_RIG_BP, "blueprint_location_id": 60015129,
+         "product_type_id": JOB_RIG_BP, "output_location_id": 60015129,
+         "facility_id": 60015129, "station_id": 60015129,
+         "runs": 1, "licensed_runs": 60, "probability": 1.0, "cost": 54514.0, "duration": 91800,
+         "start_date": iso(-93600), "end_date": iso(-1800)},
+        # Material efficiency research: no separate output, so ESI leaves product_type_id at 0.
+        {"job_id": 672100004, "activity_id": 4, "status": "active",
+         "installer_id": ADA.character_id, "blueprint_id": 1055717852112,
+         "blueprint_type_id": JOB_RIG_BP, "blueprint_location_id": 60003760,
+         "product_type_id": 0, "output_location_id": 60003760,
+         "facility_id": 60003760, "station_id": 60003760,
+         "runs": 1, "cost": 18923.0, "duration": 14400,
+         "start_date": iso(-10800), "end_date": iso(3600)},
+        # Manufacturing, still running.
+        {"job_id": 672100005, "activity_id": 1, "status": "active",
+         "installer_id": ADA.character_id, "blueprint_id": 1055717868023,
+         "blueprint_type_id": 590, "blueprint_location_id": 60003760,
+         "product_type_id": 34, "output_location_id": 60003760,
+         "facility_id": 60003760, "station_id": 60003760,
+         "runs": 10, "cost": 500000.0, "duration": 9000,
+         "start_date": iso(-1800), "end_date": iso(7200)},
+    ]
 
 
 @dataclass
@@ -857,12 +923,30 @@ class FakeEsiEnv:
         ])
 
     def install_jobs(self):
-        self.server.get(f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token, doc=[
-            {"activity": 1, "status": "active", "output_type_id": 34, "installed_in": 60003760,
-             "installed_runs": 2, "runs": 10, "finish_date": iso(7200)},
-            {"activity": 8, "status": "finished", "output_type_id": 36, "installed_in": 60015129,
-             "finish_date": iso(-86400)},
-        ])
+        """Ada's industry jobs, spelled the way live ESI spells them.
+
+        Five jobs, one per shape the view has to get right: a manufacturing job still running, a
+        copy job whose `end_date` has passed while ESI still calls it `active` (the job that is
+        really *ready* to deliver), a delivered invention job carrying `successful_runs`, a paused
+        job whose stale `end_date` is also in the past (and which must not be read as ready), and a
+        research job that leaves `product_type_id` at 0 and sits in a structure no name resolves.
+        End dates are spread so the chronological order of the rendered rows is unambiguous.
+        """
+        jobs = industry_jobs()
+        # Live ESI answers both endpoints with running jobs only until `include_completed` asks
+        # for the rest, so the fixture withholds them the same way.
+        def served(rows):
+            return lambda call: (rows if call.query.get("include_completed") == "true"
+                                 else [j for j in rows if j["status"] == "active"])
+
+        self.server.get(f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token,
+                        handler=served(jobs))
+        # The corporation endpoint: identical job shapes, except that it spells the facility
+        # `location_id` and never sends `station_id`.
+        corp_jobs = [{k: v for k, v in dict(job, location_id=job["facility_id"]).items()
+                      if k != "station_id"} for job in jobs]
+        self.server.get(f"/corporations/{CORP_SHARED}/industry/jobs", token=ADA.token,
+                        handler=served(corp_jobs))
 
     def install_inventory(self):
         """Ada's holdings, reported the way live ESI reports them.

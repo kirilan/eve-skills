@@ -21,6 +21,12 @@ BASE = "https://esi.evetech.net"
 # Pinned response-shape version; see GET /meta/compatibility-dates.
 COMPAT_DATE = "2026-08-18"
 
+# `/universe/names` validates `ids` as int32 and answers 400 for the *whole batch* when one id
+# overflows it. Item-derived ids - structures, ships, containers - are far above this bound and
+# name nothing there anyway, so `resolve_names` drops them rather than letting one citadel cost
+# every station and type name batched beside it.
+INT32_MAX = 2 ** 31 - 1
+
 # Only /markets/{region_id}/orders carries X-Ratelimit-* (verified 2026-09-07: group
 # `market-order`, X-Ratelimit-Limit `12000/15m`, 2 tokens per 2XX, 1 per 304, 5 per 4XX).
 # That window has no reset header, so instead of parking until it rolls over we slow to about
@@ -48,13 +54,17 @@ def _read_name_cache(path: str) -> dict[int, str]:
 
 
 def resolve_names(client: "Esi", ids: set[int], cache_dir: str | None = None) -> dict[int, str]:
-    """Resolve any universe ids (skills, stations, structures, systems, item types) to names.
-    Cached on disk - these never change."""
+    """Resolve any universe ids (skills, stations, systems, item types) to names.
+
+    Cached on disk - these never change. Ids ESI cannot name are simply absent from the result,
+    which is what lets a caller fall back to printing the id: that covers both the item-sized ids
+    dropped before the request (see `INT32_MAX`) and anything the endpoint declines to name, such
+    as a player structure."""
     from . import paths, storage
 
     path = os.path.join(cache_dir or paths.cache_dir(), "names.json")
     cache = _read_name_cache(path)
-    missing = sorted(i for i in ids if i not in cache)
+    missing = sorted(i for i in ids if i not in cache and i <= INT32_MAX)
     resolved: dict[int, str] = {}
     for i in range(0, len(missing), 1000):
         chunk = missing[i:i + 1000]
