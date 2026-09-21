@@ -317,18 +317,21 @@ Security notes for manual login:
 eve-skills login                          # another character: pick it in the browser
 eve-skills login --scopes standings,jobs  # add consents for ONE character
 eve-skills login --scopes all             # every optional consent, one character
+eve-skills login --scopes all --repeat 4  # four characters in one command, one consent screen each
 eve-skills chars                          # who is stored, token time left, auto-refresh
 eve-skills logout --char Somename         # drop one character; without --char: all of them
 ```
 
 `login` itself takes no `--char`: which character gets stored is decided by the EVE account you sign
-into in the browser, so run one `login` per character.
+into in the browser, so run one `login` per character — or `--repeat N` to chain N of them in one
+command. EVE still issues one token per character, so that is N consent screens, but the browser keeps
+the SSO session between them: characters on the same account cost a pick, not a password.
 
 - Consent is **per character**. Refresh tokens inherit the scopes they were minted with, so adding a
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `structures`, `planets`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `planets`, `blueprints`, `wallet`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
@@ -343,6 +346,10 @@ into in the browser, so run one `login` per character.
   2026-09-13) implements **GET only** on both colony routes, so this scope cannot write anything to the game.
   Without it every colony command prints `Ada Vane: no planets consent - run: eve-skills login --scopes planets`
   and exits 0, because a token minted before the scope existed is the normal state, not a failure.
+- **`blueprints` and `wallet` read what assets cannot.** Assets name a blueprint but never its runs,
+  ME or TE; `blueprints` grants the character and corporation blueprint endpoints. `wallet` grants
+  character and corporation wallet balances. Both bundle the roles scope, because the corporation
+  halves need Director (blueprints) or Accountant / Junior Accountant (wallets) in-game.
 - **Market prices need no consent at all** — `market`, `build-cost` and `pi chain` read the public
   order books, so they work on a fresh install with nothing configured. Only *your own* orders are
   private: `orders` needs the `orders` consent, and `orders --corp` additionally needs `corp-orders`

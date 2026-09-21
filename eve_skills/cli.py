@@ -17,10 +17,31 @@ from . import cmd_build_cost, cmd_colonies, cmd_market, cmd_orders, cmd_pi, cmd_
 
 def cmd_login(args):
     scopes = (["attributes"] if args.attributes else []) + [s.strip() for s in (args.scopes or "").split(",") if s.strip()]
-    record = sso.login(client_id=args.client_id, client_secret=args.client_secret, port=args.port,
-                       scopes=scopes, manual=args.manual)
-    print(f"Logged in as {record['character_name']} ({record['character_id']}).")
-    print("Run eve-skills login again (selecting a different character) to add another.")
+    # EVE SSO binds one authorization to one character - there is no bulk consent. Repeating the
+    # flow in-process is the next best thing: the browser keeps the SSO session, so each extra
+    # character costs a character pick, not another password.
+    count = max(1, getattr(args, "repeat", 1) or 1)
+    stored = []
+    for index in range(count):
+        if count > 1:
+            print(f"\n--- character {index + 1} of {count} ---")
+            print("Pick a DIFFERENT character on the consent screen. Same EVE account = no password "
+                  "retyping; a character on another account needs that account's login first.")
+        try:
+            record = sso.login(client_id=args.client_id, client_secret=args.client_secret, port=args.port,
+                               scopes=scopes, manual=args.manual)
+        except RuntimeError as exc:
+            if not stored:
+                raise
+            print(f"stopped after {len(stored)}: {exc}")
+            break
+        stored.append(record)
+        print(f"Logged in as {record['character_name']} ({record['character_id']}).")
+    if count == 1:
+        print("Run eve-skills login again (selecting a different character) to add another, "
+              "or pass --repeat N to chain several in one go.")
+    else:
+        print(f"\n{len(stored)} of {count} stored: " + ", ".join(r["character_name"] or "?" for r in stored))
 
 
 def cmd_logout(args):
@@ -106,7 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--port", type=int, help="exact loopback callback port (must match the registered redirect URL; default tries 8635-8637)")
     p_login.add_argument("--manual", action="store_true", help="paste the localhost callback URL manually (for remote hosts reached over ssh)")
     p_login.add_argument("--attributes", action="store_true", help="include character attributes (already covered by the standard skills consent)")
-    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,all (each re-authenticates the chosen character only)")
+    p_login.add_argument("--repeat", type=int, default=1, metavar="N",
+                         help="run the login flow N times in a row, for N characters. EVE issues one token per "
+                              "character, so this is N consent screens - but one command, and the browser keeps "
+                              "the SSO session between them")
+    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,blueprints,wallet,all (re-authenticates the chosen character with EXACTLY these consents, so pass every one you still want - or just 'all')")
 
     p_logout = sub.add_parser("logout", help="remove stored tokens")
     p_logout.add_argument("--char", help="only this character (name or id); default removes all")

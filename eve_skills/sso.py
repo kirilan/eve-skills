@@ -51,6 +51,15 @@ OPTIONAL_SCOPES = {
     # lets `colonies` answer the question nothing local can - "do I still have colonies, and did an
     # extraction run out". ESI only offers GET on the two colony endpoints, so this grants read access.
     "planets": ["esi-planets.manage_planets.v1"],
+    # Assets name a blueprint but never its runs, ME or TE: a stack of copies and an original read
+    # alike. These are the only endpoints that tell them apart. Bundles the roles scope for the same
+    # reason `corp-orders` does - the corporation endpoint needs the Director role in-game, and a
+    # named error beats a bare 403.
+    "blueprints": ["esi-characters.read_blueprints.v1", "esi-corporations.read_blueprints.v1",
+                   "esi-characters.read_corporation_roles.v1"],
+    # Corporation wallets need Accountant or Junior Accountant in-game; same roles-scope reasoning.
+    "wallet": ["esi-wallet.read_character_wallet.v1", "esi-wallet.read_corporation_wallets.v1",
+               "esi-characters.read_corporation_roles.v1"],
 }
 
 

@@ -387,6 +387,67 @@ class EsiCacheTests(unittest.TestCase):
 
 
 class ManualLoginTests(unittest.TestCase):
+    def test_repeat_chains_one_consent_per_character(self):
+        token = {"access_token": "jwt", "refresh_token": "refresh", "expires_in": 1200}
+        callback = "http://localhost:8635/callback?code=authorization-code&state=expected-state"
+        pilots = [{"sub": "CHARACTER:EVE:9001", "name": "First Pilot", "scp": sso.SCOPES},
+                  {"sub": "CHARACTER:EVE:9002", "name": "Second Pilot", "scp": sso.SCOPES}]
+        with (
+            mock.patch.object(sso, "load_config", return_value={}),
+            mock.patch.object(sso, "_discover", return_value={
+                "authorization_endpoint": "https://login.example/authorize",
+                "token_endpoint": "https://login.example/token",
+            }),
+            mock.patch.object(sso.secrets, "token_bytes", return_value=b"x" * 32),
+            mock.patch.object(sso.secrets, "token_urlsafe", return_value="expected-state"),
+            mock.patch.object(sso.webbrowser, "open") as browser_open,
+            mock.patch("builtins.input", return_value=callback),
+            mock.patch.object(sso, "_post_form", return_value=token),
+            mock.patch.object(sso, "decode_jwt", side_effect=pilots),
+            mock.patch.object(sso, "_put_record") as put_record,
+            mock.patch.object(sso, "save_config"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(cli.main(["login", "--client-id", "client", "--manual",
+                                       "--scopes", "all", "--repeat", "2"]), 0)
+
+        # one authorization, one stored token, per character - EVE has no bulk consent
+        self.assertEqual(browser_open.call_count, 2)
+        self.assertEqual(put_record.call_count, 2)
+        self.assertEqual([c.args[0]["character_id"] for c in put_record.call_args_list], [9001, 9002])
+        out = stdout.getvalue()
+        self.assertIn("Logged in as First Pilot (9001).", out)
+        self.assertIn("Logged in as Second Pilot (9002).", out)
+        self.assertIn("2 of 2 stored: First Pilot, Second Pilot", out)
+
+    def test_all_scopes_now_request_blueprints_and_wallet(self):
+        token = {"access_token": "jwt", "refresh_token": "refresh", "expires_in": 1200}
+        callback = "http://localhost:8635/callback?code=authorization-code&state=expected-state"
+        claims = {"sub": "CHARACTER:EVE:9001", "name": "Remote Pilot", "scp": sso.SCOPES}
+        with (
+            mock.patch.object(sso, "load_config", return_value={}),
+            mock.patch.object(sso, "_discover", return_value={
+                "authorization_endpoint": "https://login.example/authorize",
+                "token_endpoint": "https://login.example/token",
+            }),
+            mock.patch.object(sso.secrets, "token_bytes", return_value=b"x" * 32),
+            mock.patch.object(sso.secrets, "token_urlsafe", return_value="expected-state"),
+            mock.patch.object(sso.webbrowser, "open") as browser_open,
+            mock.patch("builtins.input", return_value=callback),
+            mock.patch.object(sso, "_post_form", return_value=token),
+            mock.patch.object(sso, "decode_jwt", return_value=claims),
+            mock.patch.object(sso, "_put_record"),
+            mock.patch.object(sso, "save_config"),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(cli.main(["login", "--client-id", "client", "--manual", "--scopes", "all"]), 0)
+
+        auth_query = sso.urllib.parse.parse_qs(sso.urllib.parse.urlparse(browser_open.call_args.args[0]).query)
+        requested_scopes = auth_query["scope"][0].split()
+        for scope in ("esi-corporations.read_blueprints.v1", "esi-characters.read_blueprints.v1",
+                      "esi-wallet.read_corporation_wallets.v1", "esi-wallet.read_character_wallet.v1"):
+            self.assertIn(scope, requested_scopes)
+
     def test_cli_accepts_pasted_callback_without_starting_listener(self):
         token = {"access_token": "jwt", "refresh_token": "refresh", "expires_in": 1200}
         callback = "http://localhost:8635/callback?code=authorization-code&state=expected-state"
@@ -433,6 +494,20 @@ class ScopeRegistryTests(unittest.TestCase):
         self.assertEqual(all_scopes, sorted(set(all_scopes)))  # deduped across overlapping features
         self.assertEqual(sso.scopes_for(["jobs", "all"]), all_scopes)
         self.assertEqual(sso.scopes_for(None), [])
+
+    def test_blueprints_and_wallet_features(self):
+        bp = sso.scopes_for(["blueprints"])
+        self.assertIn("esi-corporations.read_blueprints.v1", bp)
+        self.assertIn("esi-characters.read_blueprints.v1", bp)
+        wallet = sso.scopes_for(["wallet"])
+        self.assertIn("esi-wallet.read_corporation_wallets.v1", wallet)
+        self.assertIn("esi-wallet.read_character_wallet.v1", wallet)
+        # both bundle the roles scope, for the named-error reason corp-orders does
+        for feature in (bp, wallet):
+            self.assertIn("esi-characters.read_corporation_roles.v1", feature)
+        every = sso.scopes_for(["all"])
+        for scope in bp + wallet:
+            self.assertIn(scope, every)
 
     def test_unknown_feature_is_hard_error(self):
         with self.assertRaises(RuntimeError):
