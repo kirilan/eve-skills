@@ -714,14 +714,14 @@ class ExportLogicTests(unittest.TestCase):
         rows, ids = exports._job_rows(jobs, NOW)
         self.assertEqual(ids, {34, 36, 60003760, 1048236548577})
         # chronological: delivered Sep 1, then the active job (Sep 5), then the dateless one
-        self.assertEqual(rows[0][:2], ["delivered", "reaction"])
-        self.assertEqual(rows[0][3], "4/4")
-        self.assertEqual(rows[0][4], "Sep 01 00:00")
-        self.assertEqual(rows[1][:2], ["active", "manufacturing"])
-        self.assertEqual(rows[1][3], "10")
-        self.assertTrue(rows[1][4].endswith("left"))
-        self.assertIn("activity 42", rows[2][1])   # unknown CCP activity codes stay visible
-        self.assertEqual(rows[2][3:5], ["-", "-"])
+        self.assertEqual([rows[0]["status"], rows[0]["activity"]], ["delivered", "reaction"])
+        self.assertEqual(rows[0]["runs"], "4/4")
+        self.assertEqual(rows[0]["time"], "Sep 01 00:00")
+        self.assertEqual([rows[1]["status"], rows[1]["activity"]], ["active", "manufacturing"])
+        self.assertEqual(rows[1]["runs"], "10")
+        self.assertTrue(rows[1]["time"].endswith("left"))
+        self.assertIn("activity 42", rows[2]["activity"])   # unknown CCP activity codes stay visible
+        self.assertEqual([rows[2]["runs"], rows[2]["time"]], ["-", "-"])
 
     def test_activity_codes_are_ccps_own(self):
         """1/3/4/5/8/9, not 1..5 and 8: reading them off by one mislabels every research job."""
@@ -740,11 +740,11 @@ class ExportLogicTests(unittest.TestCase):
                  "facility_id": 60003760, "runs": 1, "licensed_runs": 60,
                  "end_date": future.isoformat()}]
         rows, _ = exports._job_rows(jobs, NOW)
-        self.assertEqual([r[0] for r in rows], ["ready", "active"])
+        self.assertEqual([r["status"] for r in rows], ["ready", "active"])
         # the one that is ready says when it finished; the one still running counts down
-        self.assertEqual(rows[0][4], past.strftime("%b %d %H:%M"))
-        self.assertEqual(rows[1][4], "2h 00m left")
-        self.assertEqual([r[3] for r in rows], ["1 x60", "1 x60"])   # one copy, 60 runs on it
+        self.assertEqual(rows[0]["time"], past.strftime("%b %d %H:%M"))
+        self.assertEqual(rows[1]["time"], "2h 00m left")
+        self.assertEqual([r["runs"] for r in rows], ["1 x60", "1 x60"])   # one copy, 60 runs on it
 
     def test_a_paused_job_is_neither_running_nor_ready(self):
         """A paused job keeps the end_date it had when its clock stopped, and that date goes
@@ -754,8 +754,8 @@ class ExportLogicTests(unittest.TestCase):
              "runs": 5, "end_date": (NOW - timedelta(hours=6)).isoformat(),
              "pause_date": (NOW - timedelta(hours=7)).isoformat()},
         ], NOW)
-        self.assertEqual(rows[0][0], "paused")
-        self.assertEqual(rows[0][4], "-")   # no time is promised for a stopped clock
+        self.assertEqual(rows[0]["status"], "paused")
+        self.assertEqual(rows[0]["time"], "-")   # no time is promised for a stopped clock
 
     def test_a_job_with_no_separate_product_falls_back_to_its_blueprint(self):
         """Research and copy jobs produce no new item; ESI repeats the blueprint, or sends 0."""
@@ -764,9 +764,9 @@ class ExportLogicTests(unittest.TestCase):
              "blueprint_type_id": 590, "facility_id": 0, "end_date": "2026-09-06T00:00:00Z"},
         ], NOW)
         self.assertEqual(ids, {590})            # id 0 names nothing and never gets looked up
-        self.assertEqual(rows[0][2], 590)
-        self.assertIsNone(rows[0][5])
-        self.assertEqual(rows[0][1], "material efficiency research")
+        self.assertEqual(rows[0]["product_id"], 590)
+        self.assertIsNone(rows[0]["facility_id"])
+        self.assertEqual(rows[0]["activity"], "material efficiency research")
 
     def test_facility_prefers_the_id_both_endpoints_send(self):
         """`facility_id` is on every job; `station_id` is the character endpoint's spelling and
@@ -776,7 +776,7 @@ class ExportLogicTests(unittest.TestCase):
             {"activity_id": 1, "status": "active", "station_id": 2},
             {"activity_id": 1, "status": "active", "location_id": 3},
         ], NOW)
-        self.assertEqual([r[5] for r in rows], [1, 2, 3])
+        self.assertEqual([r["facility_id"] for r in rows], [1, 2, 3])
 
     def test_corp_id_flat_and_nested(self):
         self.assertEqual(exports.corp_of({"corporation_id": 980}), 980)

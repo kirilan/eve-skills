@@ -179,6 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--char", help="stored character name or id (default: every stored character)")
     p_jobs.add_argument("--corp", action="store_true", help="corporation industry jobs instead of personal (needs the matching director/Account-Manager role)")
     p_jobs.add_argument("--completed", action="store_true", help="include finished and cancelled jobs")
+    p_jobs.add_argument("--group", action="store_true",
+                        help="collapse identical jobs by installer, status, activity, product and runs")
+    p_jobs.add_argument("--slots", action="store_true",
+                        help="show manufacturing, science and reaction slots used / maximum / free per character")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
 
     p_inv = sub.add_parser("inventory", help="asset inventory with real item names, grouped by location or category and valued (needs login --scopes assets)")

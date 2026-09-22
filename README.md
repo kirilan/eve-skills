@@ -40,7 +40,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
-| `jobs` | Personal or `--corp` industry jobs | `--scopes jobs` |
+| `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines and `--slots` shows each character's manufacturing, science and reaction budget | `--scopes jobs` |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
 | `inventory` | Assets named, placed and valued: per-location summary with subtotals, the same table turned round with `--by category`, one row per item with `--items`, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player-owned structures |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |

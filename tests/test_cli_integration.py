@@ -23,7 +23,7 @@ from eve_skills import cli, sso
 from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
     INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
-    SKILL_UNSTARTED, SKILL_WIDE, FakeEsiEnv,
+    SKILL_UNSTARTED, SKILL_WIDE, FakeEsiEnv, industry_jobs, iso,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -256,6 +256,81 @@ class JobsCommandTests(CommandTestCase):
         self.assertEqual([r["status"] for r in rows], ["paused", "ready", "active", "active"])
         self.assertEqual(rows[1]["installed_in"], "Rens - Datauri")
         self.assertEqual(rows[-1]["product"], "Tritanium")
+
+    def test_corporation_csv_appends_installer_and_duration_fields(self):
+        rows = self.rows("--corp")
+        header = list(rows[0])
+        self.assertEqual(
+            ["character", "status", "activity", "product", "runs", "time", "installed_in"],
+            header[:7],
+        )
+        self.assertEqual(
+            ["installer", "start_date", "end_date", "duration_h", "hours_per_run"],
+            header[7:],
+        )
+        self.assertEqual("Ada Vane", rows[-1]["installer"])
+        self.assertEqual("2.5", rows[-1]["duration_h"])
+        self.assertEqual("0.25", rows[-1]["hours_per_run"])
+
+    def test_group_collapses_matching_jobs_and_formats_an_end_range(self):
+        jobs = industry_jobs()
+        duplicate = dict(jobs[-1], job_id=672100006, end_date=iso(7260))
+        rows = jobs + [duplicate]
+
+        def served(call):
+            return rows if call.query.get("include_completed") == "true" else [
+                job for job in rows if job["status"] == "active"
+            ]
+
+        self.env.server.get(
+            f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token, handler=served
+        )
+        code, out, err = self.env.run(["jobs", "--group", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        grouped = [line for line in out.splitlines() if "Tritanium" in line]
+        self.assertEqual(1, len(grouped))
+        self.assertIn("Ada Vane", grouped[0])
+        self.assertIn("2", grouped[0])
+        self.assertIn("–", grouped[0])
+        self.assertIn("left", grouped[0])
+
+    def test_slots_deduplicate_personal_and_corporation_jobs(self):
+        self.env.install_jobs()
+        code, out, err = self.env.run(["jobs", "--slots", "--csv", "--char", "Ada"])
+        self.assertEqual(code, 0)
+        self.assertEqual("", err)
+        row = next(csv.DictReader(io.StringIO(out)))
+        self.assertEqual("2", row["manufacturing_used"])
+        self.assertEqual("2", row["science_used"])
+        self.assertEqual("1", row["science_ready"])
+        self.assertEqual("1", row["manufacturing_max"])
+        self.assertEqual("1", row["science_max"])
+
+    def test_slots_keep_used_counts_when_skills_scope_is_missing(self):
+        self.env.install_jobs()
+        scopes = [
+            scope
+            for scope in sso.SCOPES + sso.scopes_for(["jobs"])
+            if scope != "esi-skills.read_skills.v1"
+        ]
+        self.env.write_tokens([self.env.token_for(ADA, scopes)])
+        code, out, err = self.env.run(["jobs", "--slots", "--csv"])
+        self.assertEqual((code, err), (0, ""))
+        row = next(csv.DictReader(io.StringIO(out)))
+        self.assertEqual("2", row["manufacturing_used"])
+        self.assertEqual("", row["manufacturing_max"])
+        self.assertEqual("", row["manufacturing_free"])
+
+    def test_corporation_jobs_are_read_once_for_colleagues_in_one_corp(self):
+        self.env.install_jobs()
+        self.env.install_orders()
+        code, out, err = self.env.run(["jobs", "--corp"])
+        self.assertEqual(code, 0)
+        self.assertEqual(1, out.count(f"Corporation {CORP_SHARED} (read by Ada Vane)"))
+        self.assertEqual(
+            1,
+            len(self.env.server.calls_to(f"/corporations/{CORP_SHARED}/industry/jobs")),
+        )
 
 
 class InventoryCommandTests(CommandTestCase):

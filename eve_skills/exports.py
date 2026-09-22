@@ -28,6 +28,20 @@ ACTIVITY = {1: "manufacturing", 3: "time efficiency research", 4: "material effi
 # inside the facility, not the facility.
 FACILITY_FIELDS = ("facility_id", "station_id", "location_id")
 
+JOB_CSV_COLUMNS = ["character", "status", "activity", "product", "runs", "time",
+                   "installed_in", "installer", "start_date", "end_date", "duration_h",
+                   "hours_per_run"]
+
+# Slot formulas published by CCP's SDE skill catalogue: every category starts with one slot,
+# and the basic and advanced skills add one each per active level.
+SLOT_SKILLS = {
+    "manufacturing": (3387, 24625),       # Mass Production, Advanced Mass Production
+    "science": (3406, 24624),             # Laboratory Operation, Advanced Laboratory Operation
+    "reaction": (45748, 45749),           # Mass Reactions, Advanced Mass Reactions
+}
+SLOT_ACTIVITY = {1: "manufacturing", 3: "science", 4: "science", 5: "science",
+                 8: "science", 9: "reaction"}
+
 
 def hint(name: str, feature: str) -> str:
     return (f"{name}: no {feature} consent - run: eve-skills login --scopes {feature}"
@@ -151,11 +165,12 @@ def _job_status(job: dict, end, now) -> str:
 def _runs_cell(job: dict) -> str:
     """The job's run count, plus what one run is worth where that is a second number.
 
-    `runs` is how many times the job runs: units manufactured, copies cut, invention attempts
-    made. `licensed_runs` is the run count stamped on each copy or invented blueprint that comes
-    out, shown as `1 x60` - one copy, licensed for sixty runs. A finished job also reports
-    `successful_runs`, the figure that decides whether an invention job was worth installing, so
-    that leads when it is there: `3/10` is three inventions out of ten attempts."""
+    `runs` is how many times the job runs: units manufactured, copies cut, or invention attempts.
+    ESI describes `licensed_runs` only as the number of runs the blueprint is licensed for; that is
+    sufficient to render copy jobs, but not precise enough to reinterpret invention jobs. A
+    finished invention reports `successful_runs`, so that leads when present: `3/10` is three
+    successes out of ten attempts.
+    """
     runs = _ident(job.get("runs"))
     if runs is None:
         return "-"
@@ -167,77 +182,323 @@ def _runs_cell(job: dict) -> str:
 
 
 def _job_rows(jobs, now):
-    """Rows with raw ids in columns 2/5 (None when unknown); the caller resolves names.
-
-    Every field read here is ESI's own spelling: `activity_id`, `product_type_id`, `end_date`.
-    Research and copy jobs produce no separate item, so ESI repeats the blueprint in
-    `product_type_id`; `blueprint_type_id` backs it up for the jobs that leave it empty, because
-    naming the blueprint is always better than naming nothing."""
+    """Normalized job rows; names are resolved separately in one batched ESI call."""
     rows, ids = [], set()
-    for job in sorted(jobs, key=lambda j: j.get("end_date") or "9999"):
+    for job in jobs:
         product = _job_ident(job, "product_type_id", "blueprint_type_id")
         facility = _job_ident(job, *FACILITY_FIELDS)
-        ids.update(ident for ident in (product, facility) if ident is not None)
+        installer = _job_ident(job, "installer_id")
+        ids.update(ident for ident in (product, facility, installer) if ident is not None)
+        start = render.parse_opt(job.get("start_date"))
         end = render.parse_opt(job.get("end_date"))
         status = _job_status(job, end, now)
         if status == "paused":
-            when = "-"          # that end_date stopped counting down; quoting it would promise a time
+            when = "-"
         elif status == "active" and end:
             when = f"{render.format_duration((end - now).total_seconds())} left"
         elif end:
             when = end.strftime("%b %d %H:%M")
         else:
             when = "-"
-        activity = job.get("activity_id")
-        rows.append([status, ACTIVITY.get(_ident(activity), f"activity {activity}"),
-                     product, _runs_cell(job), when, facility])
+        duration_h = ((end - start).total_seconds() / 3600.0
+                      if start is not None and end is not None else None)
+        runs = _ident(job.get("runs"))
+        activity_id = _ident(job.get("activity_id"))
+        rows.append({
+            "job_id": _job_ident(job, "job_id"),
+            "status": status,
+            "activity_id": activity_id,
+            "activity": ACTIVITY.get(activity_id, f"activity {job.get('activity_id')}"),
+            "product_id": product,
+            "product": None,
+            "runs": _runs_cell(job),
+            "time": when,
+            "facility_id": facility,
+            "installed_in": None,
+            "installer_id": installer,
+            "installer": None,
+            "start_date": job.get("start_date"),
+            "end_date": job.get("end_date"),
+            "start": start,
+            "end": end,
+            "duration_h": duration_h,
+            "hours_per_run": duration_h / runs if duration_h is not None and runs else None,
+        })
+    rows.sort(key=lambda row: row["end"] or render.parse_ts("9999-01-01T00:00:00+00:00"))
     return rows, ids
 
 
-def cmd_jobs(args):
-    scope = "esi-industry.read_corporation_jobs.v1" if args.corp else "esi-industry.read_character_jobs.v1"
-    client, chars, hints = targets(args, [("jobs", scope)])
+def _resolve_job_rows(client, rows, ids) -> None:
+    names = esi_mod.resolve_names(client, ids) if ids else {}
+    for row in rows:
+        row["product"] = name_or_id(names, row["product_id"])
+        row["installed_in"] = name_or_id(names, row["facility_id"])
+        row["installer"] = name_or_id(names, row["installer_id"])
+
+
+def _job_csv_row(owner: str, row: dict) -> list:
+    return [owner, row["status"], row["activity"], row["product"], row["runs"], row["time"],
+            row["installed_in"], row["installer"], row["start_date"] or "", row["end_date"] or "",
+            "" if row["duration_h"] is None else f"{row['duration_h']:.6f}".rstrip("0").rstrip("."),
+            "" if row["hours_per_run"] is None else
+            f"{row['hours_per_run']:.6f}".rstrip("0").rstrip(".")]
+
+
+def _end_range(rows: list[dict], now) -> str:
+    ends = sorted(row["end"] for row in rows if row["end"] is not None)
+    if not ends:
+        return "-"
+    active = rows[0]["status"] == "active"
+    if active:
+        cells = [render.format_duration((stamp - now).total_seconds()) for stamp in ends]
+        return f"{cells[0]} left" if cells[0] == cells[-1] else f"{cells[0]}–{cells[-1]} left"
+    first, last = ends[0], ends[-1]
+    if first == last:
+        return first.strftime("%b %d %H:%M")
+    if first.date() == last.date():
+        return f"{first.strftime('%b %d %H:%M')}–{last.strftime('%H:%M')}"
+    return f"{first.strftime('%b %d %H:%M')}–{last.strftime('%b %d %H:%M')}"
+
+
+def _group_job_rows(rows: list[dict], now) -> list[dict]:
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (row["installer"], row["status"], row["activity"], row["product"], row["runs"])
+        groups.setdefault(key, []).append(row)
+    out = []
+    for key, members in groups.items():
+        installer, status, activity, product, runs = key
+        out.append({"installer": installer, "status": status, "activity": activity,
+                    "product": product, "runs": runs, "count": len(members),
+                    "time": _end_range(members, now),
+                    "_end": min((row["end"] for row in members if row["end"] is not None),
+                                default=None)})
+    far = render.parse_ts("9999-01-01T00:00:00+00:00")
+    return sorted(out, key=lambda row: ((row["installer"] or "").casefold(), row["_end"] or far,
+                                       row["product"].casefold()))
+
+
+def _jobs_path(character_id: int, corporation_id: int | None, completed: bool) -> str:
+    path = (f"/corporations/{corporation_id}/industry/jobs" if corporation_id is not None
+            else f"/characters/{character_id}/industry/jobs")
+    return path + ("?include_completed=true" if completed else "")
+
+
+def _fetch_jobs(client, tok, corporation_id: int | None, completed: bool):
+    path = _jobs_path(int(tok["character_id"]), corporation_id, completed)
+    return (client.get_all(path, token=tok["access_token"]) if corporation_id is not None
+            else client.get(path, token=tok["access_token"]))
+
+
+def _slot_cell(used: int, maximum: int | None, ready: int) -> str:
+    free = None if maximum is None else max(maximum - used, 0)
+    budget = f"{used} / ? / ?" if maximum is None else f"{used} / {maximum} / {free}"
+    return f"{budget} ({ready} ready)"
+
+
+def _cmd_job_slots(args):
+    records = sso.list_characters()
+    if not records:
+        raise RuntimeError("not logged in - run: eve-skills login")
+    wanted = sso.resolve_character(args.char) if args.char else None
+    client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
     now = client.now()
-    blocks, failures, all_rows = list(hints), [], []
-    for tok, public in chars:
-        cid = tok["character_id"]
-        cname = public.get("name") or str(cid)
-        corp_id = corp_of(public) if args.corp else None
-        if args.corp and not corp_id:
-            failures.append(f"{cname}: no corporation id on the public record")
+    contexts, hints, failures = [], [], []
+    for rec in records:
+        cid = int(rec["character_id"])
+        if wanted is not None and cid != wanted:
             continue
-        # Both endpoints answer with running jobs only. `include_completed` is what adds the
-        # delivered and cancelled ones, and it is the whole of what --completed does.
-        path = (f"/corporations/{corp_id}/industry/jobs" if args.corp
-                else f"/characters/{cid}/industry/jobs")
-        if args.completed:
-            path += "?include_completed=true"
-        try:
-            # Only the corporation endpoint pages.
-            jobs = (client.get_all(path, token=tok["access_token"]) if args.corp
-                    else client.get(path, token=tok["access_token"]))
-        except esi_mod.AuthError as err:
-            failures.append(f"{cname}: ESI refused ({err}) - corporation endpoints need the matching director/Account-Manager role")
+        tok = sso.get_access_token(cid)
+        name = tok.get("character_name") or str(cid)
+        granted = set(tok.get("scopes") or [])
+        if not ({sso.OPTIONAL_SCOPES["jobs"][0], sso.OPTIONAL_SCOPES["jobs"][1]} & granted):
+            hints.append(hint(name, "jobs"))
             continue
-        rows, ids = _job_rows(jobs, now)
-        names = esi_mod.resolve_names(client, ids) if ids else {}
-        for r in rows:
-            r[2] = name_or_id(names, r[2])
-            r[5] = name_or_id(names, r[5])
-        all_rows.append((cname, rows))
+        public = client.get(f"/characters/{cid}")
+        contexts.append({"token": tok, "public": public, "name": public.get("name") or name,
+                         "jobs": []})
+
+    corp_jobs: dict[int, list] = {}
+    for corp_id in dict.fromkeys(corp_of(ctx["public"]) for ctx in contexts):
+        if corp_id is None:
+            continue
+        candidates = [ctx for ctx in contexts
+                      if corp_of(ctx["public"]) == corp_id and
+                      sso.OPTIONAL_SCOPES["jobs"][1] in set(ctx["token"].get("scopes") or [])]
+        for ctx in candidates:
+            try:
+                corp_jobs[corp_id] = list(_fetch_jobs(client, ctx["token"], corp_id, False))
+                break
+            except esi_mod.AuthError:
+                continue
+
+    for ctx in contexts:
+        tok = ctx["token"]
+        cid = int(tok["character_id"])
+        granted = set(tok.get("scopes") or [])
+        combined = []
+        if sso.OPTIONAL_SCOPES["jobs"][0] in granted:
+            try:
+                combined.extend(_fetch_jobs(client, tok, None, False))
+            except esi_mod.AuthError as err:
+                failures.append(f"{ctx['name']}: personal jobs refused ({err})")
+        combined.extend(job for job in corp_jobs.get(corp_of(ctx["public"]), [])
+                        if _job_ident(job, "installer_id") == cid)
+        deduped = {}
+        for job in combined:
+            ident = _job_ident(job, "job_id")
+            deduped[("id", ident) if ident is not None else ("row", id(job))] = job
+        ctx["jobs"] = list(deduped.values())
+        ctx["skills"] = None
+        if "esi-skills.read_skills.v1" in granted:
+            try:
+                doc = client.get(f"/characters/{cid}/skills", token=tok["access_token"])
+                ctx["skills"] = {int(row["skill_id"]): int(row.get("active_skill_level",
+                                                                  row.get("trained_skill_level", 0)))
+                                 for row in doc.get("skills", [])}
+            except esi_mod.AuthError:
+                pass
+
+    result = []
+    for ctx in contexts:
+        counts = {kind: {"used": 0, "ready": 0, "ends": []} for kind in SLOT_SKILLS}
+        for job in ctx["jobs"]:
+            activity = _job_ident(job, "activity_id")
+            kind = SLOT_ACTIVITY.get(activity)
+            if kind is None:
+                continue
+            end = render.parse_opt(job.get("end_date"))
+            status = _job_status(job, end, now)
+            if status in {"delivered", "cancelled"}:
+                continue
+            counts[kind]["used"] += 1
+            if status == "ready":
+                counts[kind]["ready"] += 1
+            elif status == "active" and end is not None:
+                counts[kind]["ends"].append(end)
+        maxima = {kind: (None if ctx["skills"] is None else
+                         1 + sum(ctx["skills"].get(skill_id, 0) for skill_id in skill_ids))
+                  for kind, skill_ids in SLOT_SKILLS.items()}
+        next_end = min((end for cell in counts.values() for end in cell["ends"]), default=None)
+        result.append({"name": ctx["name"], "counts": counts, "maxima": maxima,
+                       "next": None if next_end is None else
+                       f"{render.format_duration((next_end - now).total_seconds())} left"})
+
     for line in failures:
         print(f"warning: {line}", file=sys.stderr)
     if args.csv:
         writer = csv.writer(sys.stdout, lineterminator="\n")
-        writer.writerow(["character", "status", "activity", "product", "runs", "time", "installed_in"])
-        for cname, rows in all_rows:
-            for r in rows:
-                writer.writerow([cname] + r)
+        writer.writerow(["character", "manufacturing_used", "manufacturing_max", "manufacturing_free",
+                         "manufacturing_ready", "science_used", "science_max", "science_free",
+                         "science_ready", "reaction_used", "reaction_max", "reaction_free",
+                         "reaction_ready", "next_end"])
+        for item in result:
+            row = [item["name"]]
+            for kind in SLOT_SKILLS:
+                used, maximum = item["counts"][kind]["used"], item["maxima"][kind]
+                row.extend([used, "" if maximum is None else maximum,
+                            "" if maximum is None else max(maximum - used, 0),
+                            item["counts"][kind]["ready"]])
+            row.append(item["next"] or "")
+            writer.writerow(row)
+        for line in hints:
+            print(line, file=sys.stderr)
+        return
+    rows = [[item["name"],
+             _slot_cell(item["counts"]["manufacturing"]["used"], item["maxima"]["manufacturing"],
+                        item["counts"]["manufacturing"]["ready"]),
+             _slot_cell(item["counts"]["science"]["used"], item["maxima"]["science"],
+                        item["counts"]["science"]["ready"]),
+             _slot_cell(item["counts"]["reaction"]["used"], item["maxima"]["reaction"],
+                        item["counts"]["reaction"]["ready"]),
+             item["next"] or "-"] for item in result]
+    blocks = list(hints)
+    blocks.append(render.table(["character", "manufacturing used / max / free", "science used / max / free",
+                                "reaction used / max / free", "next running end"], rows)
+                  if rows else "(no readable jobs)")
+    print("\n\n".join(blocks))
+
+
+def cmd_jobs(args):
+    if getattr(args, "slots", False):
+        return _cmd_job_slots(args)
+    scope = ("esi-industry.read_corporation_jobs.v1" if args.corp
+             else "esi-industry.read_character_jobs.v1")
+    client, chars, hints = targets(args, [("jobs", scope)])
+    now = client.now()
+    blocks, failures, all_rows = list(hints), [], []
+
+    owners: list[tuple[str, dict, dict, int | None]] = []
+    if args.corp:
+        by_corp: dict[int, list[tuple[dict, dict]]] = {}
+        for tok, public in chars:
+            corp_id = corp_of(public)
+            if corp_id is None:
+                failures.append(f"{public.get('name') or tok['character_id']}: no corporation id on the public record")
+                continue
+            by_corp.setdefault(corp_id, []).append((tok, public))
+        for corp_id, candidates in by_corp.items():
+            refused = []
+            for tok, public in candidates:
+                cname = public.get("name") or str(tok["character_id"])
+                try:
+                    jobs = _fetch_jobs(client, tok, corp_id, args.completed)
+                except esi_mod.AuthError as err:
+                    refused.append(f"{cname}: {err}")
+                    continue
+                owners.append((f"Corporation {corp_id} (read by {cname})",
+                               {"jobs": jobs}, tok, corp_id))
+                break
+            else:
+                failures.append("; ".join(refused) +
+                                " - corporation endpoints need the matching director/Account-Manager role")
     else:
-        for cname, rows in all_rows:
-            table = render.table(["status", "activity", "product", "runs", "time", "installed in"], rows) if rows else "(no jobs)"
-            blocks.append(f"{cname}\n{table}")
-        print("\n\n".join(blocks))
+        for tok, public in chars:
+            cname = public.get("name") or str(tok["character_id"])
+            try:
+                jobs = _fetch_jobs(client, tok, None, args.completed)
+            except esi_mod.AuthError as err:
+                failures.append(f"{cname}: ESI refused ({err}) - the jobs consent may no longer be granted")
+                continue
+            owners.append((cname, {"jobs": jobs}, tok, None))
+
+    for owner, payload, _tok, _corp_id in owners:
+        rows, ids = _job_rows(payload["jobs"], now)
+        _resolve_job_rows(client, rows, ids)
+        all_rows.append((owner, rows))
+    for line in failures:
+        print(f"warning: {line}", file=sys.stderr)
+    if args.csv:
+        writer = csv.writer(sys.stdout, lineterminator="\n")
+        if args.group:
+            writer.writerow(["installer", "status", "activity", "product", "runs", "count", "time"])
+            for _owner, rows in all_rows:
+                for row in _group_job_rows(rows, now):
+                    writer.writerow([row["installer"], row["status"], row["activity"], row["product"],
+                                     row["runs"], row["count"], row["time"]])
+        else:
+            writer.writerow(JOB_CSV_COLUMNS)
+            for owner, rows in all_rows:
+                for row in rows:
+                    writer.writerow(_job_csv_row(owner, row))
+        return
+    for owner, rows in all_rows:
+        if args.group:
+            grouped = _group_job_rows(rows, now)
+            table_rows = [[row["installer"], row["status"], row["activity"], row["product"],
+                           row["runs"], str(row["count"]), row["time"]] for row in grouped]
+            table = render.table(["installer", "status", "activity", "product", "runs", "count",
+                                  "end"], table_rows) if table_rows else "(no jobs)"
+        else:
+            table_rows = [[row["status"], row["activity"], row["product"], row["runs"], row["time"],
+                           row["installed_in"]] +
+                          ([row["installer"]] if args.corp else []) for row in rows]
+            headers = ["status", "activity", "product", "runs", "time", "installed in"]
+            if args.corp:
+                headers.append("installer")
+            table = render.table(headers, table_rows) if table_rows else "(no jobs)"
+        blocks.append(f"{owner}\n{table}")
+    print("\n\n".join(blocks))
 
 
 # ---------------------------------------------------------------------------
