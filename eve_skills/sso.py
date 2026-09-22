@@ -57,6 +57,8 @@ OPTIONAL_SCOPES = {
     # named error beats a bare 403.
     "blueprints": ["esi-characters.read_blueprints.v1", "esi-corporations.read_blueprints.v1",
                    "esi-characters.read_corporation_roles.v1"],
+    # Player-facing names for CorpSAG1..7; the endpoint is read-only and Director-gated.
+    "divisions": ["esi-corporations.read_divisions.v1"],
     # Corporation wallets need Accountant or Junior Accountant in-game; same roles-scope reasoning.
     "wallet": ["esi-wallet.read_character_wallet.v1", "esi-wallet.read_corporation_wallets.v1",
                "esi-characters.read_corporation_roles.v1"],

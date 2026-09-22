@@ -18,7 +18,7 @@ import sys
 import tempfile
 import unittest
 
-from eve_skills import cli, sso
+from eve_skills import cli, divisions, sso
 
 from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
@@ -357,7 +357,7 @@ class BlueprintsCommandTests(CommandTestCase):
         ))
         stacked = next(row for row in rows if row["kind"] == "BPO" and row["me"] == "0")
         self.assertEqual("2", stacked["count"])
-        self.assertEqual("division 4", copy["division"])
+        self.assertEqual("T2-Prod", copy["division"])
 
     def test_idle_joins_jobs_on_blueprint_item_id(self):
         self.env.install_jobs()
@@ -379,14 +379,14 @@ class BlueprintsCommandTests(CommandTestCase):
 
     def test_filters_group_order_and_machine_formats(self):
         code, out, err = self.env.run([
-            "blueprints", "--corp", "--copies", "--division", "4",
+            "blueprints", "--corp", "--copies", "--division", "T2-Prod",
             "--type", "Extender II", "--group-by", "division", "--json", "--char", "Ada",
         ])
         self.assertEqual((code, err), (0, ""))
         doc = json.loads(out)
         rows = doc["owners"][0]["blueprints"]
         self.assertEqual(1, len(rows))
-        self.assertEqual(("BPC", 2, "division 4"), (
+        self.assertEqual(("BPC", 2, "T2-Prod"), (
             rows[0]["kind"], rows[0]["count"], rows[0]["division"]
         ))
 
@@ -397,6 +397,19 @@ class BlueprintsCommandTests(CommandTestCase):
         items = list(csv.DictReader(io.StringIO(out)))
         self.assertIn("item_id", items[0])
         self.assertEqual(4, len(items))
+
+    def test_division_name_mapping_and_numbered_fallback(self):
+        self.assertEqual(4, divisions.number("CorpSAG4"))
+        self.assertEqual("T2-Prod", divisions.label("CorpSAG4", {4: "T2-Prod"}))
+        self.assertEqual("division 4", divisions.label("CorpSAG4"))
+        self.assertEqual("CorpDeliveries", divisions.label("CorpDeliveries", {4: "T2-Prod"}))
+
+        scopes = sso.SCOPES + sso.scopes_for(["blueprints"])
+        self.env.write_tokens([self.env.token_for(ADA, scopes)])
+        code, out, err = self.env.run(["blueprints", "--corp", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("division 4", out)
+        self.assertIn("login --scopes divisions", out)
 
 class InventoryCommandTests(CommandTestCase):
     """`inventory` named, placed and valued.
@@ -720,6 +733,40 @@ class InventoryCommandTests(CommandTestCase):
         self.assertEqual([f"/corporations/{CORP_SHARED}/assets"],
                          sorted({c.path for c in self.env.server.calls
                                  if c.path.endswith("/assets")}))
+
+    def test_corporation_inventory_uses_names_and_preserves_non_hangar_flags(self):
+        self.env.install_corp_inventory()
+        code, out, err = self.env.run(["inventory", "--corp", "--items", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("T2-Prod", out)
+        self.assertIn("CorpDeliveries", out)
+
+        code, csv_out, err = self.env.run(["inventory", "--corp", "--csv", "--char", "Ada"])
+        self.assertEqual(code, 0)
+        rows = {row["item_id"]: row for row in csv.DictReader(io.StringIO(csv_out))}
+        self.assertEqual("T2-Prod", rows["2001"]["division"])
+        self.assertEqual("CorpDeliveries", rows["2002"]["division"])
+
+    def test_inventory_groups_and_filters_by_division_name(self):
+        self.env.install_corp_inventory()
+        code, out, err = self.env.run(
+            ["inventory", "--corp", "--by", "division", "--division", "T2-Prod",
+             "--char", "Ada"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("T2-Prod", out)
+        self.assertIn("5,000", out)
+        self.assertNotIn("Ledger Runner", out)
+        self.assertNotIn("CorpDeliveries", out)
+
+    def test_inventory_falls_back_to_numbered_divisions_without_consent(self):
+        self.env.install_corp_inventory()
+        scopes = sso.SCOPES + sso.scopes_for(["assets", "structures"])
+        self.env.write_tokens([self.env.token_for(ADA, scopes)])
+        code, out, err = self.env.run(["inventory", "--corp", "--items", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("division 4", out)
+        self.assertIn("login --scopes divisions", out)
 
 
 class TravelCommandTests(CommandTestCase):

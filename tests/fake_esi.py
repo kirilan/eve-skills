@@ -922,6 +922,14 @@ class FakeEsiEnv:
             {"from_id": 500001, "from_type": "faction", "standing": 0.0},   # unresolvable id
         ])
 
+    def install_divisions(self):
+        self.server.get(
+            f"/corporations/{CORP_SHARED}/divisions", token=ADA.token,
+            doc={"hangar": [{"division": 2, "name": "Invention"},
+                            {"division": 4, "name": "T2-Prod"}],
+                 "wallet": [{"division": 1, "name": "Master Wallet"}]},
+        )
+
     def install_jobs(self):
         """Ada's industry jobs, spelled the way live ESI spells them.
 
@@ -950,6 +958,7 @@ class FakeEsiEnv:
 
     def install_blueprints(self):
         """Character and corporation blueprint documents with BPO, BPC and stacked-BPO shapes."""
+        self.install_divisions()
         personal = [
             {"item_id": 1055717863075, "type_id": JOB_RIG_BP, "location_id": STATION_JITA,
              "location_flag": "Hangar", "quantity": -1, "runs": -1,
@@ -1045,11 +1054,12 @@ class FakeEsiEnv:
         every custom name in the batch, so the two routes are registered separately here and the
         test can see which one was called."""
         self.install_inventory()
+        self.install_divisions()
         self.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=[
             {"item_id": 2001, "type_id": 34, "quantity": 5000, "is_singleton": False,
-             "location_id": STATION_JITA, "location_flag": "Hangar", "location_type": "station"},
+             "location_id": STATION_JITA, "location_flag": "CorpSAG4", "location_type": "station"},
             {"item_id": 2002, "type_id": INV_TYPE_SHIP, "quantity": 1, "is_singleton": True,
-             "location_id": INV_CITADEL_SEEN, "location_flag": "Hangar", "location_type": "station"},
+             "location_id": INV_CITADEL_SEEN, "location_flag": "CorpDeliveries", "location_type": "station"},
         ])
 
         def corp_asset_names(call: Call):

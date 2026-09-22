@@ -7,7 +7,7 @@ import json
 import sys
 from dataclasses import dataclass
 
-from . import esi as esi_mod, exports, render, sso, universe
+from . import divisions, esi as esi_mod, exports, render, universe
 
 
 @dataclass
@@ -18,23 +18,9 @@ class BlueprintOwner:
     token: dict
     blueprints: list[dict]
     notes: list[str]
+    division_names: dict[int, str]
 
 
-def division_number(flag: str | None) -> int | None:
-    """The numbered corporation hangar represented by a CorpSAG location flag."""
-    text = flag or ""
-    if text.startswith("CorpSAG") and text[7:].isdigit():
-        number = int(text[7:])
-        return number if 1 <= number <= 7 else None
-    return None
-
-
-def division_label(flag: str | None, names: dict[int, str] | None = None) -> str:
-    """A player-facing hangar label, with a stable numbered fallback."""
-    number = division_number(flag)
-    if number is None:
-        return flag or "-"
-    return (names or {}).get(number) or f"division {number}"
 
 
 def _blueprint_path(character_id: int, corporation_id: int | None) -> str:
@@ -76,7 +62,12 @@ def _fetch_blueprint_owners(args) -> tuple[esi_mod.Esi, list[BlueprintOwner], li
         if corp_id is not None:
             seen_corps.add(corp_id)
         owner_name = f"Corporation {corp_id} (read by {cname})" if corp_id is not None else cname
-        owners.append(BlueprintOwner(owner_name, cid, corp_id, tok, list(rows), []))
+        owner = BlueprintOwner(owner_name, cid, corp_id, tok, list(rows), [], {})
+        if corp_id is not None:
+            owner.division_names, note = divisions.fetch(client, tok, corp_id)
+            if note:
+                owner.notes.append(note)
+        owners.append(owner)
     return client, owners, hints + [f"warning: {line}" for line in failures]
 
 
@@ -123,14 +114,14 @@ def _normalized_rows(client, owner: BlueprintOwner, args) -> list[dict]:
     )
     query = (args.type or "").strip().casefold()
     division = getattr(args, "division", None)
-    wanted_division = int(division) if division and str(division).isdigit() else None
+    wanted_division = divisions.resolve(division, owner.division_names)
     rows = []
     for bp in owner.blueprints:
         type_id = int(bp["type_id"])
         type_name = names.get(type_id) or f"type {type_id}"
         kind = _blueprint_kind(bp)
         flag = bp.get("location_flag") or "-"
-        number = division_number(flag)
+        number = divisions.number(flag)
         if args.copies and kind != "BPC":
             continue
         if args.originals and kind != "BPO":
@@ -147,7 +138,7 @@ def _normalized_rows(client, owner: BlueprintOwner, args) -> list[dict]:
             "location_id": int(bp["location_id"]),
             "location": place.name if place else f"location {bp['location_id']}",
             "flag": flag,
-            "division": division_label(flag),
+            "division": divisions.label(flag, owner.division_names),
             "kind": kind,
             "runs": int(bp.get("runs", -1)),
             "me": int(bp.get("material_efficiency", 0)),
@@ -178,6 +169,8 @@ def _sort_blueprints(rows: list[dict], group_by: str) -> list[dict]:
 
 def cmd_blueprints(args):
     """List owned blueprint originals and copies from ESI's blueprint endpoints."""
+    if args.division is not None and not args.corp:
+        raise RuntimeError("--division is only meaningful with blueprints --corp")
     client, owners, notices = _fetch_blueprint_owners(args)
     if args.idle:
         for owner in owners:

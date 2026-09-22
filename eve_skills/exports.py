@@ -13,7 +13,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 
-from . import esi as esi_mod, market, render, sso, universe
+from . import divisions, esi as esi_mod, market, render, sso, universe
 
 # CCP's industry activity codes, as the SDE's `industryActivities` numbers them - ESI sends the
 # number, never a name. 2 and 6 were never used and 7 (reverse engineering) went away with T3
@@ -513,11 +513,12 @@ INVENTORY_CSV_COLUMNS = [
     "character", "item_id", "type_id", "item_name", "quantity", "singleton", "flag",
     "location_id", "location_name",
     "group_name", "category_name", "custom_name", "location_path", "location_kind",
-    "price_basis", "price_scope", "unit_price", "value", "unpriced_types",
+    "price_basis", "price_scope", "unit_price", "value", "unpriced_types", "division",
 ]
 SUMMARY_COLUMNS = {
     "location": ["location", "category", "types", "units", "value"],
     "category": ["category", "location", "types", "units", "value"],
+    "division": ["division", "location", "types", "units", "value"],
 }
 ITEMS_COLUMNS = ["item", "group", "category", "qty", "location", "unit price", "value"]
 PATH_SEPARATOR = " > "
@@ -723,14 +724,12 @@ class InventoryOwner:
     assets: list[dict]
     places: dict[int, universe.Location] = field(default_factory=dict)
     rows: list[dict] = field(default_factory=list)
+    division_names: dict[int, str] = field(default_factory=dict)
+    division_note: str | None = None
 
 
-def _inventory_rows(assets, places, infos, basis) -> list[dict]:
-    """Every asset row named, placed and priced: the one model all three views render from.
-
-    A singleton's own display name comes from its place entry - `resolve_locations` fills that with
-    the player's label when there is one - so `Nightwatch (Rifter)` says both what she calls it and
-    what it is. A plain quantity row has no such entry and keeps its type name."""
+def _inventory_rows(assets, places, infos, basis, division_names=None, corporation=False) -> list[dict]:
+    """Every asset row named, placed and priced: the one model all three views render from."""
     rows = []
     for asset in assets:
         type_id = _ident(asset.get("type_id")) or 0
@@ -742,6 +741,12 @@ def _inventory_rows(assets, places, infos, basis) -> list[dict]:
         chain = location_chain(places, _ident(asset.get("location_id")))
         quantity = _quantity(asset)
         unit = basis.unit.get(type_id)
+        flag = asset.get("location_flag") or ""
+        division_number = divisions.number(flag) if corporation else None
+        division = divisions.label(flag, division_names) if corporation else None
+        base_path = PATH_SEPARATOR.join(place.name for place in chain) or "-"
+        path = (f"{base_path}{PATH_SEPARATOR}{division}"
+                if division_number is not None else base_path)
         rows.append({
             "item_id": item_id, "type_id": type_id, "type_name": type_name,
             "group_name": info.group_name if info else "unknown",
@@ -749,13 +754,15 @@ def _inventory_rows(assets, places, infos, basis) -> list[dict]:
             "custom_name": custom,
             "display": f"{custom} ({type_name})" if custom else type_name,
             "quantity": quantity, "singleton": bool(asset.get("is_singleton")),
-            # `location_flag` is what `/assets` actually calls it; the CSV column keeps its old name.
-            "flag": asset.get("location_flag") or "",
+            "flag": flag,
+            "division_number": division_number,
+            "division": division,
             "location_id": asset.get("location_id"),
             "chain": chain,
             "place": chain[-1] if chain else None,
             "top": chain[0] if chain else None,
-            "path": PATH_SEPARATOR.join(place.name for place in chain) or "-",
+            "base_path": base_path,
+            "path": path,
             "unit_price": unit,
             "value": None if unit is None else unit * quantity,
         })
@@ -800,11 +807,19 @@ def _inventory_groups(rows: list[dict], by: str) -> list[dict]:
             outer_key = (row["category_name"].lower(), "")
             inner_key = (row["path"].lower(), "")
             head, sub = row["category_name"], row["path"]
+        elif by == "division":
+            division = row["division"] or row["flag"] or "-"
+            outer_key = (division.lower(), row["division_number"] or 0)
+            inner_key = (row["base_path"].lower(), "")
+            head, sub = division, row["base_path"]
         else:
             top = row["top"]
             outer_key = ((top.name.lower() if top else "-"), _ident(top.location_id) if top else 0)
-            inner_key = (row["category_name"].lower(), "")
-            head, sub = (top.name if top else "-"), row["category_name"]
+            sub = row["category_name"]
+            if row["division_number"] is not None:
+                sub = f"{row['division']} / {sub}"
+            inner_key = (sub.lower(), "")
+            head = top.name if top else "-"
         group = outer.get(outer_key)
         if group is None:
             group = outer[outer_key] = {"name": head, "tally": _Tally(), "entries": {}}
@@ -855,8 +870,13 @@ def _owner_table(owner: InventoryOwner, by: str, items: bool) -> str:
     """One owner's table: the grouped view with a subtotal per section, or one row per item."""
     if items:
         table_rows = [[row["display"], row["group_name"], row["category_name"],
-                       f"{row['quantity']:,}", row["path"], render.isk(row["unit_price"]),
-                       render.isk(row["value"])] for row in _sorted_items(owner.rows)]
+                       f"{row['quantity']:,}"] +
+                      ([row["division"] or "-"] if owner.corp_id is not None else []) +
+                      [row["path"], render.isk(row["unit_price"]), render.isk(row["value"])]
+                      for row in _sorted_items(owner.rows)]
+        headers = list(ITEMS_COLUMNS)
+        if owner.corp_id is not None:
+            headers.insert(4, "division")
     else:
         table_rows = []
         for group in _inventory_groups(owner.rows, by):
@@ -865,7 +885,8 @@ def _owner_table(owner: InventoryOwner, by: str, items: bool) -> str:
                                    f"{entry['units']:,}", _group_value(entry)])
             table_rows.append([f"subtotal {group['name']}", "", f"{group['types']:,}",
                                f"{group['units']:,}", _group_value(group)])
-    return render.table(ITEMS_COLUMNS if items else SUMMARY_COLUMNS[by], table_rows)
+        headers = SUMMARY_COLUMNS[by]
+    return render.table(headers, table_rows)
 
 
 def _totals_line(basis: Valuation, totals: dict) -> str:
@@ -929,6 +950,7 @@ def _item_doc(row: dict) -> dict:
             "type_name": row["type_name"], "custom_name": row["custom_name"],
             "group_name": row["group_name"], "category_name": row["category_name"],
             "quantity": row["quantity"], "singleton": row["singleton"], "flag": row["flag"] or None,
+            "division_number": row["division_number"], "division": row["division"],
             "location_id": row["location_id"],
             "location_kind": row["place"].kind if row["place"] else None,
             "location_path": [_place_doc(place) for place in row["chain"]],
@@ -947,6 +969,8 @@ def cmd_inventory(args):
     items = bool(args.items)
     machine = bool(getattr(args, "json", False))
     value_at = getattr(args, "value_at", None)
+    if getattr(args, "division", None) is not None and not args.corp:
+        raise RuntimeError("--division is only meaningful with inventory --corp")
     consent = ("esi-assets.read_corporation_assets.v1" if args.corp
                else "esi-assets.read_assets.v1")
     client, chars, hints = targets(args, [("assets", consent)])
@@ -972,7 +996,16 @@ def cmd_inventory(args):
                    if args.corp else "the assets consent may no longer be granted")
             failures.append(f"{cname}: ESI refused ({err}) - {why}")
             continue
-        owners.append(InventoryOwner(cname, cid, tok["access_token"], corp_id, list(assets)))
+        owner = InventoryOwner(cname, cid, tok["access_token"], corp_id, list(assets))
+        if corp_id is not None:
+            owner.division_names, owner.division_note = divisions.fetch(client, tok, corp_id)
+        owners.append(owner)
+
+    if getattr(args, "division", None) is not None:
+        for owner in owners:
+            wanted_division = divisions.resolve(args.division, owner.division_names)
+            owner.assets = [asset for asset in owner.assets
+                            if divisions.number(asset.get("location_flag")) == wanted_division]
 
     held = {ident for owner in owners for asset in owner.assets
             if (ident := _ident(asset.get("type_id"))) is not None}
@@ -997,7 +1030,8 @@ def cmd_inventory(args):
 
     blind: set[int] = set()
     for owner in owners:
-        owner.rows = _inventory_rows(owner.assets, owner.places, infos, basis)
+        owner.rows = _inventory_rows(owner.assets, owner.places, infos, basis,
+                                     owner.division_names, owner.corp_id is not None)
         blind.update(place.location_id for place in owner.places.values() if _unnamed_structure(place))
 
     unpriced = sorted((infos[ident].name if ident in infos else f"type {ident}")
@@ -1054,7 +1088,7 @@ def cmd_inventory(args):
                              "types": len(alt_types), "basis_only_types": len(alt_only)},
                             "cached_figures": basis.cached_figures,
                             "substituted_types": len(basis.substituted)},
-            "hints": hints,
+            "hints": hints + [owner.division_note for owner in owners if owner.division_note],
             "warnings": failures,
             "characters": [{"character_id": owner.character_id, "name": owner.name,
                             "asset_rows": len(owner.assets), "totals": _owner_totals(owner.rows),
@@ -1077,11 +1111,14 @@ def cmd_inventory(args):
                                  row["path"], place.kind if place else "",
                                  basis.row_basis(row["type_id"]),
                                  basis.scope_label, row["unit_price"], row["value"],
-                                 unpriced_here])
+                                 unpriced_here, row["division"] or ""])
         for line in notes:      # the footnotes matter; they just may not pollute a CSV pipe
             print(line, file=sys.stderr)
+        for owner in owners:
+            if owner.division_note:
+                print(owner.division_note, file=sys.stderr)
         return
-    blocks = list(hints)
+    blocks = list(hints) + [owner.division_note for owner in owners if owner.division_note]
     for owner in owners:
         head = f"{owner.name} ({len(owner.assets):,} asset rows)"
         if not owner.rows:

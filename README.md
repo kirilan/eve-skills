@@ -41,9 +41,9 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
 | `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines and `--slots` shows each character's manufacturing, science and reaction budget | `--scopes jobs` |
-| `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs and filters can select kind, type or corporation division | `--scopes blueprints`; `--idle` also needs `jobs` |
+| `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs and filters can select kind, type or corporation division | `--scopes blueprints`; `--idle` also needs `jobs`; `divisions` names corporation hangars |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
-| `inventory` | Assets named, placed and valued: per-location summary with subtotals, the same table turned round with `--by category`, one row per item with `--items`, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player-owned structures |
+| `inventory` | Assets named, placed and valued: per-location summary, `--by category` or corporation `--by division`, one row per item with `--items`, division filters, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player structures and `divisions` to name corporation hangars |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |
 | `implants` | Implants fitted in the active clone | `--scopes clones` |
 | `plan` | Ordered, priced training path to target levels incl. auto-added prerequisites | no — needs the SDE skill catalog (`update-data`) |
@@ -239,6 +239,10 @@ first login:
    | `orders` | `esi-markets.read_character_orders.v1` |
    | `corp-orders` | `esi-markets.read_corporation_orders.v1`, `esi-characters.read_corporation_roles.v1` |
    | `structures` | `esi-universe.read_structures.v1` |
+   | `planets` | `esi-planets.manage_planets.v1` (ESI exposes only GET for the colony routes) |
+   | `blueprints` | `esi-characters.read_blueprints.v1`, `esi-corporations.read_blueprints.v1`, `esi-characters.read_corporation_roles.v1` |
+   | `divisions` | `esi-corporations.read_divisions.v1` |
+   | `wallet` | `esi-wallet.read_character_wallet.v1`, `esi-wallet.read_corporation_wallets.v1`, `esi-characters.read_corporation_roles.v1` |
 
    Requesting a scope the application is not registered for makes SSO refuse the login.
 4. Register it as a native/public application (no secret). Confidential registrations work too —
@@ -332,7 +336,7 @@ the SSO session between them: characters on the same account cost a pick, not a 
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `structures`, `planets`, `blueprints`, `wallet`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `planets`, `blueprints`, `divisions`, `wallet`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
@@ -351,6 +355,10 @@ the SSO session between them: characters on the same account cost a pick, not a 
   ME or TE; `blueprints` grants the character and corporation blueprint endpoints. `wallet` grants
   character and corporation wallet balances. Both bundle the roles scope, because the corporation
   halves need Director (blueprints) or Accountant / Junior Accountant (wallets) in-game.
+- **Corporation division names are optional.** `blueprints --corp` and `inventory --corp` read
+  `/corporations/{corporation_id}/divisions` with `--scopes divisions`. ESI requires the Director
+  role. Without it, the commands keep working with `division 1` … `division 7` and print one re-login
+  hint; non-hangar flags such as `CorpDeliveries` remain unchanged.
 - **Market prices need no consent at all** — `market`, `build-cost` and `pi chain` read the public
   order books, so they work on a fresh install with nothing configured. Only *your own* orders are
   private: `orders` needs the `orders` consent, and `orders --corp` additionally needs `corp-orders`

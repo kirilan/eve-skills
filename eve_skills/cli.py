@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="run the login flow N times in a row, for N characters. EVE issues one token per "
                               "character, so this is N consent screens - but one command, and the browser keeps "
                               "the SSO session between them")
-    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,blueprints,wallet,all (re-authenticates the chosen character with EXACTLY these consents, so pass every one you still want - or just 'all')")
+    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,blueprints,divisions,wallet,all (re-authenticates the chosen character with EXACTLY these consents, so pass every one you still want - or just 'all')")
 
     p_logout = sub.add_parser("logout", help="remove stored tokens")
     p_logout.add_argument("--char", help="only this character (name or id); default removes all")
@@ -196,8 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     kind = p_blueprints.add_mutually_exclusive_group()
     kind.add_argument("--copies", action="store_true", help="show blueprint copies only")
     kind.add_argument("--originals", action="store_true", help="show blueprint originals only")
-    p_blueprints.add_argument("--division", metavar="N",
-                              help="only corporation hangar division N")
+    p_blueprints.add_argument("--division", metavar="N|NAME",
+                              help="only one corporation hangar division, by number or player-defined name")
     p_blueprints.add_argument("--type", metavar="TEXT",
                               help="case-insensitive substring of the blueprint type name")
     p_blueprints.add_argument("--group-by", choices=["type", "division"], default="type",
@@ -210,8 +210,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_inv = sub.add_parser("inventory", help="asset inventory with real item names, grouped by location or category and valued (needs login --scopes assets)")
     p_inv.add_argument("--char", help="stored character name or id (default: every stored character)")
     p_inv.add_argument("--corp", action="store_true", help="corporation assets instead of personal (needs the matching director/Account-Manager role)")
-    p_inv.add_argument("--by", choices=["location", "category"], default="location",
-                       help="group the summary by where the items are (default) or by what they are")
+    p_inv.add_argument("--by", choices=["location", "category", "division"], default="location",
+                       help="group the summary by location (default), category, or corporation division")
+    p_inv.add_argument("--division", metavar="N|NAME",
+                       help="with --corp, only one hangar division by number or player-defined name")
     p_inv.add_argument("--items", action="store_true", help="list every item row instead of the grouped summary, most valuable first")
     p_inv.add_argument("--value-at", dest="value_at", metavar="HUB|REGION",
                        help=f"value holdings at the richest standing buy order there instead of "
