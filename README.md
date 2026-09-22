@@ -40,10 +40,10 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
-| `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines and `--slots` shows each character's manufacturing, science and reaction budget | `--scopes jobs` |
-| `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs and filters can select kind, type or corporation division | `--scopes blueprints`; `--idle` also needs `jobs`; `divisions` names corporation hangars |
+| `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines, `--slots` shows each character's manufacturing, science and reaction budget, and `--json` exposes cache timestamps | `--scopes jobs` |
+| `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs, filters can select kind, type or corporation division, and corporation output identifies stale snapshots | `--scopes blueprints`; `--idle` and delivery checks also need `jobs`; `divisions` names corporation hangars |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
-| `inventory` | Assets named, placed and valued: per-location summary, `--by category` or corporation `--by division`, one row per item with `--items`, division filters, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player structures and `divisions` to name corporation hangars |
+| `inventory` | Assets named, placed and valued: per-location summary, `--by category` or corporation `--by division`, one row per item with `--items`, division filters, cache freshness, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player structures, `divisions` to name corporation hangars, and `jobs` for delivery warnings |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |
 | `implants` | Implants fitted in the active clone | `--scopes clones` |
 | `plan` | Ordered, priced training path to target levels incl. auto-added prerequisites | no — needs the SDE skill catalog (`update-data`) |
@@ -459,6 +459,13 @@ prints a per-character warning rather than failing the whole command.
 
 Both endpoints answer with running jobs only; `--completed` is what adds the delivered and
 cancelled ones.
+
+Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
+`Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
+timestamps as fields; CSV sends the line to stderr. When the optional jobs consent is available,
+asset and blueprint views also warn when a delivered job is newer than the snapshot, because that
+job's output cannot be present in the displayed numbers yet.
+
 
 ### `inventory` — what you own, where it is, what it is worth
 

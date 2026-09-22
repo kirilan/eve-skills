@@ -13,7 +13,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 
-from . import divisions, esi as esi_mod, market, render, sso, universe
+from . import divisions, esi as esi_mod, freshness, market, render, sso, universe
 
 # CCP's industry activity codes, as the SDE's `industryActivities` numbers them - ESI sends the
 # number, never a name. 2 and 6 were never used and 7 (reverse engineering) went away with T3
@@ -284,10 +284,14 @@ def _jobs_path(character_id: int, corporation_id: int | None, completed: bool) -
     return path + ("?include_completed=true" if completed else "")
 
 
-def _fetch_jobs(client, tok, corporation_id: int | None, completed: bool):
+def _fetch_jobs_meta(client, tok, corporation_id: int | None, completed: bool):
     path = _jobs_path(int(tok["character_id"]), corporation_id, completed)
-    return (client.get_all(path, token=tok["access_token"]) if corporation_id is not None
-            else client.get(path, token=tok["access_token"]))
+    return (client.get_all_meta(path, token=tok["access_token"]) if corporation_id is not None
+            else client.get_meta(path, token=tok["access_token"]))
+
+
+def _fetch_jobs(client, tok, corporation_id: int | None, completed: bool):
+    return _fetch_jobs_meta(client, tok, corporation_id, completed)[0]
 
 
 def _slot_cell(used: int, maximum: int | None, ready: int) -> str:
@@ -442,12 +446,12 @@ def cmd_jobs(args):
             for tok, public in candidates:
                 cname = public.get("name") or str(tok["character_id"])
                 try:
-                    jobs = _fetch_jobs(client, tok, corp_id, args.completed)
+                    jobs, meta = _fetch_jobs_meta(client, tok, corp_id, args.completed)
                 except esi_mod.AuthError as err:
                     refused.append(f"{cname}: {err}")
                     continue
                 owners.append((f"Corporation {corp_id} (read by {cname})",
-                               {"jobs": jobs}, tok, corp_id))
+                               {"jobs": jobs, "meta": meta}, tok, corp_id))
                 break
             else:
                 failures.append("; ".join(refused) +
@@ -456,33 +460,57 @@ def cmd_jobs(args):
         for tok, public in chars:
             cname = public.get("name") or str(tok["character_id"])
             try:
-                jobs = _fetch_jobs(client, tok, None, args.completed)
+                jobs, meta = _fetch_jobs_meta(client, tok, None, args.completed)
             except esi_mod.AuthError as err:
                 failures.append(f"{cname}: ESI refused ({err}) - the jobs consent may no longer be granted")
                 continue
-            owners.append((cname, {"jobs": jobs}, tok, None))
+            owners.append((cname, {"jobs": jobs, "meta": meta}, tok, None))
 
-    for owner, payload, _tok, _corp_id in owners:
+    for owner, payload, _tok, corp_id in owners:
         rows, ids = _job_rows(payload["jobs"], now)
         _resolve_job_rows(client, rows, ids)
-        all_rows.append((owner, rows))
+        all_rows.append((owner, rows, payload["meta"], corp_id))
     for line in failures:
         print(f"warning: {line}", file=sys.stderr)
+    if getattr(args, "json", False):
+        documents = []
+        for owner, rows, meta, corp_id in all_rows:
+            selected = _group_job_rows(rows, now) if args.group else rows
+            if args.group:
+                payload_rows = [{key: row[key] for key in
+                                 ("installer", "status", "activity", "product", "runs", "count", "time")}
+                                for row in selected]
+            else:
+                payload_rows = [{key: row[key] for key in
+                                 ("job_id", "status", "activity_id", "activity", "product_id",
+                                  "product", "runs", "time", "facility_id", "installed_in",
+                                  "installer_id", "installer", "start_date", "end_date",
+                                  "duration_h", "hours_per_run")}
+                                for row in selected]
+            documents.append({"owner": owner, "corporation_id": corp_id,
+                              "cache": freshness.document(meta) if corp_id is not None else None,
+                              "jobs": payload_rows})
+        print(json.dumps({"grouped": bool(args.group), "hints": hints, "warnings": failures,
+                          "documents": documents}, indent=2))
+        return
     if args.csv:
         writer = csv.writer(sys.stdout, lineterminator="\n")
         if args.group:
             writer.writerow(["installer", "status", "activity", "product", "runs", "count", "time"])
-            for _owner, rows in all_rows:
+            for _owner, rows, _meta, _corp_id in all_rows:
                 for row in _group_job_rows(rows, now):
                     writer.writerow([row["installer"], row["status"], row["activity"], row["product"],
                                      row["runs"], row["count"], row["time"]])
         else:
             writer.writerow(JOB_CSV_COLUMNS)
-            for owner, rows in all_rows:
+            for owner, rows, _meta, _corp_id in all_rows:
                 for row in rows:
                     writer.writerow(_job_csv_row(owner, row))
+        for _owner, _rows, meta, corp_id in all_rows:
+            if corp_id is not None:
+                print(freshness.line("corp jobs", meta), file=sys.stderr)
         return
-    for owner, rows in all_rows:
+    for owner, rows, meta, corp_id in all_rows:
         if args.group:
             grouped = _group_job_rows(rows, now)
             table_rows = [[row["installer"], row["status"], row["activity"], row["product"],
@@ -497,7 +525,8 @@ def cmd_jobs(args):
             if args.corp:
                 headers.append("installer")
             table = render.table(headers, table_rows) if table_rows else "(no jobs)"
-        blocks.append(f"{owner}\n{table}")
+        cache = f"\n{freshness.line('corp jobs', meta)}" if corp_id is not None else ""
+        blocks.append(f"{owner}{cache}\n{table}")
     print("\n\n".join(blocks))
 
 
@@ -723,6 +752,10 @@ class InventoryOwner:
     corp_id: int | None
     assets: list[dict]
     places: dict[int, universe.Location] = field(default_factory=dict)
+    asset_meta: esi_mod.Meta = field(default_factory=esi_mod.Meta)
+    completed_jobs: list[dict] = field(default_factory=list)
+    jobs_meta: esi_mod.Meta | None = None
+    freshness_warning: str | None = None
     rows: list[dict] = field(default_factory=list)
     division_names: dict[int, str] = field(default_factory=dict)
     division_note: str | None = None
@@ -988,17 +1021,26 @@ def cmd_inventory(args):
             continue
         path = f"/corporations/{corp_id}/assets" if corp_id else f"/characters/{cid}/assets"
         try:
-            assets = client.get_all(path, token=tok["access_token"])
+            assets, asset_meta = client.get_all_meta(path, token=tok["access_token"])
         except esi_mod.AuthError as err:
-            # A personal refusal and a corporate one have different fixes, and pointing at the wrong
-            # one sends the owner hunting for a role they already hold.
             why = ("corporation assets need the director/Account-Manager role for that corp"
                    if args.corp else "the assets consent may no longer be granted")
             failures.append(f"{cname}: ESI refused ({err}) - {why}")
             continue
-        owner = InventoryOwner(cname, cid, tok["access_token"], corp_id, list(assets))
+        owner = InventoryOwner(cname, cid, tok["access_token"], corp_id, list(assets),
+                               asset_meta=asset_meta)
         if corp_id is not None:
             owner.division_names, owner.division_note = divisions.fetch(client, tok, corp_id)
+            if "esi-industry.read_corporation_jobs.v1" in set(tok.get("scopes") or []):
+                try:
+                    owner.completed_jobs, owner.jobs_meta = client.get_all_meta(
+                        f"/corporations/{corp_id}/industry/jobs?include_completed=true",
+                        token=tok["access_token"],
+                    )
+                except esi_mod.AuthError:
+                    pass
+            count = freshness.delivered_after(owner.completed_jobs, owner.asset_meta)
+            owner.freshness_warning = freshness.delivery_warning(count, "asset")
         owners.append(owner)
 
     if getattr(args, "division", None) is not None:
@@ -1009,9 +1051,6 @@ def cmd_inventory(args):
 
     held = {ident for owner in owners for asset in owner.assets
             if (ident := _ident(asset.get("type_id"))) is not None}
-    # The catalogue first, on purpose: `resolve_locations` reads the same type records to tell a
-    # ship from a container, so warming them here turns its lookup into a cache hit instead of a
-    # second fan-out over ids this run has already fetched.
     infos = universe.type_info(client, held) if held else {}
     for owner in owners:
         who = ({"corporation_id": owner.corp_id} if owner.corp_id
@@ -1019,8 +1058,6 @@ def cmd_inventory(args):
         owner.places = universe.resolve_locations(client, owner.assets, token=owner.token, **who)
 
     def announce(info: market.Preflight) -> None:
-        """Say what the valuation is about to cost, while there is still time to say it. Machine
-        output keeps prose off both streams, exactly as the failure notes below do."""
         if not machine:
             print(_valuation_notice(info), file=sys.stderr)
 
@@ -1036,11 +1073,6 @@ def cmd_inventory(args):
 
     unpriced = sorted((infos[ident].name if ident in infos else f"type {ident}")
                       for ident in held if ident not in basis.unit)
-    # The comparison has to cover the rows the TOTAL actually covered, or it is not a comparison:
-    # the ask side reaches types the bid side does not, and summing those extra types into "would
-    # raise X" credits the alternative with holdings the figure it is measured against never
-    # priced. So the alt total is taken over the intersection, and the types the other basis could
-    # have priced are counted out loud instead of quietly folded in.
     alt_total, alt_types, alt_only = 0.0, set(), set()
     for owner in owners:
         for row in owner.rows:
@@ -1064,7 +1096,7 @@ def cmd_inventory(args):
     notes = (_valuation_notes(basis, len(held) - len(unpriced), unpriced, alt_line)
              + ([_structure_notice(len(blind))] if blind else [])) if held else []
 
-    if not machine:     # --json carries these in `warnings`; prose would break a parser
+    if not machine:
         for line in failures:
             print(f"warning: {line}", file=sys.stderr)
     if machine:
@@ -1076,25 +1108,29 @@ def cmd_inventory(args):
                             "scope": basis.scope, "requests": basis.requests,
                             "priced_types": len(held) - len(unpriced), "unpriced_types": unpriced,
                             "failed_books": basis.failed_books,
-                            # the prose lines carry a "freshness: " label; a field already named
-                            # freshness does not need it repeated inside its own value
                             "freshness": None if basis.freshness is None else
                             basis.freshness.removeprefix("freshness: "),
-                            # `types` is the shared set the alternative was summed over, and
-                            # `basis_only_types` the ones only the alternative could price - a
-                            # consumer comparing the two totals needs to know they match sets.
                             "alternative": None if basis.alt_label is None else
                             {"label": basis.alt_label, "value": alt_total if alt_types else None,
                              "types": len(alt_types), "basis_only_types": len(alt_only)},
                             "cached_figures": basis.cached_figures,
                             "substituted_types": len(basis.substituted)},
             "hints": hints + [owner.division_note for owner in owners if owner.division_note],
-            "warnings": failures,
-            "characters": [{"character_id": owner.character_id, "name": owner.name,
-                            "asset_rows": len(owner.assets), "totals": _owner_totals(owner.rows),
-                            "groups": _inventory_groups(owner.rows, by),
-                            "items": [_item_doc(row) for row in _sorted_items(owner.rows)]}
-                           for owner in owners],
+            "warnings": failures + [owner.freshness_warning for owner in owners
+                                    if owner.freshness_warning],
+            "characters": [{
+                "character_id": owner.character_id,
+                "name": owner.name,
+                "asset_rows": len(owner.assets),
+                "totals": _owner_totals(owner.rows),
+                "groups": _inventory_groups(owner.rows, by),
+                "items": [_item_doc(row) for row in _sorted_items(owner.rows)],
+                "documents": ({
+                    "assets": freshness.document(owner.asset_meta),
+                    "jobs": (freshness.document(owner.jobs_meta)
+                             if owner.jobs_meta is not None else None),
+                } if owner.corp_id is not None else None),
+            } for owner in owners],
         }, indent=2))
         return
     if args.csv:
@@ -1112,21 +1148,34 @@ def cmd_inventory(args):
                                  basis.row_basis(row["type_id"]),
                                  basis.scope_label, row["unit_price"], row["value"],
                                  unpriced_here, row["division"] or ""])
-        for line in notes:      # the footnotes matter; they just may not pollute a CSV pipe
+        for line in notes:
             print(line, file=sys.stderr)
         for owner in owners:
             if owner.division_note:
                 print(owner.division_note, file=sys.stderr)
+            if owner.corp_id is not None:
+                print(freshness.line("corp assets", owner.asset_meta), file=sys.stderr)
+                if owner.jobs_meta is not None:
+                    print(freshness.line("corp jobs", owner.jobs_meta), file=sys.stderr)
+                if owner.freshness_warning:
+                    print(owner.freshness_warning, file=sys.stderr)
         return
     blocks = list(hints) + [owner.division_note for owner in owners if owner.division_note]
     for owner in owners:
         head = f"{owner.name} ({len(owner.assets):,} asset rows)"
+        cache = []
+        if owner.corp_id is not None:
+            cache.append(freshness.line("corp assets", owner.asset_meta))
+            if owner.jobs_meta is not None:
+                cache.append(freshness.line("corp jobs", owner.jobs_meta))
+            if owner.freshness_warning:
+                cache.append(owner.freshness_warning)
+        cache_text = ("\n" + "\n".join(cache)) if cache else ""
         if not owner.rows:
-            blocks.append(f"{head}\n(inventory empty)")
+            blocks.append(f"{head}{cache_text}\n(inventory empty)")
             continue
-        blocks.append(f"{head}\n{_owner_table(owner, by, items)}\n"
+        blocks.append(f"{head}{cache_text}\n{_owner_table(owner, by, items)}\n"
                       f"{_totals_line(basis, _owner_totals(owner.rows))}")
-    # Only the grouped view marks cells, so only it needs the legend; `--items` prices row by row.
     if not items and any(row["value"] is None for owner in owners for row in owner.rows):
         notes = notes + ["* the ISK on that line covers only its priced units; the unit count "
                          "beside it is everything held, including what nothing priced"]

@@ -930,7 +930,7 @@ class FakeEsiEnv:
                  "wallet": [{"division": 1, "name": "Master Wallet"}]},
         )
 
-    def install_jobs(self):
+    def install_jobs(self, age: float = 300):
         """Ada's industry jobs, spelled the way live ESI spells them.
 
         Five jobs, one per shape the view has to get right: a manufacturing job still running, a
@@ -947,18 +947,20 @@ class FakeEsiEnv:
             return lambda call: (rows if call.query.get("include_completed") == "true"
                                  else [j for j in rows if j["status"] == "active"])
 
+        headers = {"Last-Modified": http_date(-age), "Expires": http_date(300)}
         self.server.get(f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token,
-                        handler=served(jobs))
+                        handler=served(jobs), headers=headers)
         # The corporation endpoint: identical job shapes, except that it spells the facility
         # `location_id` and never sends `station_id`.
         corp_jobs = [{k: v for k, v in dict(job, location_id=job["facility_id"]).items()
                       if k != "station_id"} for job in jobs]
         self.server.get(f"/corporations/{CORP_SHARED}/industry/jobs", token=ADA.token,
-                        handler=served(corp_jobs))
+                        handler=served(corp_jobs), headers=headers)
 
-    def install_blueprints(self):
+    def install_blueprints(self, age: float = 300):
         """Character and corporation blueprint documents with BPO, BPC and stacked-BPO shapes."""
         self.install_divisions()
+        self.install_jobs()
         personal = [
             {"item_id": 1055717863075, "type_id": JOB_RIG_BP, "location_id": STATION_JITA,
              "location_flag": "Hangar", "quantity": -1, "runs": -1,
@@ -981,8 +983,11 @@ class FakeEsiEnv:
              "location_flag": "CorpSAG2", "quantity": 2, "runs": -1,
              "material_efficiency": 0, "time_efficiency": 0},
         ]
-        self.server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=personal)
-        self.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=corporation)
+        headers = {"Last-Modified": http_date(-age), "Expires": http_date(3600)}
+        self.server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=personal,
+                        headers=headers)
+        self.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=corporation,
+                        headers=headers)
 
     def install_inventory(self):
         """Ada's holdings, reported the way live ESI reports them.
@@ -1046,7 +1051,7 @@ class FakeEsiEnv:
 
         self.server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token, handler=assets)
 
-    def install_corp_inventory(self):
+    def install_corp_inventory(self, age: float = 300):
         """Corporation assets for Ada's corp, on top of the personal fixture.
 
         Same shapes, different owner: a corporation run must ask `/corporations/{corp}/assets/names`
@@ -1055,12 +1060,13 @@ class FakeEsiEnv:
         test can see which one was called."""
         self.install_inventory()
         self.install_divisions()
+        self.install_jobs()
         self.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=[
             {"item_id": 2001, "type_id": 34, "quantity": 5000, "is_singleton": False,
              "location_id": STATION_JITA, "location_flag": "CorpSAG4", "location_type": "station"},
             {"item_id": 2002, "type_id": INV_TYPE_SHIP, "quantity": 1, "is_singleton": True,
              "location_id": INV_CITADEL_SEEN, "location_flag": "CorpDeliveries", "location_type": "station"},
-        ])
+        ], headers={"Last-Modified": http_date(-age), "Expires": http_date(3600)})
 
         def corp_asset_names(call: Call):
             return [{"item_id": i, "name": CORP_CUSTOM_NAMES[i]} for i in call.json

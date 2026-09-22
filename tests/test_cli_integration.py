@@ -331,6 +331,25 @@ class JobsCommandTests(CommandTestCase):
             1,
             len(self.env.server.calls_to(f"/corporations/{CORP_SHARED}/industry/jobs")),
         )
+    def test_corporation_cache_time_is_available_in_every_format(self):
+        self.env.install_jobs()
+        code, out, err = self.env.run(["jobs", "--corp", "--char", "Ada"])
+        self.assertEqual(code, 0)
+        self.assertIn("corp jobs as of ", out)
+        self.assertIn(", next refresh ", out)
+
+        code, out, err = self.env.run(["jobs", "--corp", "--json", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        cache = json.loads(out)["documents"][0]["cache"]
+        self.assertTrue(cache["last_modified"].endswith("Z"))
+        self.assertTrue(cache["expires"].endswith("Z"))
+
+        code, out, err = self.env.run(["jobs", "--corp", "--csv", "--char", "Ada"])
+        self.assertEqual(code, 0)
+        self.assertIn("corp jobs as of ", err)
+        self.assertNotIn("corp jobs as of ", out)
+
+
 
 
 
@@ -349,7 +368,8 @@ class BlueprintsCommandTests(CommandTestCase):
 
     def test_corporation_groups_identical_copies_and_stacked_originals(self):
         code, out, err = self.env.run(["blueprints", "--corp", "--csv", "--char", "Ada"])
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0)
+        self.assertIn("corp blueprints as of ", err)
         rows = list(csv.DictReader(io.StringIO(out)))
         copy = next(row for row in rows if row["kind"] == "BPC")
         self.assertEqual(("10", "7", "14", "2"), (
@@ -364,7 +384,8 @@ class BlueprintsCommandTests(CommandTestCase):
         code, out, err = self.env.run(
             ["blueprints", "--corp", "--idle", "--items", "--csv", "--char", "Ada"]
         )
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0)
+        self.assertIn("corp blueprints as of ", err)
         rows = list(csv.DictReader(io.StringIO(out)))
         self.assertNotIn("1055717863075", {row["item_id"] for row in rows})
         self.assertEqual({"2201", "2202", "2203"}, {row["item_id"] for row in rows})
@@ -393,7 +414,8 @@ class BlueprintsCommandTests(CommandTestCase):
         code, out, err = self.env.run(
             ["blueprints", "--corp", "--items", "--csv", "--char", "Ada"]
         )
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0)
+        self.assertIn("corp blueprints as of ", err)
         items = list(csv.DictReader(io.StringIO(out)))
         self.assertIn("item_id", items[0])
         self.assertEqual(4, len(items))
@@ -410,6 +432,22 @@ class BlueprintsCommandTests(CommandTestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("division 4", out)
         self.assertIn("login --scopes divisions", out)
+    def test_cache_fields_and_delivery_warning_track_the_blueprint_snapshot(self):
+        self.env.install_blueprints(age=90_000)
+        code, out, err = self.env.run(["blueprints", "--corp", "--json", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        cache = doc["owners"][0]["documents"]["blueprints"]
+        self.assertTrue(cache["last_modified"].endswith("Z"))
+        self.assertIn("1 job delivered after the blueprint snapshot", doc["warnings"][0])
+
+        self.env.install_blueprints(age=300)
+        code, out, err = self.env.run(["blueprints", "--corp", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("corp blueprints as of ", out)
+        self.assertNotIn("delivered after the blueprint snapshot", out)
+
+
 
 class InventoryCommandTests(CommandTestCase):
     """`inventory` named, placed and valued.
@@ -767,6 +805,24 @@ class InventoryCommandTests(CommandTestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("division 4", out)
         self.assertIn("login --scopes divisions", out)
+    def test_cache_fields_and_delivery_warning_track_the_asset_snapshot(self):
+        self.env.install_corp_inventory(age=90_000)
+        code, out, err = self.env.run(
+            ["inventory", "--corp", "--json", "--char", "Ada"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        cache = doc["characters"][0]["documents"]["assets"]
+        self.assertTrue(cache["last_modified"].endswith("Z"))
+        self.assertIn("1 job delivered after the asset snapshot", doc["warnings"][0])
+
+        self.env.install_corp_inventory(age=300)
+        code, out, err = self.env.run(
+            ["inventory", "--corp", "--csv", "--char", "Ada"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("corp assets as of ", err)
+        self.assertNotIn("delivered after the asset snapshot", err)
 
 
 class TravelCommandTests(CommandTestCase):

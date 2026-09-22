@@ -183,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="collapse identical jobs by installer, status, activity, product and runs")
     p_jobs.add_argument("--slots", action="store_true",
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
+    p_jobs.add_argument("--json", action="store_true", help="machine-readable output with cache timestamps")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
 
     p_blueprints = sub.add_parser(

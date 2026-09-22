@@ -7,7 +7,7 @@ import json
 import sys
 from dataclasses import dataclass
 
-from . import divisions, esi as esi_mod, exports, render, universe
+from . import divisions, esi as esi_mod, exports, freshness, render, universe
 
 
 @dataclass
@@ -17,6 +17,9 @@ class BlueprintOwner:
     corporation_id: int | None
     token: dict
     blueprints: list[dict]
+    blueprint_meta: esi_mod.Meta
+    jobs: list[dict]
+    jobs_meta: esi_mod.Meta | None
     notes: list[str]
     division_names: dict[int, str]
 
@@ -51,7 +54,7 @@ def _fetch_blueprint_owners(args) -> tuple[esi_mod.Esi, list[BlueprintOwner], li
             if corp_id in seen_corps:
                 continue
         try:
-            rows, _meta = client.get_all_meta(
+            rows, meta = client.get_all_meta(
                 _blueprint_path(cid, corp_id), token=tok["access_token"]
             )
         except esi_mod.AuthError as err:
@@ -62,11 +65,23 @@ def _fetch_blueprint_owners(args) -> tuple[esi_mod.Esi, list[BlueprintOwner], li
         if corp_id is not None:
             seen_corps.add(corp_id)
         owner_name = f"Corporation {corp_id} (read by {cname})" if corp_id is not None else cname
-        owner = BlueprintOwner(owner_name, cid, corp_id, tok, list(rows), [], {})
+        owner = BlueprintOwner(owner_name, cid, corp_id, tok, list(rows), meta, [], None, [], {})
         if corp_id is not None:
             owner.division_names, note = divisions.fetch(client, tok, corp_id)
             if note:
                 owner.notes.append(note)
+            if "esi-industry.read_corporation_jobs.v1" in set(tok.get("scopes") or []):
+                try:
+                    owner.jobs, owner.jobs_meta = client.get_all_meta(
+                        f"{_jobs_path(cid, corp_id)}?include_completed=true",
+                        token=tok["access_token"],
+                    )
+                except esi_mod.AuthError:
+                    pass
+            count = freshness.delivered_after(owner.jobs, owner.blueprint_meta)
+            warning = freshness.delivery_warning(count, "blueprint")
+            if warning:
+                owner.notes.append(f"warning: {warning}")
         owners.append(owner)
     return client, owners, hints + [f"warning: {line}" for line in failures]
 
@@ -79,14 +94,21 @@ def _apply_idle(client, owner: BlueprintOwner) -> None:
         owner.notes.append("--idle could not be applied: no jobs consent; run: eve-skills login --scopes jobs")
         return
     try:
-        path = _jobs_path(owner.character_id, owner.corporation_id)
-        jobs = (client.get_all(path, token=owner.token["access_token"])
-                if owner.corporation_id is not None else
-                client.get(path, token=owner.token["access_token"]))
+        if owner.corporation_id is not None and owner.jobs_meta is not None:
+            jobs = owner.jobs
+        else:
+            path = _jobs_path(owner.character_id, owner.corporation_id)
+            if owner.corporation_id is not None:
+                jobs, owner.jobs_meta = client.get_all_meta(
+                    path, token=owner.token["access_token"])
+            else:
+                jobs, _meta = client.get_meta(path, token=owner.token["access_token"])
     except esi_mod.AuthError as err:
         owner.notes.append(f"--idle could not be applied: ESI refused the jobs document ({err})")
         return
-    busy = {int(job["blueprint_id"]) for job in jobs if job.get("blueprint_id") is not None}
+    finished = {"cancelled", "delivered", "reverted"}
+    busy = {int(job["blueprint_id"]) for job in jobs
+            if job.get("blueprint_id") is not None and job.get("status") not in finished}
     owner.blueprints = [row for row in owner.blueprints
                         if int(row.get("item_id", 0)) not in busy]
 
@@ -194,6 +216,11 @@ def cmd_blueprints(args):
                          if note.startswith("warning:")],
             "owners": [{"name": owner.name, "character_id": owner.character_id,
                         "corporation_id": owner.corporation_id, "notes": owner.notes,
+                        "documents": ({
+                            "blueprints": freshness.document(owner.blueprint_meta),
+                            "jobs": (freshness.document(owner.jobs_meta)
+                                     if owner.jobs_meta is not None else None),
+                        } if owner.corporation_id is not None else None),
                         "blueprints": rows} for owner, rows in documents],
         }, indent=2))
         return
@@ -210,6 +237,11 @@ def cmd_blueprints(args):
                 writer.writerow({key: doc.get(key, "") for key in columns})
         for note in all_notes:
             print(note, file=sys.stderr)
+        for owner, _rows in documents:
+            if owner.corporation_id is not None:
+                print(freshness.line("corp blueprints", owner.blueprint_meta), file=sys.stderr)
+                if owner.jobs_meta is not None:
+                    print(freshness.line("corp jobs", owner.jobs_meta), file=sys.stderr)
         return
 
     blocks = list(all_notes)
@@ -219,5 +251,11 @@ def cmd_blueprints(args):
                       for row in rows]
         table = render.table(["type", "location", "division", "kind", "runs", "ME", "TE", "count"],
                              table_rows) if table_rows else "(no blueprints)"
-        blocks.append(f"{owner.name}\n{table}")
+        cache = []
+        if owner.corporation_id is not None:
+            cache.append(freshness.line("corp blueprints", owner.blueprint_meta))
+            if owner.jobs_meta is not None:
+                cache.append(freshness.line("corp jobs", owner.jobs_meta))
+        cache_text = ("\n" + "\n".join(cache)) if cache else ""
+        blocks.append(f"{owner.name}{cache_text}\n{table}")
     print("\n\n".join(blocks))
