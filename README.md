@@ -33,7 +33,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `summary` | One row per character: clone state, total SP, queue length, current item time left, grand total | no |
 | `attributes` | Effective attributes (fitted implant bonuses included), remaps available/last remap | no — covered by the standard skills consent |
 | `market` | Live order book for any type: best sell/buy, spread, margin, listed volume - per region, at a station-level trade hub, or across the cluster with `--global`; `--history DAYS` adds traded volume; `--group`/`--category NAME` prices everything in one of them, `--fields a,b,c` picks the columns; `--seller CHAR` says what one character keeps per unit after CCP's two cuts and whether listing beats selling now | no for the prices — public ESI, plus local SDE data (`update-data`) to expand a group name; `--seller` needs that character logged in, and its standing with the station's owner comes from the optional `standings` consent |
-| `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
+| `build-cost` | What manufacturing one item costs right now: per-material buy-or-build table, the install fee with its arithmetic shown, and the same unit bought instead as a verdict; `--brief` keeps only the decision output; `--runs`, `--me`/`--te`/`--component-me`, `--build`/`--buy`, `--hub`/`--region`/`--system` | no — public ESI; recipes come from local SDE data (`update-data`) |
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `colonies` | Live planetary industry per character: every colony with its planet type, command-centre level, pin count and how old ESI's view of it is; `--detail` adds each extractor with what it produces and when the programmed run ends, plus every facility running a schematic | `--scopes planets` |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
@@ -880,6 +880,7 @@ eve-skills build-cost Hound --buy-all             # never run a component job; b
 eve-skills build-cost Hound --hub amarr           # shop at another trade hub's station
 eve-skills build-cost Hound --system Amarr        # bill the install in Amarr, still shop at Jita
 eve-skills build-cost Hound "Plasma Thruster"     # several products, off one set of order books
+eve-skills build-cost Hound --brief               # table, totals, verdict, essential warnings
 ```
 
 No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
@@ -887,6 +888,10 @@ refreshed by `update-data` (the bundled one is build 3494416, 4952 blueprints co
 products) — and the prices come from public order books, so this runs on a machine that has never seen
 SSO. Nothing about the recipe is estimated: it is CCP's own material list for the blueprint that makes
 the type, with that blueprint's own material efficiency applied to the quantities.
+
+`--brief` retains the material table, totals, buy-versus-build verdict, and any warning that makes
+the number incomplete or stale. It omits explanatory footnotes, request counts, and the scope
+paragraph; one compact `scope:` line appears at the end, once even when several products are named.
 
 ```text
 $ eve-skills build-cost Hound

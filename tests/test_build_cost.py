@@ -17,6 +17,7 @@ import io
 import json
 import re
 import unittest
+from unittest import mock
 from tests.fake_esi import (
     BUILD_ADDON, BUILD_ALLOY, BUILD_ARTICLE, BUILD_CELL, BUILD_CRYO, BUILD_GOO, BUILD_HOUSING,
     BUILD_PASTE, BUILD_PLATE, MARKET_FORGE, FakeEsiEnv,
@@ -98,6 +99,37 @@ class TableTests(BuildCostTestCase):
         # instead of letting the reader assume the run was sized to the recipe.
         self.assertIn("whole runs", out)
         self.assertIn("real surplus behind", out)
+    def test_brief_keeps_the_decision_and_drops_explanatory_output(self):
+        code, out, err = self.env.run(["build-cost", "Benchwork Widget", "--brief"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("material", out)
+        self.assertIn("totals:", out)
+        self.assertIn("buying is cheaper", out)
+        self.assertEqual(1, out.count("scope: Jita 4-4 (station)"))
+        for omitted in ("A component job runs in whole runs", "price basis:",
+                        "order books:", "cost index:", "requests:"):
+            self.assertNotIn(omitted, out)
+
+    def test_brief_keeps_answer_changing_warnings_on_one_line(self):
+        with mock.patch("eve_skills.industry.rules_warning",
+                        return_value="local industry rules are stale"):
+            code, out, err = self.env.run(["build-cost", "Salvage Sampler", "--brief"])
+        self.assertEqual((code, err), (0, ""))
+        warnings = [line for line in out.splitlines() if line.startswith("warning: ")]
+        self.assertEqual(3, len(warnings))
+        self.assertTrue(any("excluded from every total" in line for line in warnings))
+        self.assertTrue(any("local industry rules are stale" in line for line in warnings))
+
+    def test_brief_multiple_products_prints_one_scope_at_the_end(self):
+        code, out, err = self.env.run(
+            ["build-cost", "Benchwork Widget", "Salvage Sampler", "--brief"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Benchwork Widget", out)
+        self.assertIn("Salvage Sampler", out)
+        self.assertEqual(1, out.count("scope:"))
+        self.assertEqual("scope: Jita 4-4 (station)", out.splitlines()[-1])
+
 
     def test_the_install_fee_is_the_printed_eiv_times_the_printed_rates(self):
         code, out, _ = self.env.run(["build-cost", "Benchwork Widget"])

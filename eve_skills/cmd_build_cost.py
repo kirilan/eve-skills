@@ -392,20 +392,30 @@ def _build_run_notes(run: BuildRun) -> list[str]:
     return lines
 
 
-def build_cost_text(run: BuildRun) -> str:
-    """One block per product, then the notes that describe the whole run."""
+def build_cost_text(run: BuildRun, brief: bool = False) -> str:
+    """One block per product, then either compact caveats or the full explanatory notes."""
     blocks = []
     for target in run.targets:
         lines = [_build_heading(target),
                  render.table(BUILD_COST_COLUMNS, _build_table_rows(run, target))]
-        footnote = _surplus_footnote(target)
-        if footnote:
-            lines.append(footnote)
+        if not brief:
+            footnote = _surplus_footnote(target)
+            if footnote:
+                lines.append(footnote)
         lines += _totals_lines(run, target)
         lines += _comparison_lines(run, target)
-        lines += [f"  {line}" for line in _build_product_notes(run, target)]
+        product_notes = _build_product_notes(run, target)
+        if brief:
+            lines += [f"warning: {line}" for line in product_notes]
+        else:
+            lines += [f"  {line}" for line in product_notes]
         blocks.append("\n".join(lines))
-    blocks.append("\n".join(_build_run_notes(run)))
+    if brief:
+        if run.rules:
+            blocks.append(f"warning: {run.rules}")
+        blocks.append(f"scope: {run.scope.label}")
+    else:
+        blocks.append("\n".join(_build_run_notes(run)))
     return "\n\n".join(blocks)
 
 
@@ -509,6 +519,8 @@ def cmd_build_cost(args):
     if args.build_all and args.buy_all:
         raise RuntimeError("--build-all and --buy-all push every material of the recipe in opposite "
                            "directions; pick one and override the few you mean with --build/--buy")
+    if args.brief and (args.json or args.csv):
+        raise RuntimeError("--brief selects compact text output; do not combine it with --json or --csv")
     facility_tax = _percent(args.facility_tax, "--facility-tax")
     # The caps `plan_build` enforces anyway, checked against its own constants before a single order
     # book is read: refusing ME 11 after twenty-six books have already cost their time is a bad
@@ -553,7 +565,7 @@ def cmd_build_cost(args):
 
     def announce(info: market.Preflight) -> None:
         """What the fan-out is about to cost, said before it starts and never into a machine pipe."""
-        if not machine:
+        if not machine and not args.brief:
             print(_build_preflight_notice(info), file=sys.stderr)
 
     figures = market.book_figures(client, sorted(wanted), scope, preflight=announce)
@@ -617,4 +629,4 @@ def cmd_build_cost(args):
         for line in _build_notes_for_csv(run):   # the footnotes matter; they may not pollute a pipe
             print(line, file=sys.stderr)
     else:
-        print(build_cost_text(run))
+        print(build_cost_text(run, brief=args.brief))

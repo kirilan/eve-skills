@@ -334,6 +334,9 @@ def build_parser() -> argparse.ArgumentParser:
                               metavar="F",
                               help="aggregate material bonus as a fraction of the blueprint's requirements "
                                    "(default 1.0 = none; 0.95 is a 5%% reduction, so quantities and cost fall)")
+    p_build_cost.add_argument("--brief", action="store_true",
+                              help="compact text: material table, totals, verdict, essential warnings "
+                                   "and one scope line; omit explanatory footnotes and request counts")
     p_build_cost.add_argument("--json", action="store_true",
                               help="machine-readable output, including the build option that lost")
     p_build_cost.add_argument("--csv", action="store_true",
