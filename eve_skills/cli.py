@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -184,6 +184,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--slots", action="store_true",
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
+
+    p_blueprints = sub.add_parser(
+        "blueprints", help="blueprint originals and copies (needs login --scopes blueprints)"
+    )
+    p_blueprints.add_argument("--char", help="stored character name or id (default: every stored character)")
+    p_blueprints.add_argument("--corp", action="store_true",
+                              help="corporation blueprints instead of personal (needs the Director role)")
+    p_blueprints.add_argument("--idle", action="store_true",
+                              help="exclude blueprints attached to current jobs (needs login --scopes jobs)")
+    kind = p_blueprints.add_mutually_exclusive_group()
+    kind.add_argument("--copies", action="store_true", help="show blueprint copies only")
+    kind.add_argument("--originals", action="store_true", help="show blueprint originals only")
+    p_blueprints.add_argument("--division", metavar="N",
+                              help="only corporation hangar division N")
+    p_blueprints.add_argument("--type", metavar="TEXT",
+                              help="case-insensitive substring of the blueprint type name")
+    p_blueprints.add_argument("--group-by", choices=["type", "division"], default="type",
+                              help="sort groups by blueprint type (default) or hangar division")
+    p_blueprints.add_argument("--items", action="store_true",
+                              help="one row per item_id instead of distinct blueprint groups")
+    p_blueprints.add_argument("--json", action="store_true", help="machine-readable output")
+    p_blueprints.add_argument("--csv", action="store_true", help="CSV rows on stdout")
 
     p_inv = sub.add_parser("inventory", help="asset inventory with real item names, grouped by location or category and valued (needs login --scopes assets)")
     p_inv.add_argument("--char", help="stored character name or id (default: every stored character)")
@@ -441,8 +463,9 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "summary": cmd_skills.cmd_summary, "attributes": cmd_attributes,
             "plan": cmd_skills.cmd_plan, "extract": cmd_skills.cmd_extract,
             "update-data": cmd_update_data, "standings": exports.cmd_standings,
-            "jobs": exports.cmd_jobs, "inventory": exports.cmd_inventory,
-            "travel": exports.cmd_travel, "implants": exports.cmd_implants,
+            "jobs": exports.cmd_jobs, "blueprints": cmd_industry.cmd_blueprints,
+            "inventory": exports.cmd_inventory, "travel": exports.cmd_travel,
+            "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "build-cost": cmd_build_cost.cmd_build_cost,
             "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}

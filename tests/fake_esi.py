@@ -948,6 +948,33 @@ class FakeEsiEnv:
         self.server.get(f"/corporations/{CORP_SHARED}/industry/jobs", token=ADA.token,
                         handler=served(corp_jobs))
 
+    def install_blueprints(self):
+        """Character and corporation blueprint documents with BPO, BPC and stacked-BPO shapes."""
+        personal = [
+            {"item_id": 1055717863075, "type_id": JOB_RIG_BP, "location_id": STATION_JITA,
+             "location_flag": "Hangar", "quantity": -1, "runs": -1,
+             "material_efficiency": 10, "time_efficiency": 20},
+            {"item_id": 2101, "type_id": JOB_T2_BPC, "location_id": STATION_JITA,
+             "location_flag": "Hangar", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+        ]
+        corporation = [
+            {"item_id": 1055717863075, "type_id": JOB_RIG_BP, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG2", "quantity": -1, "runs": -1,
+             "material_efficiency": 10, "time_efficiency": 20},
+            {"item_id": 2201, "type_id": JOB_T2_BPC, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+            {"item_id": 2202, "type_id": JOB_T2_BPC, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+            {"item_id": 2203, "type_id": JOB_RIG_BP, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG2", "quantity": 2, "runs": -1,
+             "material_efficiency": 0, "time_efficiency": 0},
+        ]
+        self.server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=personal)
+        self.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=corporation)
+
     def install_inventory(self):
         """Ada's holdings, reported the way live ESI reports them.
 

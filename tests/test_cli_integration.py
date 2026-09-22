@@ -333,6 +333,71 @@ class JobsCommandTests(CommandTestCase):
         )
 
 
+
+class BlueprintsCommandTests(CommandTestCase):
+    def setUp(self):
+        super().setUp()
+        self.env.install_blueprints()
+
+    def test_bpo_bpc_encoding_and_station_names(self):
+        code, out, err = self.env.run(["blueprints", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Field Extender I Blueprint", out)
+        self.assertIn("BPO", out)
+        self.assertIn("BPC", out)
+        self.assertIn("Jita - Mradd", out)
+
+    def test_corporation_groups_identical_copies_and_stacked_originals(self):
+        code, out, err = self.env.run(["blueprints", "--corp", "--csv", "--char", "Ada"])
+        self.assertEqual((code, err), (0, ""))
+        rows = list(csv.DictReader(io.StringIO(out)))
+        copy = next(row for row in rows if row["kind"] == "BPC")
+        self.assertEqual(("10", "7", "14", "2"), (
+            copy["runs"], copy["me"], copy["te"], copy["count"]
+        ))
+        stacked = next(row for row in rows if row["kind"] == "BPO" and row["me"] == "0")
+        self.assertEqual("2", stacked["count"])
+        self.assertEqual("division 4", copy["division"])
+
+    def test_idle_joins_jobs_on_blueprint_item_id(self):
+        self.env.install_jobs()
+        code, out, err = self.env.run(
+            ["blueprints", "--corp", "--idle", "--items", "--csv", "--char", "Ada"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        rows = list(csv.DictReader(io.StringIO(out)))
+        self.assertNotIn("1055717863075", {row["item_id"] for row in rows})
+        self.assertEqual({"2201", "2202", "2203"}, {row["item_id"] for row in rows})
+
+    def test_idle_without_jobs_consent_explains_unapplied_filter(self):
+        scopes = sso.SCOPES + sso.scopes_for(["blueprints"])
+        self.env.write_tokens([self.env.token_for(ADA, scopes)])
+        code, out, err = self.env.run(["blueprints", "--idle", "--csv"])
+        self.assertEqual(code, 0)
+        self.assertIn("--idle could not be applied", err)
+        self.assertEqual(2, len(list(csv.DictReader(io.StringIO(out)))))
+
+    def test_filters_group_order_and_machine_formats(self):
+        code, out, err = self.env.run([
+            "blueprints", "--corp", "--copies", "--division", "4",
+            "--type", "Extender II", "--group-by", "division", "--json", "--char", "Ada",
+        ])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        rows = doc["owners"][0]["blueprints"]
+        self.assertEqual(1, len(rows))
+        self.assertEqual(("BPC", 2, "division 4"), (
+            rows[0]["kind"], rows[0]["count"], rows[0]["division"]
+        ))
+
+        code, out, err = self.env.run(
+            ["blueprints", "--corp", "--items", "--csv", "--char", "Ada"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        items = list(csv.DictReader(io.StringIO(out)))
+        self.assertIn("item_id", items[0])
+        self.assertEqual(4, len(items))
+
 class InventoryCommandTests(CommandTestCase):
     """`inventory` named, placed and valued.
 
