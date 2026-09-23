@@ -1106,6 +1106,48 @@ class FakeEsiEnv:
             for index, (type_id, quantity) in enumerate(stock.items())
         ], headers={"Last-Modified": http_date(-300), "Expires": http_date(3600)})
 
+    def install_industry_status(self):
+        """A full multi-character corp shift with old snapshots and remote deliveries."""
+        self.install_can_build()
+        self.install_orders()
+        self.server.get(f"/characters/{MIRA.character_id}/industry/jobs", token=MIRA.token, doc=[])
+        self.server.get(f"/corporations/{CORP_SHARED}/orders", token=ADA.token, doc=CORP_OPEN,
+                        headers={"Last-Modified": http_date(-300), "Expires": http_date(300)})
+        self.server.get(f"/corporations/{CORP_SHARED}/divisions", token=ADA.token,
+                        doc={"hangar": [{"division": 2, "name": "Invention"},
+                                        {"division": 4, "name": "T2-Prod"}], "wallet": []},
+                        headers={"Last-Modified": http_date(-3600), "Expires": http_date(3600)})
+        self.server.get(f"/characters/{MIRA.character_id}/skills", token=MIRA.token,
+                        doc={"skills": [{"skill_id": 3387, "active_skill_level": 3}]})
+        self.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=[
+            {"item_id": 930101, "type_id": 930001, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+            {"item_id": 930102, "type_id": 930001, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+            {"item_id": 1055717863075, "type_id": 31803, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG2", "quantity": -1, "runs": -1,
+             "material_efficiency": 10, "time_efficiency": 20},
+        ], headers={"Last-Modified": http_date(-90000), "Expires": http_date(3600)})
+        stock = {BUILD_PLATE: 76, BUILD_HOUSING: 500, BUILD_CELL: 100,
+                 BUILD_PASTE: 100, 34: 123}
+        rows = [{"item_id": 940000 + index, "type_id": type_id, "quantity": qty,
+                 "location_id": STATION_JITA, "location_flag": "CorpSAG4",
+                 "location_type": "station", "is_singleton": False}
+                for index, (type_id, qty) in enumerate(stock.items())]
+        rows += [
+            {"item_id": 950001, "type_id": BUILD_PLATE, "quantity": 834,
+             "location_id": STATION_AMARR, "location_flag": "CorpDeliveries",
+             "location_type": "station", "is_singleton": False},
+            {"item_id": 950002, "type_id": 34, "quantity": 293,
+             "location_id": STATION_AMARR, "location_flag": "CorpDeliveries",
+             "location_type": "station", "is_singleton": False},
+        ]
+        self.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token,
+                        doc=rows, headers={"Last-Modified": http_date(-90000),
+                                           "Expires": http_date(3600)})
+
     def install_travel(self):
         self.server.get(f"/characters/{ADA.character_id}/location", token=ADA.token,
                         doc={"solar_system_id": 30000142, "station_id": 60003760})

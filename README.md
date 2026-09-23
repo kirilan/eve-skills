@@ -44,6 +44,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines, `--slots` shows each character's manufacturing, science and reaction budget, and `--json` exposes cache timestamps | `--scopes jobs` |
 | `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs, filters can select kind, type or corporation division, and corporation output identifies stale snapshots | `--scopes blueprints`; `--idle` and delivery checks also need `jobs`; `divisions` names corporation hangars |
 | `can-build` | Idle blueprint jobs allowed by stock in each blueprint's own division/location, with the limiting material, cross-hangar warning, and per-builder skill check | `--scopes blueprints,assets,jobs`; `divisions` names corporation hangars |
+| `industry status` | Compact, diffable snapshot of per-character slots, grouped jobs, idle blueprints with local can-build counts, division material stock, open orders and remote corporation deliveries; `--materials FILE` adds named materials, `--json` retains ids and ESI cache timestamps | `--scopes jobs,blueprints,assets,orders` (or `corp-orders` for `--corp`); `divisions` names hangars; core skills for slot maxima. Missing consents leave only their sections unavailable |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
 | `inventory` | Assets named, placed and valued: per-location summary, `--by category` or corporation `--by division`, one row per item with `--items`, division filters, cache freshness, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player structures, `divisions` to name corporation hangars, and `jobs` for delivery warnings |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |
@@ -484,6 +485,24 @@ the operator to change the job's **Input Material Location**. Each selected stor
 against the recipe skills carried by the local SDE snapshot; an older snapshot reports skills as
 unknown and names `update-data`. No market endpoint is read.
 
+
+### `industry status` — one operational snapshot
+
+```bash
+eve-skills industry status --corp --json
+eve-skills industry status --corp --materials watch-list.txt
+```
+
+`--corp` reads each corporation's jobs, blueprint inventory, assets, divisions and open
+orders once even when several stored characters belong to it; slots remain per character.
+Without `--corp`, the snapshot reads personal documents. The UTF-8 materials file lists one
+exact type name per line, adding those types to the recipe-derived stock watch. Stock and
+can-build counts are local to the blueprint's station and division; `CorpDeliveries` at
+other stations are separate, not installable stock. JSON includes numeric ids beside names,
+quantities, section availability and `Last-Modified`/`Expires` for each available document.
+Unknown slot budgets and can-build counts remain `null`; missing optional consent supplies
+an actionable hint and never invents a zero. Delivered jobs newer than assets or blueprints
+produce staleness warnings.
 
 ### `inventory` — what you own, where it is, what it is worth
 

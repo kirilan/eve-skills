@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 
 from . import alphadata, divisions, esi as esi_mod, exports, freshness, industry, render, sso, universe
+from .industry_status import cmd_status
 
 
 @dataclass

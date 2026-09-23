@@ -185,6 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
     p_jobs.add_argument("--json", action="store_true", help="machine-readable output with cache timestamps")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
+    p_industry = sub.add_parser("industry", help="compact industry operations snapshot")
+    industry_sub = p_industry.add_subparsers(dest="industry_action", required=True, metavar="ACTION")
+    p_status = industry_sub.add_parser("status", help="slots, jobs, idle blueprints, stock, orders and deliveries")
+    p_status.add_argument("--corp", action="store_true", help="corporation jobs, blueprints, assets and orders instead of personal holdings")
+    p_status.add_argument("--char", help="stored character name or id (default: every stored character)")
+    p_status.add_argument("--materials", metavar="FILE", help="UTF-8 file with one extra material type name per line")
+    p_status.add_argument("--json", action="store_true", help="stable machine-readable snapshot with ids, quantities and document timestamps")
+
     p_can_build = sub.add_parser(
         "can-build", help="idle blueprint jobs allowed by local stock and builder skills"
     )
@@ -510,6 +518,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "update-data": cmd_update_data, "standings": exports.cmd_standings,
             "jobs": exports.cmd_jobs, "blueprints": cmd_industry.cmd_blueprints,
             "can-build": cmd_industry.cmd_can_build,
+            "industry": cmd_industry.cmd_status,
             "inventory": exports.cmd_inventory, "travel": exports.cmd_travel,
             "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,

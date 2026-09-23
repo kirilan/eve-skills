@@ -493,6 +493,145 @@ class CanBuildCommandTests(CommandTestCase):
         self.assertNotIn("corp assets as of ", out)
 
 
+class IndustryStatusTests(CommandTestCase):
+    def setUp(self):
+        super().setUp()
+        self.env.install_industry_status()
+
+    def test_corporation_snapshot_has_every_section_and_deduplicates_colleagues(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as handle:
+            handle.write("Tritanium\n")
+            filename = handle.name
+        self.addCleanup(os.unlink, filename)
+        code, out, err = self.env.run(["industry", "status", "--corp", "--materials",
+                                       filename, "--json"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        self.assertEqual({"owner_kind", "hints", "warnings", "owners"}, set(doc))
+        self.assertEqual(2, len(doc["owners"]))
+        owner = next(r for r in doc["owners"] if r["owner_id"] == CORP_SHARED)
+        self.assertEqual(CORP_SHARED, owner["owner_id"])
+        self.assertEqual(ADA.character_id, owner["read_by_character_id"])
+        self.assertEqual({ADA.character_id, MIRA.character_id},
+                         {r["character_id"] for r in owner["characters"]})
+        self.assertEqual({"assets", "blueprints", "jobs", "orders", "divisions"},
+                         set(owner["documents"]))
+        self.assertTrue(all(d["last_modified"] and d["expires"]
+                            for d in owner["documents"].values()))
+        ada = next(r for r in owner["characters"] if r["character_id"] == ADA.character_id)
+        self.assertEqual((2, 0), (ada["slots"]["manufacturing"]["used"],
+                                  ada["slots"]["manufacturing"]["ready"]))
+        self.assertEqual(1, ada["slots"]["science"]["ready"])
+        self.assertIsNotNone(ada["slots"]["science"]["next_end"])
+        self.assertEqual(1, len(owner["jobs"]["ready"]))
+        self.assertTrue(owner["jobs"]["running"][0]["end_start"])
+        self.assertTrue(all(r["installer_id"] and r["product_type_id"] for
+                            group in owner["jobs"].values() for r in group))
+        self.assertTrue(all("end_range" not in r for group in owner["jobs"].values()
+                            for r in group))
+        bp = next(r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001)
+        self.assertEqual((2, 2, 10, 7, "T2-Prod"),
+                         (bp["count"], bp["can_build_jobs"], bp["runs_per_job"],
+                          bp["me"], bp["division"]))
+        self.assertNotIn(1055717863075, [r["blueprint_type_id"] for r in owner["blueprints"]])
+        self.assertEqual(123, next(r["quantity"] for r in owner["materials"]
+                                   if r["type_id"] == 34 and r["division"] == "T2-Prod"))
+        self.assertEqual(834, next(r["quantity"] for r in owner["deliveries"]
+                                   if r["type_id"] == 920010))
+        self.assertNotIn("CorpDeliveries", [r["division"] for r in owner["materials"]])
+        self.assertTrue(all(r["location_id"] and r["location"] for r in owner["deliveries"]))
+        self.assertEqual(75, next(r["filled_pct"] for r in owner["orders"]
+                                  if r["order_id"] == 700201))
+        self.assertEqual([{"owner_id": CORP_SHARED, "subject": subject, "delivered_jobs": 1}
+                          for subject in ("asset", "blueprint")], owner["warnings"])
+        self.assertEqual(owner["warnings"], doc["warnings"])
+        for section in ("jobs", "assets", "blueprints", "orders"):
+            self.assertEqual(1, len(self.env.server.calls_to(
+                f"/corporations/{CORP_SHARED}/" +
+                {"jobs": "industry/jobs"}.get(section, section))))
+        code, text, err = self.env.run(["industry", "status", "--corp", "--materials", filename])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("75% filled", text)
+        self.assertIn("834 at Amarr", text)
+        self.assertIn("corp assets as of ", text)
+        self.assertLess(len(text.splitlines()), 60)
+
+    def test_missing_required_material_is_explicit_zero_at_blueprint_hangar(self):
+        self.env.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=[])
+        code, out, err = self.env.run(
+            ["industry", "status", "--corp", "--char", "Ada", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        owner = json.loads(out)["owners"][0]
+        bp = next(row for row in owner["blueprints"] if row["blueprint_type_id"] == 930001)
+        self.assertEqual(bp["can_build_jobs"], 0)
+        self.assertTrue(any(row["type_id"] == bp["limiting_type_id"] and
+                            row["quantity"] == 0 and row["division"] == "T2-Prod"
+                            for row in owner["materials"]))
+
+
+    def test_personal_status_uses_personal_documents_without_corp_reads(self):
+        code, out, err = self.env.run(["industry", "status", "--char", "Ada", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        self.assertEqual("character", doc["owner_kind"])
+        self.assertEqual([ADA.character_id], [r["owner_id"] for r in doc["owners"]])
+        owner = doc["owners"][0]
+        self.assertEqual(2, len(owner["orders"]))
+        self.assertEqual(60, owner["orders"][0]["filled_pct"])
+        self.assertTrue(owner["availability"]["assets"])
+        self.assertEqual([], owner["deliveries"])
+        self.assertFalse(any(call.path.startswith("/corporations/") for call in self.env.server.calls))
+
+    def test_each_missing_consent_is_local_to_its_section(self):
+        mapping = {
+            "esi-industry.read_corporation_jobs.v1": "jobs",
+            "esi-corporations.read_blueprints.v1": "blueprints",
+            "esi-assets.read_corporation_assets.v1": "assets",
+            "esi-markets.read_corporation_orders.v1": "orders",
+            "esi-corporations.read_divisions.v1": "divisions",
+            "esi-skills.read_skills.v1": "skills",
+        }
+        full = sso.SCOPES + sso.scopes_for(["all"])
+        for scope, section in mapping.items():
+            with self.subTest(section=section):
+                self.env.write_tokens([self.env.token_for(ADA, [s for s in full if s != scope])])
+                code, out, err = self.env.run(["industry", "status", "--corp", "--json"])
+                self.assertEqual((code, err), (0, ""))
+                doc = json.loads(out)
+                owner = doc["owners"][0]
+                self.assertTrue(any(hint.get("section") == section and
+                                    hint.get("code") == "missing_consent" and
+                                    hint.get("scope") == scope for hint in doc["hints"]))
+                if section in owner["availability"]:
+                    self.assertFalse(owner["availability"][section])
+                if section == "jobs":
+                    self.assertEqual([], owner["blueprints"])
+                elif section == "assets":
+                    self.assertEqual([], owner["materials"])
+                    self.assertIsNone(owner["blueprints"][0]["can_build_jobs"])
+                elif section == "orders":
+                    self.assertEqual([], owner["orders"])
+                elif section == "divisions":
+                    self.assertEqual("division 4", owner["blueprints"][0]["division"])
+                elif section == "skills":
+                    self.assertIsNone(owner["characters"][0]["slots"]["manufacturing"]["max"])
+
+    def test_corp_jobs_without_personal_consent_do_not_claim_free_slots(self):
+        scopes = [s for s in sso.SCOPES + sso.scopes_for(["all"])
+                  if s != "esi-industry.read_character_jobs.v1"]
+        self.env.write_tokens([self.env.token_for(ADA, scopes)])
+        code, out, err = self.env.run(["industry", "status", "--corp", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        owner = doc["owners"][0]
+        self.assertTrue(owner["availability"]["jobs"])
+        self.assertEqual(2, owner["blueprints"][0]["can_build_jobs"])
+        self.assertFalse(owner["characters"][0]["complete"])
+        self.assertIsNone(owner["characters"][0]["slots"]["manufacturing"]["free"])
+        self.assertTrue(any(hint.get("section") == "personal_jobs" and
+                            hint.get("code") == "missing_consent" for hint in doc["hints"]))
+
+
 class InventoryCommandTests(CommandTestCase):
     """`inventory` named, placed and valued.
 
