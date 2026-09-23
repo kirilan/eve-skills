@@ -194,6 +194,33 @@ class MarketCommandTests(MarketTestCase):
         self.assertNotIn("traded/day", out)    # history only with --history
         self.assertIn("ago; ESI refreshes the book every 5 min", out)
 
+    def test_depth_lists_top_orders_and_respects_station_scope(self):
+        code, out, err = self.env.run(
+            ["market", "Tritanium", "--hub", "jita", "--depth", "2", "--json"]
+        )
+        self.assertEqual((code, err), (0, ""))
+        depth = json.loads(out)["types"][0]["scopes"][0]["depth"]
+        self.assertLessEqual(len(depth["sell"]), 2)
+        self.assertLessEqual(len(depth["buy"]), 2)
+        self.assertEqual(sorted((row["price"] for row in depth["sell"])),
+                         [row["price"] for row in depth["sell"]])
+        self.assertEqual(sorted((row["price"] for row in depth["buy"]), reverse=True),
+                         [row["price"] for row in depth["buy"]])
+        self.assertTrue(all(row["location_id"] == STATION_JITA
+                            for side in depth.values() for row in side))
+    def test_global_depth_ranks_orders_across_regions_and_default_json_is_unchanged(self):
+        code, out, err = self.env.run(["market", "Tritanium", "--global", "--depth", "2", "--json"])
+        self.assertEqual(code, 0)
+        depth = json.loads(out)["types"][0]["scopes"][0]["depth"]
+        self.assertEqual([row["price"] for row in depth["sell"]], [4.98, 5.05])
+        self.assertEqual([row["price"] for row in depth["buy"]], [4.55, 4.30])
+        self.assertTrue(all("region_id" in order for side in depth.values() for order in side))
+        code, out, err = self.env.run(["market", "Tritanium", "--json"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("depth", json.loads(out)["types"][0]["scopes"][0])
+
+
+
     def test_market_lookups_never_send_a_bearer_token(self):
         self.env.run(["market", "Tritanium", "--global"])
         self.assertEqual([c for c in self.env.server.calls if "authorization" in c.headers], [])

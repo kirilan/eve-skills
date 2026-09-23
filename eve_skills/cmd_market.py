@@ -22,6 +22,7 @@ class MarketRow:
     region_id: int | None = None
     location_id: int | None = None
     history: market.HistoryStats | None = None
+    depth: dict[str, list[dict]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -761,10 +762,21 @@ def market_scope_list(client: esi_mod.Esi, args) -> list[market.Scope]:
 
 def market_type_rows(client: esi_mod.Esi, args, type_id: int, scopes, regions) -> tuple[list[MarketRow], list[str]]:
     """Rows for one type, plus warnings about the parts of the cluster ESI did not answer for."""
-    rows = [MarketRow(market.quote(client, type_id, scope), scope.region_id, scope.location_id)
-            for scope in scopes]
+    rows = []
+    for scope in scopes:
+        priced = market.quote(client, type_id, scope, depth=args.depth)
+        if args.depth:
+            quote, depth = priced
+        else:
+            quote, depth = priced, None
+        rows.append(MarketRow(quote, scope.region_id, scope.location_id, depth=depth))
     if regions:
-        rows.append(MarketRow(market.quote_cluster(client, type_id, regions)))
+        priced = market.quote_cluster(client, type_id, regions, depth=args.depth)
+        if args.depth:
+            quote, depth = priced
+        else:
+            quote, depth = priced, None
+        rows.append(MarketRow(quote, depth=depth))
     warnings = []
     for row in rows:
         if args.history and row.region_id is not None:
@@ -930,6 +942,17 @@ def market_text(client: esi_mod.Esi, type_id: int, type_name: str, rows, names, 
     # One freshness line per scope: scopes are fetched separately and can be minutes apart in age,
     # so a single stamp for the whole block would quietly claim they are all as old as the oldest.
     lines += [f"  {row.quote.scope}: {market.freshness_line(row.quote.meta, now)}" for row in rows]
+    if any(row.depth is not None for row in rows):
+        for row in rows:
+            if row.depth is None:
+                continue
+            depth_rows = ([["sell", render.isk(order["price"]), f"{order['volume']:,}"]
+                           for order in row.depth["sell"]] +
+                          [["buy", render.isk(order["price"]), f"{order['volume']:,}"]
+                           for order in row.depth["buy"]])
+            lines.append(f"  {row.quote.scope} depth")
+            lines.append(render.table(["side", "price", "volume"], depth_rows)
+                         if depth_rows else "  (no orders)")
     case = coverage.empty_book_case(type_id, rows)
     if case is not None:
         lines += market_empty_book_notes(case, coverage.scopes, names)
@@ -991,6 +1014,8 @@ def market_json(client: esi_mod.Esi, entries, names, history_days, prices,
                 "age_seconds": None if q.meta.last_modified is None else round(now - q.meta.last_modified, 1),
                 "history": market_history_doc(row, names),
             }
+            if row.depth is not None:
+                doc["depth"] = row.depth
             if seller is not None:
                 # These five keys are absent rather than null without --seller. This command's JSON is a
                 # contract too: `net_listing` present-and-null would tell a script "priced, outcome
@@ -1052,6 +1077,8 @@ def cmd_market(args):
     """Live order-book prices for item types: public ESI, no login and no stored character."""
     if args.history is not None and args.history < 1:
         raise RuntimeError("--history needs a positive number of days")
+    if args.depth is not None and args.depth < 1:
+        raise RuntimeError("--depth needs a positive number of orders")
     # The columns are settled before anything is fetched: a mistyped name should cost nothing rather
     # than thirty seconds of order books, and one list decides both renderers, so the table can never
     # disagree with the CSV about what this run prints.

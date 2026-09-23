@@ -438,21 +438,37 @@ def book_sides(rows: Sequence[dict]) -> tuple[float | None, float | None]:
     return min_sell, max_buy
 
 
-def quote(client: esi_mod.Esi, type_id: int, scope: Scope) -> Quote:
-    """One scope's book.
+def quote(client: esi_mod.Esi, type_id: int, scope: Scope,
+          depth: int | None = None) -> Quote | tuple[Quote, dict[str, list[dict]]]:
+    """One scope's book, optionally with top orders from the same fetched document.
 
-    EVE's own order `range` rules are modelled in neither direction, deliberately: a region-range
-    buy order placed elsewhere in the region is not pulled into a station scope, and a narrow-range
-    order sitting at the scope is not dropped from it. Reproducing that geometry (plus structure
-    edges) is appraisal territory, out of scope here; what this reports is the orders physically
-    filed at the scope, which is the honest reading of "the price at Jita 4-4".
+    EVE's own order `range` rules are modelled in neither direction: a region-range
+    buy order filed elsewhere is not pulled into a station scope. These are orders
+    physically at the station, not a simulation of their matching radius.
     """
     rows, meta = client.get_meta(book_path(scope.region_id, type_id))
     picked = _scope_rows(rows, scope)
-    return _reduce(scope.label, [(scope.region_id, o) for o in picked], meta)
+    result = _reduce(scope.label, [(scope.region_id, o) for o in picked], meta)
+    if depth is None:
+        return result
+    return result, _order_depth([(scope.region_id, row) for row in picked], depth)
+def _order_depth(rows: Sequence[tuple[int, dict]], count: int) -> dict[str, list[dict]]:
+    """Sorted actionable orders from the already-read station, region or cluster book."""
+    def side(buy: bool):
+        orders = [(region, row, _price(row.get("price"))) for region, row in rows
+                  if bool(row.get("is_buy_order")) is buy]
+        orders = [(region, row, price) for region, row, price in orders if price is not None]
+        orders.sort(key=lambda item: (item[2], int(item[1].get("order_id") or 0)),
+                    reverse=buy)
+        return [{"order_id": _id(row.get("order_id")), "price": price,
+                 "volume": int(row.get("volume_remain") or 0),
+                 "location_id": _id(row.get("location_id")), "region_id": region}
+                for region, row, price in orders[:count]]
+    return {"sell": side(False), "buy": side(True)}
 
 
-def quote_cluster(client: esi_mod.Esi, type_id: int, regions: Sequence[tuple[int, str]]) -> Quote:
+def quote_cluster(client: esi_mod.Esi, type_id: int, regions: Sequence[tuple[int, str]],
+                  depth: int | None = None) -> Quote | tuple[Quote, dict[str, list[dict]]]:
     """Whole-cluster quote from `market_regions()` output, folded into one view.
 
     A cluster scan is ~70 regional books, so two things are recorded rather than smoothed over:
@@ -474,7 +490,8 @@ def quote_cluster(client: esi_mod.Esi, type_id: int, regions: Sequence[tuple[int
         rows.extend((region_of[path], order) for order in payload)
     scanned = len(paths) - failed
     label = f"global ({scanned} regions)" if not failed else f"global ({scanned}/{len(paths)} regions)"
-    return _reduce(label, rows, esi_mod.fold_meta(metas), regions_scanned=scanned, regions_failed=failed)
+    result = _reduce(label, rows, esi_mod.fold_meta(metas), regions_scanned=scanned, regions_failed=failed)
+    return result if depth is None else (result, _order_depth(rows, depth))
 
 
 def _history_day(value) -> date | None:

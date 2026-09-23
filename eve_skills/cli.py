@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_market, cmd_orders, cmd_pi, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_market, cmd_orders, cmd_pi, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -278,6 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="scan every region with a market and add the best prices across the cluster")
     p_market.add_argument("--history", type=int, metavar="DAYS",
                           help="also show traded volume from ESI's daily regional history (daily, one day behind)")
+    p_market.add_argument("--depth", type=int, metavar="N",
+                          help="show the top N sell and buy orders per scope as price × remaining volume")
     # Only `market` takes a seller. What a sale nets is a property of who sells it: CCP's two cuts come
     # from that character's Accounting and Broker Relations, plus their standing with the corporation
     # owning the station - so this reads stored skills, and `/characters/{id}/standings` where that
@@ -296,6 +298,28 @@ def build_parser() -> argparse.ArgumentParser:
                           help="which columns to print, in this order, for both the table and --csv: "
                                "the column names of --csv (type_id, min_sell, history_volume_per_day, "
                                "...); a mistyped name lists them all")
+
+    p_sell = sub.add_parser("sell-plan", help="allocate stock across trade hubs using seller net prices and regional sales")
+    p_sell.add_argument("--seller", required=True, metavar="CHAR", help="stored seller character (fees and Daytrading skill)")
+    p_sell.add_argument("--from", dest="from_system", required=True, metavar="SYSTEM", help="solar system from which orders must be repriced")
+    p_sell.add_argument("--hub", action="append", required=True, metavar="HUB",
+                        help=f"candidate station hub; repeatable: {', '.join(market.HUBS)}")
+    p_sell.add_argument("--reference", default="jita", metavar="HUB",
+                        help="fallback station hub for unallocated stock (default jita)")
+    source = p_sell.add_mutually_exclusive_group(required=True)
+    source.add_argument("--item", action="append", metavar="NAME=QTY",
+                        help="exact market type name and positive quantity; repeatable")
+    source.add_argument("--from-inventory", action="store_true",
+                        help="use seller's asset quantities instead of explicit items (needs login --scopes assets)")
+    p_sell.add_argument("--corp", action="store_true", help="use seller's corporation assets")
+    p_sell.add_argument("--division", metavar="N|NAME", help="filter corporation assets by hangar division")
+    p_sell.add_argument("--type", metavar="TEXT", help="inventory type-name substring filter")
+    p_sell.add_argument("--days", type=float, default=1.5, metavar="DAYS",
+                        help="maximum regional sales days per positive-uplift hub (default 1.5)")
+    p_sell.add_argument("--saturated-days", type=float, default=7, metavar="DAYS",
+                        help="cap a hub to one sales day if its book holds more than this many days (default 7)")
+    p_sell.add_argument("--json", action="store_true", help="machine-readable allocation, routes and totals")
+    p_sell.add_argument("--csv", action="store_true", help="one item/hub allocation per row")
 
     p_build_cost = sub.add_parser("build-cost",
                                   help="ISK cost of manufacturing an item from its blueprint, priced "
@@ -489,7 +513,8 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "inventory": exports.cmd_inventory, "travel": exports.cmd_travel,
             "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
-            "market": cmd_market.cmd_market, "build-cost": cmd_build_cost.cmd_build_cost,
+            "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
+            "build-cost": cmd_build_cost.cmd_build_cost,
             "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
