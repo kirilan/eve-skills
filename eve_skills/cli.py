@@ -185,6 +185,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
     p_jobs.add_argument("--json", action="store_true", help="machine-readable output with cache timestamps")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
+    p_can_build = sub.add_parser(
+        "can-build", help="idle blueprint jobs allowed by local stock and builder skills"
+    )
+    p_can_build.add_argument("--char", help="stored owner character name or id")
+    p_can_build.add_argument("--corp", action="store_true",
+                             help="use corporation blueprints and assets")
+    p_can_build.add_argument("--division", metavar="N|NAME",
+                             help="only blueprints in one corporation hangar division")
+    p_can_build.add_argument("--type", metavar="TEXT",
+                             help="case-insensitive blueprint or product name substring")
+    p_can_build.add_argument("--builders", metavar="A,B",
+                             help="comma-separated stored character names or ids (default: all)")
+    p_can_build.add_argument("--json", action="store_true", help="machine-readable output")
+    p_can_build.add_argument("--csv", action="store_true", help="CSV rows on stdout")
+
 
     p_blueprints = sub.add_parser(
         "blueprints", help="blueprint originals and copies (needs login --scopes blueprints)"
@@ -470,6 +485,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "plan": cmd_skills.cmd_plan, "extract": cmd_skills.cmd_extract,
             "update-data": cmd_update_data, "standings": exports.cmd_standings,
             "jobs": exports.cmd_jobs, "blueprints": cmd_industry.cmd_blueprints,
+            "can-build": cmd_industry.cmd_can_build,
             "inventory": exports.cmd_inventory, "travel": exports.cmd_travel,
             "implants": exports.cmd_implants,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,

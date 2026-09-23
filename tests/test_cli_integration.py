@@ -449,6 +449,50 @@ class BlueprintsCommandTests(CommandTestCase):
 
 
 
+class CanBuildCommandTests(CommandTestCase):
+    def test_rounding_binding_cap_and_builder_skills(self):
+        self.env.install_can_build()
+        code, out, err = self.env.run([
+            "can-build", "--corp", "--char", "Ada", "--builders", "Ada Vane,Vela Krinn",
+            "--json",
+        ])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        row = doc["documents"][0]["rows"][0]
+        self.assertEqual((2, 10, 7, 2), (
+            row["blueprints"], row["runs_per_job"], row["me"], row["jobs"]
+        ))
+        self.assertEqual(("Widget Plate", 76, 38), (
+            row["limiting_material"], row["have"], row["per_job"]
+        ))
+        self.assertEqual([True, True], [check["ok"] for check in row["builders"]])
+        self.assertTrue(doc["documents"][0]["cache"]["assets"]["last_modified"].endswith("Z"))
+        self.assertEqual([], [call for call in self.env.server.calls if "/markets/" in call.path])
+
+    def test_builder_failure_and_other_division_note(self):
+        self.env.install_can_build(other_division=True)
+        self.env.set_trained_level(VELA, SKILL_CAPPED, 2)
+        code, out, err = self.env.run([
+            "can-build", "--corp", "--char", "Ada", "--builders", "Vela Krinn",
+        ])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Widget Plate: 0 in T2-Prod, 76 in Invention", out)
+        self.assertIn("Input Material Location", out)
+        self.assertIn("✗ Vela Krinn", out)
+
+    def test_csv_keeps_cache_lines_off_stdout(self):
+        self.env.install_can_build()
+        code, out, err = self.env.run([
+            "can-build", "--corp", "--char", "Ada", "--builders", "Ada Vane", "--csv",
+        ])
+        self.assertEqual(code, 0)
+        row = next(csv.DictReader(io.StringIO(out)))
+        self.assertEqual("2", row["jobs"])
+        self.assertEqual("Ada Vane:yes", row["builders"])
+        self.assertIn("corp assets as of ", err)
+        self.assertNotIn("corp assets as of ", out)
+
+
 class InventoryCommandTests(CommandTestCase):
     """`inventory` named, placed and valued.
 

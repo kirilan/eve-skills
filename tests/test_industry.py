@@ -54,6 +54,19 @@ def component(plan, type_id: int) -> industry.Component:
     return next(row for row in plan.components if row.type_id == type_id)
 
 
+class RecipeSkillTests(unittest.TestCase):
+    def test_old_rows_keep_recipe_skills_unknown(self):
+        self.assertIsNone(WIDGET.skills)
+
+    def test_present_skill_rows_are_integer_mappings(self):
+        document = {"1": {"manufacturing": {
+            "m": {"2": 1}, "p": ["3", 1], "t": 1, "limit": 1,
+            "s": {"3380": 5, "11433": 1},
+        }}}
+        recipe = industry.recipes_by_blueprint(document)[1]
+        self.assertEqual({3380: 5, 11433: 1}, recipe.skills)
+
+
 class RequiredQuantityTests(unittest.TestCase):
     def test_no_research_and_no_rig_is_the_base_quantity(self):
         self.assertEqual(industry.required_quantity(30, 4), 120)

@@ -370,23 +370,24 @@ def _transform_skill_catalog(dogma_docs, attribute_docs, type_docs) -> dict:
 
 
 def _activity_row(entry: dict, limit: int) -> dict | None:
-    """One activity as ``{"m", "p", "t", "limit"}``, or None when it has no cost to state.
-
-    An activity with no materials has nothing to price, and one with no products builds nothing
-    anyone asked the price of - both are dead weight in a document whose only reader wants run
-    economics. A blueprint may list extra outputs it produces only occasionally next to the item it
-    is really for, so the product recorded here is the certain one: costing the occasional bonus as
-    though it were the yield would quietly understate the run."""
+    """One material-consuming activity, including its SDE skill requirements."""
     materials = entry.get("materials") or []
     products = entry.get("products") or []
     if not materials or not products:
         return None
     product = next((p for p in products if not p.get("isProbability")), products[0])
+    skills = {}
+    for skill in entry.get("skills") or []:
+        try:
+            skills[str(int(skill["typeID"]))] = int(skill["level"])
+        except (KeyError, TypeError, ValueError):
+            continue
     return {
         "m": {str(material["typeID"]): int(material["quantity"]) for material in materials},
         "p": [str(product["typeID"]), int(product["quantity"])],
         "t": int(entry.get("time") or 0),
         "limit": limit,
+        "s": skills,
     }
 
 

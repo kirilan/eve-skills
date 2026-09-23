@@ -759,13 +759,15 @@ class AlphadataUpdateTests(XdgTestCase):
             # The SDE's own row shape; only the two activities that consume goods may survive it.
             "blueprints.jsonl": '{"_key": 681, "maxProductionLimit": 300, "activities": '
                                 '{"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
-                                '"products": [{"typeID": 165, "quantity": 1}], "time": 600}, '
+                                '"products": [{"typeID": 165, "quantity": 1}], '
+                                '"skills": [{"typeID": 1003, "level": 3}], "time": 600}, '
                                 '"copying": {"materials": [{"typeID": 34, "quantity": 1}], '
                                 '"products": [{"typeID": 681, "quantity": 1}], "time": 60}}}\n'
                                 '{"_key": 45732, "maxProductionLimit": 1000000, "activities": '
                                 '{"reaction": {"materials": [{"typeID": 16657, "quantity": 100}, '
                                 '{"typeID": 16661, "quantity": 100}], '
-                                '"products": [{"typeID": 16672, "quantity": 20}], "time": 360}}}\n'
+                                '"products": [{"typeID": 16672, "quantity": 20}], '
+                                '"skills": [{"typeID": 1002, "level": 4}], "time": 360}}}\n'
                                 '{"_key": 900, "maxProductionLimit": 1, "activities": {"manufacturing": '
                                 '{"materials": [], "products": [{"typeID": 899, "quantity": 1}], "time": 60}}}\n',
             # The SDE's own row shape for a recipe: pins are bare type ids, quantities live in `types`.
@@ -845,9 +847,10 @@ class AlphadataUpdateTests(XdgTestCase):
         # omitted rather than shipped as an empty entry.
         self.assertEqual(summaries[0]["blueprint_products"], 2)
         self.assertEqual(alphadata.blueprint_materials(), {
-            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 600, "limit": 300}},
+            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 600, "limit": 300,
+                                      "s": {"1003": 3}}},
             "45732": {"reaction": {"m": {"16657": 100, "16661": 100}, "p": ["16672", 20], "t": 360,
-                                   "limit": 1000000}},
+                                   "limit": 1000000, "s": {"1002": 4}}},
         })
         # Planetary industry arrives with the rest, and its counts come from those same rows - including
         # the level-0 command center, which is the one unit carrying no skill-level attribute.
@@ -908,12 +911,14 @@ class BlueprintMaterialsTests(XdgTestCase):
     BLUEPRINTS = [
         {"_key": 681, "maxProductionLimit": 300, "activities": {
             "manufacturing": {"materials": [{"typeID": 38, "quantity": 86}],
-                              "products": [{"typeID": 165, "quantity": 1}], "time": 60},
+                              "products": [{"typeID": 165, "quantity": 1}],
+                              "skills": [{"typeID": 3380, "level": 1}], "time": 60},
             "copying": {"materials": [{"typeID": 34, "quantity": 1}],
                         "products": [{"typeID": 681, "quantity": 1}], "time": 60}}},
         {"_key": 45732, "maxProductionLimit": 1000000, "activities": {
             "reaction": {"materials": [{"typeID": 16657, "quantity": 100}],
-                         "products": [{"typeID": 16672, "quantity": 20}], "time": 360}}},
+                         "products": [{"typeID": 16672, "quantity": 20}],
+                         "skills": [], "time": 360}}},
         # A T2 blueprint: invention is not a costed activity yet, and nothing else here is either,
         # so the whole row disappears rather than becoming an entry with no materials behind it.
         {"_key": 1163, "maxProductionLimit": 1, "activities": {
@@ -928,8 +933,10 @@ class BlueprintMaterialsTests(XdgTestCase):
 
     def test_only_the_two_activities_that_consume_materials_survive(self):
         self.assertEqual({
-            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 60, "limit": 300}},
-            "45732": {"reaction": {"m": {"16657": 100}, "p": ["16672", 20], "t": 360, "limit": 1000000}},
+            "681": {"manufacturing": {"m": {"38": 86}, "p": ["165", 1], "t": 60, "limit": 300,
+                                      "s": {"3380": 1}}},
+            "45732": {"reaction": {"m": {"16657": 100}, "p": ["16672", 20], "t": 360,
+                                   "limit": 1000000, "s": {}}},
         }, alphadata._transform_blueprint_materials(iter(self.BLUEPRINTS)))
 
     def test_the_priced_product_is_the_one_a_run_certainly_yields(self):

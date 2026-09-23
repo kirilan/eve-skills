@@ -42,6 +42,7 @@ $ eve-skills orders --watch 1                            # announce my own fills
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
 | `jobs` | Personal or `--corp` industry jobs, with installer and duration details; `--group` collapses identical lines, `--slots` shows each character's manufacturing, science and reaction budget, and `--json` exposes cache timestamps | `--scopes jobs` |
 | `blueprints` | Blueprint originals and copies with runs, ME/TE, location and count; `--idle` removes copies tied to current jobs, filters can select kind, type or corporation division, and corporation output identifies stale snapshots | `--scopes blueprints`; `--idle` and delivery checks also need `jobs`; `divisions` names corporation hangars |
+| `can-build` | Idle blueprint jobs allowed by stock in each blueprint's own division/location, with the limiting material, cross-hangar warning, and per-builder skill check | `--scopes blueprints,assets,jobs`; `divisions` names corporation hangars |
 | `orders` | Your own open orders with price, remaining volume, escrow and time left; `--closed` for ESI's ~90-day order history; `--watch` announces fills/expiries; `--corp` for corporation orders | `--scopes orders` (and `corp-orders` for `--corp`) |
 | `inventory` | Assets named, placed and valued: per-location summary, `--by category` or corporation `--by division`, one row per item with `--items`, division filters, cache freshness, a real standing bid with `--value-at jita`, or full `--csv` | `--scopes assets`; plus `structures` to name player structures, `divisions` to name corporation hangars, and `jobs` for delivery warnings |
 | `travel` | Current location, home, jump clones with their implants | `--scopes location` and/or `clones` |
@@ -466,6 +467,22 @@ timestamps as fields; CSV sends the line to stderr. When the optional jobs conse
 asset and blueprint views also warn when a delivered job is newer than the snapshot, because that
 job's output cannot be present in the displayed numbers yet.
 
+### `can-build` — jobs allowed by stock and skills
+
+```bash
+eve-skills can-build --corp --division T2-Prod
+eve-skills can-build --corp --type "Shield Hardener" --builders "Ada,Vela"
+eve-skills can-build --corp --json
+```
+
+The command considers idle blueprint groups, sizes one job from the copy's remaining runs (or the
+SDE production limit for an original), applies that blueprint's ME with the same per-job rounding as
+`build-cost`, and caps the result by copies held. Stock comes only from the blueprint's own station
+and hangar division. When a binding material is elsewhere, the note names both quantities and tells
+the operator to change the job's **Input Material Location**. Each selected stored builder is checked
+against the recipe skills carried by the local SDE snapshot; an older snapshot reports skills as
+unknown and names `update-data`. No market endpoint is read.
+
 
 ### `inventory` — what you own, where it is, what it is worth
 
@@ -884,9 +901,10 @@ eve-skills build-cost Hound --brief               # table, totals, verdict, esse
 ```
 
 No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
-refreshed by `update-data` (the bundled one is build 3494416, 4952 blueprints covering 4943 distinct
-products) — and the prices come from public order books, so this runs on a machine that has never seen
-SSO. Nothing about the recipe is estimated: it is CCP's own material list for the blueprint that makes
+refreshed by `update-data` (the bundled one is build 3538132, 4952 blueprints covering 4943 distinct
+products, including each activity's required skills) — and the prices come from public order books,
+so this runs on a machine that has never seen SSO. Nothing about the recipe is estimated: it is
+CCP's own material list for the blueprint that makes
 the type, with that blueprint's own material efficiency applied to the quantities.
 
 `--brief` retains the material table, totals, buy-versus-build verdict, and any warning that makes

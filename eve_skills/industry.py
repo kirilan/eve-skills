@@ -151,6 +151,7 @@ class Recipe:
     max_runs: int                  # maxProductionLimit; 0 when the SDE states no limit
     materials: Mapping[int, int]   # material type id -> base quantity per run
     alternatives: tuple[int, ...]  # other blueprint ids making the same product, sorted, not this one
+    skills: Mapping[int, int] | None = None  # None means an old snapshot omitted requirements
 
     @property
     def researchable(self) -> bool:
@@ -184,6 +185,8 @@ def _recipe(blueprint_id: int, activity: str, row: Mapping) -> Recipe | None:
             time=int(row.get("t") or 0),
             max_runs=int(row.get("limit") or 0),
             materials={int(material): int(quantity) for material, quantity in materials.items()},
+            skills=(None if "s" not in row else
+                    {int(skill): int(level) for skill, level in (row.get("s") or {}).items()}),
             alternatives=(),
         )
     except (TypeError, ValueError):
@@ -222,6 +225,20 @@ def recipe_index(document: Mapping) -> dict[int, Recipe]:
         winner, *rest = ordered
         index[product_id] = replace(winner, alternatives=tuple(other.blueprint_id for other in rest))
     return index
+def recipes_by_blueprint(document: Mapping) -> dict[int, Recipe]:
+    """Every usable recipe keyed by the blueprint type that owns the activity."""
+    result = {}
+    for key, activities in document.items():
+        blueprint_id = _as_id(key)
+        if blueprint_id is None:
+            continue
+        for activity, row in (activities or {}).items():
+            recipe = _recipe(blueprint_id, activity, row)
+            if recipe is not None:
+                result[blueprint_id] = recipe
+    return result
+
+
 
 
 def required_quantity(base: int, runs: int, me: int = 0, multiplier: float = 1.0) -> int:

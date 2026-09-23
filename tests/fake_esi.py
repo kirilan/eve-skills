@@ -1075,6 +1075,37 @@ class FakeEsiEnv:
         self.server.post(f"/corporations/{CORP_SHARED}/assets/names", token=ADA.token,
                          handler=corp_asset_names)
 
+    def install_can_build(self, *, other_division: bool = False):
+        """Two ten-run copies and material stock that either shares or misses their division."""
+        self.install_corp_inventory()
+        self.install_build_cost()
+        self.install_blueprints()
+        recipes = json.loads(json.dumps(BUILD_BLUEPRINTS))
+        recipes["930001"]["manufacturing"]["s"] = {str(SKILL_CAPPED): 3}
+        self._write_json(os.path.join(self.data_home, "eve-skills", "blueprint_materials.json"), {
+            "source": "synthetic", "build": 2500001, "fetched": iso(-86400),
+            "blueprints": recipes,
+        })
+        self.names[930001] = "Benchwork Widget Blueprint"
+        self.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=[
+            {"item_id": 930101, "type_id": 930001, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+            {"item_id": 930102, "type_id": 930001, "location_id": STATION_JITA,
+             "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+             "material_efficiency": 7, "time_efficiency": 14},
+        ], headers={"Last-Modified": http_date(-300), "Expires": http_date(3600)})
+        flag = "CorpSAG2" if other_division else "CorpSAG4"
+        stock = {
+            BUILD_PLATE: 76, BUILD_HOUSING: 500, BUILD_CELL: 100, BUILD_PASTE: 100,
+        }
+        self.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=[
+            {"item_id": 940000 + index, "type_id": type_id, "quantity": quantity,
+             "is_singleton": False, "location_id": STATION_JITA,
+             "location_flag": flag, "location_type": "station"}
+            for index, (type_id, quantity) in enumerate(stock.items())
+        ], headers={"Last-Modified": http_date(-300), "Expires": http_date(3600)})
+
     def install_travel(self):
         self.server.get(f"/characters/{ADA.character_id}/location", token=ADA.token,
                         doc={"solar_system_id": 30000142, "station_id": 60003760})
