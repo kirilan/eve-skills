@@ -11,8 +11,8 @@ import sys
 import time
 
 
-from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_market, cmd_orders, cmd_pi, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -110,6 +110,9 @@ def cmd_update_data(args):
     print(f"  market type index: {summary['market_types']} market-listed types in "
           f"{summary['market_groups']} groups across {summary['market_categories']} categories "
           f"(the lists behind eve-skills market --group / --category)")
+    print(f"  invention: {summary['invention_blueprints']} inventable blueprints and "
+          f"{summary['decryptors']} decryptors (data cores per attempt and decryptor modifiers for "
+          f"eve-skills ledger)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,6 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills.add_argument("--watch", type=int, nargs="?", const=5, metavar="MIN", help="keep refreshing every MIN minutes (default 5), announce finished training; Ctrl-C stops")
     p_skills.add_argument("--notify", action="store_true", help="with --watch: also send notify-send desktop notifications")
     p_skills.add_argument("--full", action="store_true", help="with --watch: keep the full per-character view instead of the compact status table")
+    p_skills.add_argument("--ledger", action="store_true",
+                          help="with --watch: also run ledger sync, at most once an hour, so the accounting "
+                               "ledger never misses ESI's 30-day wallet window")
     p_skills.add_argument("--no-orders", action="store_true",
                           help="with --watch: watch training only; do not poll market orders")
     p_skills.add_argument("--no-colonies", action="store_true",
@@ -496,6 +502,77 @@ def build_parser() -> argparse.ArgumentParser:
     p_orders.add_argument("--notify", action="store_true",
                           help="with --watch: also send notify-send desktop notifications")
 
+    p_ledger = sub.add_parser(
+        "ledger", help="accounting ledger: book industry jobs, purchases and sales into a local SQLite "
+                       "file and report cost, profit and stock value (needs login --scopes jobs,wallet,"
+                       "orders,corp-orders,blueprints)")
+    ledger_sub = p_ledger.add_subparsers(dest="ledger_action")
+    p_lsync = ledger_sub.add_parser(
+        "sync", help="copy corporation and member jobs, wallets, orders and blueprints from ESI into the "
+                     "ledger; run at least every few weeks - ESI keeps only 30 days of wallet history")
+    p_lsync.add_argument("--char", help="only the corporation of this stored character, read by it first")
+    p_lsync.add_argument("--no-personal", action="store_true",
+                         help="skip the members' personal wallets, jobs, orders and blueprints")
+    p_lsync.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lpnl = ledger_sub.add_parser("pnl", help="profit and loss: revenue, fees, cost of goods sold, overhead")
+    p_lpnl.add_argument("--since", metavar="YYYY-MM-DD", help="first day included (default: the cutover)")
+    p_lpnl.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded (default: no end)")
+    p_lpnl.add_argument("--by", choices=["total", "day", "week", "month"], default="total",
+                        help="one statement for the whole period (default), or a row per day/week/month")
+    p_lpnl.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lprod = ledger_sub.add_parser("products", help="per product: units built and their unit cost, units "
+                                                     "sold, net price and profit")
+    p_lprod.add_argument("--since", metavar="YYYY-MM-DD", help="first day included")
+    p_lprod.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded")
+    p_lprod.add_argument("--scope", choices=["all", "invention", "other"], default="all",
+                         help="invention lines (built from blueprints the business invented), other, or all")
+    p_lprod.add_argument("--limit", type=int, metavar="N", help="only the N most profitable rows")
+    p_lprod.add_argument("--json", action="store_true", help="machine-readable output")
+    p_linv = ledger_sub.add_parser("invention", help="per invented blueprint: decryptor, attempts, success "
+                                                     "rate and cost per invented run")
+    p_linv.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lstock = ledger_sub.add_parser("inventory", help="materials, finished goods and jobs in progress at "
+                                                       "ledger cost and at live Jita prices")
+    p_lstock.add_argument("--no-personal", action="store_true",
+                          help="count corporation assets only, not the members' own hangars")
+    p_lstock.add_argument("--limit", type=int, default=15, metavar="N",
+                          help="rows per section in the table (default 15)")
+    p_lstock.add_argument("--all", action="store_true", help="every row")
+    p_lstock.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lnote = ledger_sub.add_parser("note", help="the operation's log: dated updates, decisions, incidents, "
+                                                 "analyses and to-dos, kept in the ledger")
+    note_sub = p_lnote.add_subparsers(dest="note_action")
+    p_nadd = note_sub.add_parser("add", help="store a note")
+    p_nadd.add_argument("title", help="one line: what happened, what was decided, what is to do")
+    p_nadd.add_argument("--kind", choices=list(ledger_db.NOTE_KINDS), default="update",
+                        help="default update; a todo stays open until `ledger note done ID`")
+    p_nadd.add_argument("--body", help="the note's text (Markdown is fine)")
+    p_nadd.add_argument("--body-file", metavar="PATH", help="read the text from a file, or - for stdin")
+    p_nadd.add_argument("--at", metavar="ISO", help="when it happened, e.g. 2026-09-24T05:47:00Z (default now)")
+    p_nadd.add_argument("--source", help="where the note came from, e.g. a file it was imported from")
+    p_nadd.add_argument("--json", action="store_true", help="machine-readable output")
+    p_nlist = note_sub.add_parser("list", help="notes newest first, one line each")
+    p_nlist.add_argument("--kind", choices=list(ledger_db.NOTE_KINDS), help="only this kind")
+    p_nlist.add_argument("--since", metavar="YYYY-MM-DD", help="only notes from this day on")
+    p_nlist.add_argument("--open", action="store_true", help="only open to-dos")
+    p_nlist.add_argument("--grep", metavar="TEXT", help="only notes whose title or text contains TEXT")
+    p_nlist.add_argument("--limit", type=int, metavar="N", help="only the newest N")
+    p_nlist.add_argument("--json", action="store_true", help="machine-readable output")
+    p_nshow = note_sub.add_parser("show", help="notes in full: by id, or the newest (default 1)")
+    p_nshow.add_argument("ids", nargs="*", type=int, help="note ids")
+    p_nshow.add_argument("--last", type=int, default=1, metavar="N", help="without ids: the newest N")
+    p_nshow.add_argument("--kind", choices=list(ledger_db.NOTE_KINDS), help="without ids: only this kind")
+    p_nshow.add_argument("--json", action="store_true", help="machine-readable output")
+    p_ndone = note_sub.add_parser("done", help="close a to-do")
+    p_ndone.add_argument("id", type=int)
+    p_ndone.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lprog = ledger_sub.add_parser("progress", help="the figures every sync recorded (jobs, T2 built and "
+                                                     "sold, profit, stock, WIP), open to-dos and recent notes")
+    p_lprog.add_argument("--since", metavar="YYYY-MM-DD", help="only snapshots from this day on")
+    p_lprog.add_argument("--all", action="store_true", help="every sync, not one row per day")
+    p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
+    p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
+
     p_extract = sub.add_parser("extract", help="Skill Extractor math for one character")
     p_extract.add_argument("--char", help="stored character name or id (required when several are stored)")
 
@@ -524,7 +601,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:

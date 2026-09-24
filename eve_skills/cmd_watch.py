@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 
 
-from . import esi as esi_mod, exports, orders, paths, render, sso, watchstate
+from . import esi as esi_mod, exports, ledger_sync, orders, paths, render, sso, watchstate
 # One-way by design: the watch loops read the skills, orders and colonies command areas, and neither
 # imports this module at module level - `skills --watch` and `orders --watch` reach back in
 # from inside their handlers, where this module is fully loaded.
@@ -291,6 +291,11 @@ def skills_cycle(args, client: esi_mod.Esi, session: WatchSession) -> WatchCycle
     warnings += colonies.warnings
     if colonies.asked and not colonies.eligible:
         warnings += warn_once(session.warned, "colonies:no-consent", colonies_watch_hint())
+    ledger_status = None
+    if getattr(args, "ledger", False):
+        ledger_status, problems = ledger_sync.sync_if_due(client)
+        for line in problems:
+            warnings += warn_once(session.warned, f"ledger:{line}", line)
     names = order_names(client, poll.books)
     names.update(colonies.names)
     if args.full:
@@ -299,6 +304,8 @@ def skills_cycle(args, client: esi_mod.Esi, session: WatchSession) -> WatchCycle
         body = render_watch_status(ctxs, failures, session.last_good)
     if colonies.asked:
         body += "\n\n" + render_colonies_watch_status(colonies.observations, names, client.now())
+    if ledger_status:
+        body += "\n\n" + ledger_status
     return WatchCycle(warnings=tuple(warnings),
                       observations=tuple(cmd_skills.observation_from_ctx(c) for c in ctxs),
                       order_observations=tuple(watchstate.OrderObservation.from_book(b, names)

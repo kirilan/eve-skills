@@ -44,7 +44,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import (__version__, alphadata, esi as esi_mod, market, paths, render, snapshots, sso,
+from . import (__version__, alphadata, esi as esi_mod, ledger_db, market, paths, render, snapshots, sso,
                watchstate)
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
@@ -681,6 +681,21 @@ def _check_sde(now: float) -> list[dict]:
         checks.append(_check("data.market_types", OK,
                              f"market type index available (SDE build {index['build']})", **index_fields))
 
+    # Invention rows are what the ledger costs an attempt with; without them it still books every
+    # manufacturing job, purchase and sale, and says which attempts it could not cost. Warning.
+    invention = by_name["blueprint_invention.json"]
+    invention_fields = {"path": invention["path"], "present": invention["present"], "build": invention["build"]}
+    if not invention["present"]:
+        checks.append(_check("data.blueprint_invention", WARN,
+                             "the invention data is not installed - the ledger cannot cost data cores "
+                             "or decryptors", hint="run: eve-skills update-data", **invention_fields))
+    elif invention["problem"]:
+        checks.append(_check("data.blueprint_invention", WARN, f"the invention data is {invention['problem']}",
+                             hint="re-download it: eve-skills update-data", **invention_fields))
+    else:
+        checks.append(_check("data.blueprint_invention", OK,
+                             f"invention data available (SDE build {invention['build']})", **invention_fields))
+
     if len(builds) > 1:
         checks.append(_check("data.consistency", WARN,
                              f"the local SDE documents describe different builds ({', '.join(str(b) for b in builds)})",
@@ -1082,6 +1097,44 @@ def _check_market(user_agent: str, timeout: float, now: float) -> dict:
     return _check("network.market", OK, detail, **fields)
 
 
+def _check_ledger(now: float) -> dict:
+    """How long ago the accounting ledger last synced - opened read-only, never created.
+
+    ESI serves 30 days of wallet history; a ledger that has not synced for longer has lost rows for
+    good, and one past STALE_SYNC_DAYS is close enough to that edge to say so. No ledger at all is
+    fine: it exists only for somebody who ran `ledger sync`."""
+    path = ledger_db.db_path(create=False)
+    fields = {"path": _display_path(path)}
+    if not os.path.isfile(path):
+        return _check("ledger", OK, "no accounting ledger (eve-skills ledger sync starts one)", **fields)
+    try:
+        conn = ledger_db.connect(path, readonly=True)
+        try:
+            last = ledger_db.last_sync(conn)
+            cutover = ledger_db.cutover(conn)
+        finally:
+            conn.close()
+    except Exception as err:  # noqa: BLE001 - a broken ledger is a finding, not a crash
+        return _check("ledger", FAIL, f"the ledger cannot be read: {type(err).__name__}: {err}",
+                      hint="move the file aside and run: eve-skills ledger sync", **fields)
+    fields.update(last_sync=last, cutover=cutover)
+    if not last:
+        return _check("ledger", WARN, "the ledger has never completed a sync",
+                      hint="run: eve-skills ledger sync", **fields)
+    age = (now - datetime.fromisoformat(last.replace("Z", "+00:00")).timestamp()) / 86400
+    fields["age_days"] = round(age, 2)
+    if age > ledger_db.WALLET_HISTORY_DAYS:
+        return _check("ledger", FAIL, f"last ledger sync {age:.0f} days ago - wallet history older than "
+                                      f"{ledger_db.WALLET_HISTORY_DAYS} days is already lost",
+                      hint="run: eve-skills ledger sync now, then keep it running (skills --watch --ledger)",
+                      **fields)
+    if age > ledger_db.STALE_SYNC_DAYS:
+        return _check("ledger", WARN, f"last ledger sync {age:.0f} days ago - ESI keeps "
+                                      f"{ledger_db.WALLET_HISTORY_DAYS} days of wallet history",
+                      hint="run: eve-skills ledger sync", **fields)
+    return _check("ledger", OK, f"ledger synced {age:.1f} days ago (cutover {cutover or '?'})", **fields)
+
+
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
@@ -1116,6 +1169,7 @@ def collect(network: bool = False, timeout: float = NET_TIMEOUT, now: float | No
     _guard(checks, "consent.planets", lambda: _check_planets_consent(store, moment))
     _guard(checks, "history", lambda: _check_history(moment))
     _guard(checks, "watch", lambda: [_check_watch_state(moment), _check_watch_events(moment)])
+    _guard(checks, "ledger", lambda: _check_ledger(moment))
 
     if network:
         user_agent = esi_mod.default_user_agent(sso.load_config())

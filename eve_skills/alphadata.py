@@ -38,7 +38,7 @@ SDE_BASE = "https://developers.eveonline.com/static-data/tranquility"
 # Every document update() publishes; diagnostics walk this list in order.
 DATA_FILES = ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
               "blueprint_materials.json", "planet_industry.json", "system_planets.json",
-              "market_types.json")
+              "market_types.json", "blueprint_invention.json")
 
 # Alpha caps drift out of date with each SDE release; the skills view and doctor warn here.
 STALE_DAYS = 90.0
@@ -54,6 +54,17 @@ PREREQUISITE_ATTRS = ((182, 277), (183, 278), (184, 279))
 # research activities spend time, skill points and data cores instead - inputs no market price
 # exists for - so keeping them would put rows in the document that nothing can cost in ISK.
 INDUSTRY_ACTIVITIES = ("manufacturing", "reaction")
+
+# The dogma attributes a decryptor carries: inventionPropabilityMultiplier (CCP's spelling), the ME
+# and TE added to the invented copy, and the extra runs it gets. Measured on build 3538132, 66 types
+# carry all four - the retired racial decryptors, relic salvage and subsystem data interfaces among
+# them - so the attributes alone do not make a decryptor. GROUP_DECRYPTORS ("Decryptors - Generic")
+# holds exactly the eight that invention accepts today.
+GROUP_DECRYPTORS = 1304
+ATTR_DECRYPTOR_PROBABILITY = 1112
+ATTR_DECRYPTOR_ME = 1113
+ATTR_DECRYPTOR_TE = 1114
+ATTR_DECRYPTOR_RUNS = 1124
 
 # The dogma attributes that describe a planetary installation. Measured over all 130 PI item types
 # in build 3503375, so none of these is a guess taken off a wiki:
@@ -214,6 +225,31 @@ def blueprint_materials() -> dict:
         ):
             raise ValueError(f"blueprint entry {key} is malformed - run: eve-skills update-data")
     return rows
+
+
+def blueprint_invention() -> dict:
+    """The invention document, envelope included: ``blueprints`` and ``decryptors``.
+
+    ``blueprints`` is keyed by the blueprint that is invented *from* (a T1 copy, or a relic) and
+    each row is ``{"m": {data core type id: quantity per attempt}, "p": [[invented blueprint type id,
+    runs, base probability], ...], "t": seconds}``. ``decryptors`` is keyed by decryptor type id:
+    ``{"name", "probability", "me", "te", "runs"}`` - the multiplier and the three modifiers the
+    decryptor applies to the invented copy.
+
+    Raises FileNotFoundError when no snapshot is installed and ValueError when the document is not
+    in this shape: an invention cost computed from half a recipe would understate every T2 unit."""
+    document = _read("blueprint_invention.json")
+    rows, decryptors = document.get("blueprints"), document.get("decryptors")
+    if not isinstance(rows, dict) or not isinstance(decryptors, dict):
+        raise ValueError("the local invention data is not in the expected format - run: eve-skills update-data")
+    for key, row in rows.items():
+        if not (isinstance(row, dict) and isinstance(row.get("m"), dict) and isinstance(row.get("p"), list)
+                and all(isinstance(p, list) and len(p) == 3 for p in row["p"])):
+            raise ValueError(f"invention entry {key} is malformed - run: eve-skills update-data")
+    for key, row in decryptors.items():
+        if not (isinstance(row, dict) and all(k in row for k in ("probability", "me", "te", "runs"))):
+            raise ValueError(f"decryptor entry {key} is malformed - run: eve-skills update-data")
+    return document
 
 
 def planet_industry() -> dict:
@@ -420,6 +456,51 @@ def _transform_blueprint_materials(docs) -> dict:
         if activities:
             blueprints[str(doc["_key"])] = activities
     return blueprints
+
+
+def _transform_blueprint_invention(blueprint_docs, dogma_docs, type_docs) -> dict:
+    """``{"blueprints": ..., "decryptors": ...}`` - what one invention attempt consumes and yields.
+
+    Kept out of blueprint_materials.json on purpose: that document is keyed by blueprint and every
+    consumer reads it as "the recipe this blueprint builds", and a T1 blueprint's invention row would
+    shadow its manufacturing row there. Here the key is the blueprint invented *from*, and a row may
+    name several products (relics do) each with its own base chance.
+
+    Decryptors come from dogma, not from a table in the code: the four modifiers are CCP's to change,
+    and ``update-data`` is how a change reaches the ledger. types.jsonl says which dogma rows belong to
+    GROUP_DECRYPTORS and names them, so reports can print them without an ESI round trip."""
+    blueprints: dict[str, dict] = {}
+    for doc in blueprint_docs:
+        entry = (doc.get("activities") or {}).get("invention")
+        if not isinstance(entry, dict):
+            continue
+        try:
+            products = [[str(int(p["typeID"])), int(p["quantity"]), float(p.get("probability") or 0.0)]
+                        for p in entry.get("products") or []]
+            materials = {str(int(m["typeID"])): int(m["quantity"]) for m in entry.get("materials") or []}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if products:
+            blueprints[str(doc["_key"])] = {"m": materials, "p": products, "t": int(entry.get("time") or 0)}
+
+    names = {str(doc["_key"]): _english(doc.get("name")) or None
+             for doc in type_docs if doc.get("groupID") == GROUP_DECRYPTORS}
+    wanted = (ATTR_DECRYPTOR_PROBABILITY, ATTR_DECRYPTOR_ME, ATTR_DECRYPTOR_TE, ATTR_DECRYPTOR_RUNS)
+    decryptors: dict[str, dict] = {}
+    for doc in dogma_docs:
+        key = str(doc.get("_key"))
+        if key not in names:
+            continue
+        values = {a.get("attributeID"): a.get("value") for a in doc.get("dogmaAttributes") or []}
+        if all(attr in values for attr in wanted):
+            decryptors[key] = {
+                "name": names[key],
+                "probability": float(values[ATTR_DECRYPTOR_PROBABILITY]),
+                "me": int(values[ATTR_DECRYPTOR_ME]),
+                "te": int(values[ATTR_DECRYPTOR_TE]),
+                "runs": int(values[ATTR_DECRYPTOR_RUNS]),
+            }
+    return {"blueprints": blueprints, "decryptors": decryptors}
 
 
 def _number(value) -> float:
@@ -845,10 +926,11 @@ def latest_build() -> int:
 
 def update(build: int | None = None) -> dict:
     """Download the SDE zip and refresh alpha caps, bloodline races, the skill catalog, blueprint
-    material lists, the planetary industry document, the planet census and the market type index.
+    material lists, the planetary industry document, the planet census, the market type index and
+    the invention document.
 
     The run holds ``update.lock``: two `update-data` processes would otherwise both pull
-    ~100 MB and interleave, leaving the seven files describing different builds (and
+    ~100 MB and interleave, leaving the eight files describing different builds (and
     fighting over one fixed `.tmp` name). Each file is replaced atomically, so a reader
     never sees a half-written snapshot; the set as a whole switches build file by file."""
     dest = Path(paths.data_dir())
@@ -869,6 +951,13 @@ def update(build: int | None = None) -> dict:
                 _jsonl(zf, "types.jsonl"),
             )
             blueprints = _transform_blueprint_materials(_jsonl(zf, "blueprints.jsonl"))
+            # A second pass over blueprints.jsonl and a fifth over types.jsonl, for the invention rows
+            # and the eight decryptor names; streamed like every other pass, so it costs time, not memory.
+            invention = _transform_blueprint_invention(
+                _jsonl(zf, "blueprints.jsonl"),
+                _jsonl(zf, "typeDogma.jsonl"),
+                _jsonl(zf, "types.jsonl"),
+            )
             # Planetary industry reads typeDogma and types a second time. That is deliberate: the two
             # transforms select different rows, and re-opening a member keeps both passes streaming -
             # measured on build 3503375, the extra read costs about two seconds and no memory.
@@ -911,6 +1000,8 @@ def update(build: int | None = None) -> dict:
             ("system_planets.json", {"source": src, "build": build, "fetched": fetched, **census}),
             # Both market halves are name-keyed and sit beside the envelope like the two above.
             ("market_types.json", {"source": src, "build": build, "fetched": fetched, **market_index}),
+            # Two sections beside the envelope, like the three above.
+            ("blueprint_invention.json", {"source": src, "build": build, "fetched": fetched, **invention}),
         )
         for name, payload in payloads:
             storage.atomic_write(str(dest / name), json.dumps(payload))
@@ -939,4 +1030,6 @@ def update(build: int | None = None) -> dict:
         "market_types": sum(len(row["types"]) for row in market_index["groups"].values()),
         "market_groups": len(market_index["groups"]),
         "market_categories": len(market_index["categories"]),
+        "invention_blueprints": len(invention["blueprints"]),
+        "decryptors": len(invention["decryptors"]),
     }

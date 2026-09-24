@@ -714,7 +714,15 @@ class AlphadataUpdateTests(XdgTestCase):
             "bloodlines.jsonl": '{"_key": 402, "raceID": 1}\n',
             "dogmaAttributes.jsonl": '{"_key": 164, "name": "Perception"}\n{"_key": 165, "name": "Intelligence"}\n',
             # typeDogma values are floats in the real SDE; 180/181 mark a skill, 275 is its rank.
-            "typeDogma.jsonl": '{"_key": 1003, "dogmaAttributes": [{"attributeID": 180, "value": 164.0},'
+            # 34203 is a decryptor (group 1304); 21576 carries the same four attributes but is a retired
+            # racial one in another group, which invention no longer accepts.
+            "typeDogma.jsonl": '{"_key": 34203, "dogmaAttributes": [{"attributeID": 1112, "value": 0.6},'
+                               ' {"attributeID": 1113, "value": -2.0}, {"attributeID": 1114, "value": 2.0},'
+                               ' {"attributeID": 1124, "value": 9.0}]}\n'
+                               '{"_key": 21576, "dogmaAttributes": [{"attributeID": 1112, "value": 0.6},'
+                               ' {"attributeID": 1113, "value": -2.0}, {"attributeID": 1114, "value": 2.0},'
+                               ' {"attributeID": 1124, "value": 9.0}]}\n'
+                               '{"_key": 1003, "dogmaAttributes": [{"attributeID": 180, "value": 164.0},'
                                ' {"attributeID": 181, "value": 165.0}, {"attributeID": 275, "value": 2.0},'
                                ' {"attributeID": 182, "value": 1002.0}, {"attributeID": 277, "value": 3.0}]}\n'
                                '{"_key": 1002, "dogmaAttributes": [{"attributeID": 180, "value": 165.0},'
@@ -744,7 +752,9 @@ class AlphadataUpdateTests(XdgTestCase):
             # type index is built from - and it is deliberately not also the grouping key. The three
             # values here are the real ones for these types; the facilities without it (extractor,
             # processor, spaceport) really do have none in the SDE, so they cannot be priced by name.
-            "types.jsonl": '{"_key": 1003, "name": {"en": "Astrogeology", "de": "Astrogeologie"}, "published": true}\n'
+            "types.jsonl": '{"_key": 34203, "name": {"en": "Augmentation Decryptor"}, "groupID": 1304, "published": true}\n'
+                           '{"_key": 21576, "name": {"en": "Esoteric Augmentation"}, "groupID": 733, "published": false}\n'
+                           '{"_key": 1003, "name": {"en": "Astrogeology", "de": "Astrogeologie"}, "published": true}\n'
                            '{"_key": 1002, "name": {"en": "Science"}, "published": true}\n'
                            '{"_key": 900, "name": {"en": "Reactor Control Unit"}, "published": false}\n'
                            '{"_key": 2268, "name": {"en": "Aqueous Liquids"}, "groupID": 1032, "marketGroupID": 1333, "published": true}\n'
@@ -758,7 +768,9 @@ class AlphadataUpdateTests(XdgTestCase):
                            '{"_key": 13, "name": {"en": "Planet (Gas)"}, "groupID": 7, "published": false}\n',
             # The SDE's own row shape; only the two activities that consume goods may survive it.
             "blueprints.jsonl": '{"_key": 681, "maxProductionLimit": 300, "activities": '
-                                '{"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
+                                '{"invention": {"materials": [{"typeID": 20171, "quantity": 2}], '
+                                '"products": [{"typeID": 1163, "quantity": 10, "probability": 0.3}], "time": 900}, '
+                                '"manufacturing": {"materials": [{"typeID": 38, "quantity": 86}], '
                                 '"products": [{"typeID": 165, "quantity": 1}], '
                                 '"skills": [{"typeID": 1003, "level": 3}], "time": 600}, '
                                 '"copying": {"materials": [{"typeID": 34, "quantity": 1}], '
@@ -832,7 +844,7 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual(self.max_in_flight, 1, "two update-data runs downloaded at once")
         for name in ("clone_grades.json", "bloodline_races.json", "skill_catalog.json",
                      "blueprint_materials.json", "planet_industry.json", "system_planets.json",
-                     "market_types.json"):
+                     "market_types.json", "blueprint_invention.json"):
             path = os.path.join(self.data_dir, name)
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(json.load(fh)["build"], self.BUILD)
@@ -852,6 +864,14 @@ class AlphadataUpdateTests(XdgTestCase):
             "45732": {"reaction": {"m": {"16657": 100, "16661": 100}, "p": ["16672", 20], "t": 360,
                                    "limit": 1000000, "s": {"1002": 4}}},
         })
+        # Invention has its own document: the T1 blueprint's attempt inputs and outcome, and exactly the
+        # decryptors of the generic group - never its manufacturing row, which stays where it was.
+        self.assertEqual({"invention_blueprints": 1, "decryptors": 1},
+                         {key: summaries[0][key] for key in ("invention_blueprints", "decryptors")})
+        invention = alphadata.blueprint_invention()
+        self.assertEqual({"681": {"m": {"20171": 2}, "p": [["1163", 10, 0.3]], "t": 900}}, invention["blueprints"])
+        self.assertEqual({"34203": {"name": "Augmentation Decryptor", "probability": 0.6, "me": -2, "te": 2,
+                                    "runs": 9}}, invention["decryptors"])
         # Planetary industry arrives with the rest, and its counts come from those same rows - including
         # the level-0 command center, which is the one unit carrying no skill-level attribute.
         self.assertEqual({"pi_schematics": 1, "pi_planet_types": 1, "pi_commodities": 2,

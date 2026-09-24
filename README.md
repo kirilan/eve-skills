@@ -701,6 +701,73 @@ twice. `--closed` switches to ESI's history: price, derived state,
 `filled/total`, station, region, issued and expires — with two footnotes about what history cannot say
 (see [Limitations](#limitations-you-should-know)).
 
+### `ledger` — what the business cost, earned and holds
+
+```bash
+eve-skills login --scopes jobs,wallet,orders,corp-orders,blueprints,assets   # once per member
+eve-skills ledger sync                        # copy jobs, wallets, orders, blueprints into the ledger
+eve-skills ledger pnl                         # profit and loss since the cutover
+eve-skills ledger pnl --since 2026-09-19 --by week
+eve-skills ledger products --scope invention  # unit cost, net price and profit per T2 line
+eve-skills ledger invention                   # decryptor, success rate, cost per invented run
+eve-skills ledger inventory                   # stock and work in progress at cost and at Jita
+eve-skills skills --watch --ledger            # keep syncing, at most once an hour
+eve-skills ledger progress                    # the figures every sync recorded, open to-dos, recent notes
+eve-skills ledger note add "Sell run loaded" --body-file notes.md   # the operation's log
+eve-skills ledger note add "Relist Gyro II in Dodixie" --kind todo
+eve-skills ledger note list --open            # open to-dos; `note show [ID...]`, `note done ID`
+```
+
+ESI forgets: wallet journal and transactions are served for **30 days**, completed industry jobs for
+about 90, and an invented copy disappears from `/blueprints` when its last run is used. `ledger sync`
+copies all of it into one SQLite file (`ledger.sqlite3` in the data root) before that happens, keyed by
+ESI's own ids, so it can run any number of times — by hand and from `watch` at once — and never
+double-counts. It reads every player corporation a stored character belongs to (jobs, all seven wallet
+divisions, open and historical orders, blueprints) with whichever consenting member ESI accepts, and
+each member's personal side too, so a sale that went through a personal wallet is still booked. A
+personal row that ESI flags `is_personal: false` was made for the corporation and is already in its
+wallet, so it is dropped. Corporation wallets need the in-game **Accountant** or **Junior Accountant**
+role. `doctor` warns when the last sync is 20 days old and fails past 30.
+
+Only facts are stored; every report replays them in time order, so a better costing rule re-prices all
+of history. The rules:
+
+- **Weighted average cost** per item type and per blueprint's copy runs. Purchases, and broker fees on
+  buy orders, add to a type's cost; a finished job adds its whole cost as the value of its output.
+- **Stock older than the ledger is valued at market**: when a job or sale needs more than the ledger
+  saw arrive, the shortfall is priced at the type's median daily average in The Forge over the 30 days
+  up to the *cutover* (the first day with a stored trade or job), fixed once per type. A type with no
+  price is counted and reported, never costed as free.
+- **Job inputs come from the SDE**, because ESI never lists them: manufacturing materials at the
+  blueprint's ME (from the copy a sync saw, its siblings, or the ME invention gives), invention data
+  cores plus one decryptor per attempt. Fees come from the journal by job id.
+- **Invention cost lands on the successes**: an invention job's whole cost, failed attempts included,
+  becomes the value of the copy runs it made, and so of every T2 unit built from them.
+- **The decryptor is read off the copies** (ME/TE of an invented copy), or, if no sync saw a copy, from
+  the runs manufacturing drew from one copy. Parity and Optimized Attainment leave the same ME/TE; the
+  one the business bought wins.
+- **Broker fees follow their order**: matched by the second an order was issued, or — because ESI moves
+  `issued` to an order's last modification — to the next order its issuer modified whose value fits
+  that issuer's measured fee rate. Sales tax is matched to the sales of the same second.
+- Trades between the business's own wallets are skipped on both sides.
+
+Reports split **invention lines** (products built from blueprints the business invented) from **other**
+trade (recovered stock, minerals, T1) and from **overhead** (office rent, contract fees, research jobs,
+cancelled jobs, fees that matched nothing). Each ends with an *assumptions* block counting every place
+a rule had to assume something — copies older than the ledger costed at 0, unknown ME or decryptor,
+fees taken from the job row — so a figure is never more certain than it looks. `inventory` is the one
+report that reads ESI live: today's corporation and member assets plus open sell orders, valued at
+Jita's best sell (CCP's average where Jita has none, marked `~`), beside their ledger cost (`*` marks
+opening-price cost), and running jobs at cost so far and expected output value. Every report takes
+`--json`.
+
+The same file is the operation's **log**. `ledger note` keeps dated notes — `update` (the default),
+`decision`, `incident`, `analysis` and `todo`, which stays open until `note done` — with a Markdown body
+from `--body`, a file or stdin, and `--at` to backdate one. Every sync also stores a **snapshot** of the
+figures (jobs running and ready per activity, T2 units built and sold, invention revenue and gross
+profit, net profit, stock at cost, work in progress, open sell and buy orders), so `ledger progress`
+shows the trend one row per day (`--all` for every sync) beside the open to-dos and the latest notes.
+
 ### `market` — live prices, spread and volume
 
 ```bash
@@ -1383,6 +1450,7 @@ eve-skills skills --watch --no-orders   # training only: leave the order books a
 eve-skills skills --watch --no-colonies   # leave the planets alone too
 eve-skills orders --watch 1        # the order books on their own, every minute
 eve-skills orders --watch --corp   # corporation orders as well (needs corp-orders consent)
+eve-skills skills --watch --ledger # also keep the accounting ledger synced (hourly)
 ```
 
 By default watch draws a compact status table for all stored characters — clone state, queue
@@ -1476,7 +1544,7 @@ id,ts,time_utc,kind,character_id,character_name,skill_id,skill_name,finished_lev
 has (never later than the order's own expiry). The text view prints those two as `[history]` and
 `[time estimated]` on the affected lines.
 
-### `update-data` — alpha caps, skill catalog, blueprint recipes, planetary industry, the planet census and the market type index from the official SDE
+### `update-data` — alpha caps, skill catalog, blueprint recipes, invention, planetary industry, the planet census and the market type index from the official SDE
 
 ```bash
 eve-skills update-data              # latest build (~100 MB download)
@@ -1490,8 +1558,10 @@ one makes — and the planetary-industry chain: each planet type with what its e
 recipe with its inputs, outputs, cycle time, plant class and the planets able to run it, the CPU and power
 each structure draws, a command center's output at every upgrade level, and the customs-tax factors —
 and every planet in New Eden grouped by the system it orbits — and the market type index, which maps each
-of the 814 groups of market-listed types (and each of their 32 categories) to the types it holds —
-and atomically replaces seven files in the data directory
+of the 814 groups of market-listed types (and each of their 32 categories) to the types it holds — and
+the invention document (each inventable blueprint's data cores per attempt, the blueprint it yields with
+its runs and base chance, and the eight generic decryptors' modifiers, which `ledger` costs invention
+with) — and atomically replaces eight files in the data directory
 (`$XDG_DATA_HOME/eve-skills`, `%LOCALAPPDATA%\eve-skills\data` on Windows). That user copy takes
 precedence over the snapshot shipped in the package, so you can refresh caps, the catalog, the recipes and
 the planetary data without touching the checkout. `plan` is built on this catalog — without one it refuses
@@ -1503,6 +1573,12 @@ would have to parse before adding up eight integers, and it counts every planet 
 the ones nobody can colonise, which `planet_industry.json` has no name for. The whole download runs under `update.lock`, so two concurrent
 runs cannot both pull ~100 MB and interleave builds, and each file is replaced atomically. `skills` warns
 when the local snapshot is more than 90 days old (the age line also names the SDE build in use).
+
+The invention document is its own file because a T1 blueprint's invention row would shadow its
+manufacturing row in `blueprint_materials.json`, which every consumer reads as "the recipe this
+blueprint builds". Decryptors come from dogma rather than a table in the code, restricted to group
+1304 ("Decryptors - Generic"): 66 types carry the four decryptor attributes, most of them retired
+racial decryptors and relic salvage that invention no longer accepts.
 
 The market type index is its own file for the same reason: it costs 0.94 MB against a 153 MB `types.jsonl`,
 and `pi` would have to parse all of it to answer a question it never asks. Only types that are both
@@ -1627,6 +1703,8 @@ naming the wrong tree beats naming nothing.
 | `types.json` | cache | The type catalogue `inventory` builds: per type id its name, group and category — groups and categories cached as their own sections, so a new type in an already-known group costs one request. `version`-tagged, merged under `types.lock` | Non-secret (public universe data); deleting it only re-buys the fan-out for ids this machine has not met since |
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
 | `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry,system_planets,market_types}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id; `system_planets.json` is the one `system` reads — every planet in New Eden counted per solar system by planet type (68,407 planets over 8,088 systems in build 3503375), with a name for each type it met; `market_types.json` is the one `market --group` reads — every market-listed type under its group and its category (19,551 types over 814 groups and 32 categories in build 3494416) | Non-secret |
+| `blueprint_invention.json` | data | SDE invention document from `update-data`: per inventable blueprint its data cores per attempt, product and base chance, and the eight generic decryptors' modifiers. The one `ledger` costs invention with | Non-secret |
+| `ledger.sqlite3` (+ `-wal`, `-shm`) | data | The accounting ledger: industry jobs, wallet journal and transactions, market orders, blueprint sightings, reference and opening prices, a sync log, per-sync figure snapshots and the operation's notes and to-dos. WAL mode, so reports read while a sync writes | **Private business records** (your trades and balances, no credentials). Not regenerable past ESI's 30-day wallet window — back it up like a document |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory
@@ -1891,6 +1969,8 @@ settle — order-book depth behind an ask, invention, who owns the blueprint —
 | Queue gaps are real data | CCP omits schedule dates when an item cannot train; those rows show `BLOCKED` / "no schedule - cannot train" and must not be read as active training. |
 | ESI lags finished training | A completed queue item can stay visible until the character logs in. The tool overlays the completed level and marks it pending (`*`) rather than pretending nothing happened. |
 | Data freshness matters | Alpha caps warn after 90 days; extractor rules are dated constants that warn after ~180 days. Both warnings name the remedy or the verification date. |
+| The ledger reconstructs what ESI does not say | Job inputs are computed from SDE recipes (no structure rig or hull bonuses: jobs in a player structure are noted), invented-copy decryptors are inferred from copies or runs, and broker fees are matched to orders by timestamp or fee rate. Item-exchange contracts, hauling losses and reprocessing are not booked; contract fees and courier rewards are overhead. Anything the replay had to assume is counted in each report's *assumptions* block. |
+| The ledger cannot recover what it never stored | A sync reaches back 30 days of wallet history and ~90 days of jobs. Stock that predates the cutover is valued at the Forge median of the 30 days before it; blueprint copies made before the cutover cost 0. |
 | Pagination is capped | Paginated GETs follow at most 100 pages, so an enormous corp asset list would be truncated rather than loop forever. |
 | Name resolution degrades | A structure this token may not see stays a labelled `structure <id>`, an id whose parent chain ESI never completes stays `location <id>`; name failures never fail the command. |
 | `/universe/names` fails as a whole batch | ESI validates `ids` as int32 and answers **400 for the entire request** when one id overflows (verified live 2026-09-08) — and container, ship and structure ids are all far above that bound. So one citadel in a batch would cost every station name beside it: `inventory` sends type ids to `/universe/types` and location ids to their own resolvers, and never posts a location id to `/universe/names`. The fake ESI reproduces the whole-batch 400, which is what makes "every row is named" a real pin instead of luck. |
@@ -1933,6 +2013,10 @@ eve_skills/
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
   cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
   cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
+  cmd_ledger.py      the ledger command: sync, pnl, products, invention, inventory, note and progress
+  ledger_db.py       the ledger's SQLite store: schema, migrations, idempotent writes of raw ESI rows
+  ledger_sync.py     ESI -> ledger: corporation and member documents, opening prices, watch hook
+  ledger.py          the accounting replay: weighted-average costing, job inputs, invention, fee matching
   doctor.py          read-only installation diagnostics (never writes, redacts secrets)
   sso.py             OAuth2 PKCE login (loopback + manual), refresh, scope registry, token/config storage
   esi.py             stdlib ESI client: caching, retries, error-limit backoff, server-time, name cache
@@ -1951,7 +2035,8 @@ eve_skills/
   exports.py         standings / jobs / inventory (grouped, valued) / travel / implants + consent hints
   render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
   data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog,
-                     blueprint_materials, planet_industry, system_planets, market_types)
+                     blueprint_materials, planet_industry, system_planets, market_types,
+                     blueprint_invention)
 tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
                      Windows lock backend, path layout on both branches, fake-ESI command integration,
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end
