@@ -225,11 +225,16 @@ def connect(path: str | None = None, *, readonly: bool = False) -> sqlite3.Conne
         conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
     else:
         conn = sqlite3.connect(target, timeout=BUSY_TIMEOUT_MS / 1000)
-    conn.row_factory = sqlite3.Row
-    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-    if not readonly:
-        conn.execute("PRAGMA journal_mode = WAL")
-        _migrate(conn)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        if not readonly:
+            conn.execute("PRAGMA journal_mode = WAL")
+            _migrate(conn)
+    except BaseException:
+        # A refused ledger must not stay open: on Windows the handle would pin the file.
+        conn.close()
+        raise
     return conn
 
 

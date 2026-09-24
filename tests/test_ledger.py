@@ -322,8 +322,14 @@ class StoreTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = os.path.join(self.tmp.name, "ledger.sqlite3")
 
-    def test_writing_the_same_rows_twice_counts_them_once(self):
+    def connect(self):
+        # Closed before the directory goes: Windows cannot delete a file that is still open.
         conn = ledger_db.connect(self.path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_writing_the_same_rows_twice_counts_them_once(self):
+        conn = self.connect()
         rows = [{"transaction_id": 1, "date": stamp(1), "type_id": 34, "quantity": 5, "unit_price": 4.0,
                  "is_buy": True}]
         self.assertEqual(1, ledger_db.insert_transactions(conn, WALLET, rows))
@@ -331,7 +337,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
 
     def test_a_jobs_outcome_is_refreshed_when_esi_reports_it(self):
-        conn = ledger_db.connect(self.path)
+        conn = self.connect()
         row = {"job_id": 7, "activity_id": 8, "runs": 3, "start_date": stamp(1), "status": "active"}
         ledger_db.upsert_jobs(conn, f"corp:{CORP}", [row], stamp(1))
         ledger_db.upsert_jobs(conn, f"corp:{CORP}", [dict(row, status="delivered", successful_runs=2)], stamp(2))
@@ -350,7 +356,7 @@ class StoreTests(unittest.TestCase):
         conn.execute("INSERT INTO meta (key, value) VALUES ('cutover', '2026-09-04')")
         conn.commit()
         conn.close()
-        conn = ledger_db.connect(self.path)
+        conn = self.connect()
         self.assertEqual(ledger_db.SCHEMA_VERSION, conn.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("2026-09-04", ledger_db.cutover(conn))
         with conn:
@@ -358,7 +364,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(["first"], [n["title"] for n in ledger_db.notes(conn)])
 
     def test_only_a_to_do_can_be_closed(self):
-        conn = ledger_db.connect(self.path)
+        conn = self.connect()
         with conn:
             todo = ledger_db.add_note(conn, stamp(1), "todo", "sell run")
             update = ledger_db.add_note(conn, stamp(2), "update", "all slots busy")
@@ -467,6 +473,7 @@ class LedgerCommandTests(unittest.TestCase):
     def test_opening_stock_is_the_median_forge_price_before_the_cutover(self):
         self.env.run(["ledger", "sync"])
         conn = ledger_db.connect()
+        self.addCleanup(conn.close)
         self.assertEqual((32.0, "forge_history", "2026-09-01"), tuple(conn.execute(
             "SELECT price, source, basis FROM opening_prices WHERE type_id = ?", (MINERAL,)).fetchone()))
         # No Forge history at all: CCP's average stands in, and says so.
