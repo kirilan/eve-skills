@@ -23,7 +23,8 @@ from eve_skills import cli, divisions, sso
 from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
     INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
-    SKILL_UNSTARTED, SKILL_WIDE, FakeEsiEnv, industry_jobs, iso,
+    SKILL_UNSTARTED, SKILL_WIDE, BUILD_CELL, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE,
+    STATION_JITA, FakeEsiEnv, industry_jobs, iso,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -568,6 +569,30 @@ class IndustryStatusTests(CommandTestCase):
                             row["quantity"] == 0 and row["division"] == "T2-Prod"
                             for row in owner["materials"]))
 
+
+    def test_stock_inside_a_corporation_office_is_counted_and_named_by_station(self):
+        # Live ESI nests corp hangars in the office item: location_type "item", location_id = office.
+        office = 1055720303518
+        bps = [{"item_id": 930101 + i, "type_id": 930001, "location_id": office,
+                "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+                "material_efficiency": 7, "time_efficiency": 14} for i in range(2)]
+        self.env.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=bps)
+        stock = {BUILD_PLATE: 76, BUILD_HOUSING: 500, BUILD_CELL: 100, BUILD_PASTE: 100}
+        rows = [{"item_id": office, "type_id": 27, "quantity": 1, "location_id": STATION_JITA,
+                 "location_flag": "OfficeFolder", "location_type": "station", "is_singleton": True}]
+        rows += [{"item_id": 941000 + i, "type_id": type_id, "quantity": qty, "location_id": office,
+                  "location_flag": "CorpSAG4", "location_type": "item", "is_singleton": False}
+                 for i, (type_id, qty) in enumerate(stock.items())]
+        self.env.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=rows)
+        code, out, err = self.env.run(["industry", "status", "--corp", "--char", "Ada", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        owner = json.loads(out)["owners"][0]
+        plate = next(r for r in owner["materials"] if r["type_id"] == BUILD_PLATE)
+        self.assertEqual((76, "T2-Prod"), (plate["quantity"], plate["division"]))
+        self.assertNotIn(f"location {office}", plate["location"])
+        bp = next(r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001)
+        self.assertEqual(2, bp["can_build_jobs"])
+        self.assertEqual(plate["location"], bp["location"])
 
     def test_personal_status_uses_personal_documents_without_corp_reads(self):
         code, out, err = self.env.run(["industry", "status", "--char", "Ada", "--json"])
