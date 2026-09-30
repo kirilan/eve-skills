@@ -497,6 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="newest N rows only; the ISK totals still cover every matching order")
     p_orders.add_argument("--json", action="store_true", help="machine-readable output")
     p_orders.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the table")
+    p_orders.add_argument("--check", action="store_true",
+                          help="compare each open order with its station's live book: undercut/outbid, "
+                               "competing units ahead in days of volume, and a suggested price "
+                               "(one regional book + 30-day history per type)")
     p_orders.add_argument("--watch", type=int, nargs="?", const=5, metavar="MIN",
                           help="keep refreshing every MIN minutes (default 5), announcing filled/expired/cancelled orders; Ctrl-C stops")
     p_orders.add_argument("--notify", action="store_true",

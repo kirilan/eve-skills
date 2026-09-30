@@ -677,6 +677,7 @@ eve-skills orders --char Somecharacter --sell   # one character, sells only
 eve-skills orders --type Tritanium              # one type (exact name or numeric id)
 eve-skills orders --corp                        # corporation orders instead of personal ones
 eve-skills orders --closed --limit 200          # ESI's ~90-day history, newest issued first
+eve-skills orders --char Somecharacter --check  # each open order against its station's live book
 eve-skills orders --watch 1                     # poll every minute, announce what changes
 eve-skills orders --csv > orders.csv
 ```
@@ -700,6 +701,19 @@ per corporation even when several stored characters work there, so colleagues' o
 twice. `--closed` switches to ESI's history: price, derived state,
 `filled/total`, station, region, issued and expires — with two footnotes about what history cannot say
 (see [Limitations](#limitations-you-should-know)).
+
+`--check` places every open order in the book of the station it sits in (one regional book and one
+30-day history per region and type, however many orders share them). Every open order the command read
+counts as ours and is left out of the competition, so a sibling order never reads as an undercut. Each
+row gets a status - sell: `cheapest`, `undercut`, `behind sliver`; buy: `top`, `outbid`; `alone` when
+nobody else is there - the best competing price, the competing units priced ahead of ours, those units
+in days of the region's daily volume, and a suggested price one tick past the competition (EVE prices
+carry four significant digits). A sell suggestion ignores a *sliver*: a leading block of at most
+max(5 units, 2 % of daily volume) that is also at most 10 % of our remaining stack and more than 2 %
+cheaper than the next order - undercutting one bait unit would give the gap away on every unit we list,
+so such an order reads `behind sliver` and gets no suggestion. The rule lives in `eve_skills/pricing.py`.
+`--json` adds a `check` object to each order; `--check` cannot be combined with `--closed`, `--csv` or
+`--watch`. Only the issuing character can reprice an order, and only from the order's region.
 
 ### `ledger` — what the business cost, earned and holds
 
@@ -1837,7 +1851,9 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
   without `--system`, a system with no published index — that spend no order-book request at all;
 - `tests/test_orders.py` — order normalisation from malformed and partial ESI rows (escrow optional,
   derived closed state), character + corporation fetching with its role diagnosis, and the `orders`
-  command's table, totals and footnotes;
+  command's table, totals and footnotes, and `--check` against station books;
+- `tests/test_pricing.py` — price ticks across powers of ten, the thin-sliver rule on the worked Jita
+  examples, and undercut / outbid / sliver standings;
 - `tests/test_planner_catalog.py` — prerequisite closure, ordering, coverage and rank pricing
   against synthetic catalogs, plus one check of the bundled SDE snapshot itself;
 - `tests/test_watch_events.py` — the watch transition model for both halves (training and orders:
@@ -2012,7 +2028,7 @@ eve_skills/
                      seller identity, station ownership and what a named character nets
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
   cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
-  cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
+  cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals, --check
   cmd_ledger.py      the ledger command: sync, pnl, products, invention, inventory, note and progress
   ledger_db.py       the ledger's SQLite store: schema, migrations, idempotent writes of raw ESI rows
   ledger_sync.py     ESI -> ledger: corporation and member documents, opening prices, watch hook
@@ -2025,6 +2041,7 @@ eve_skills/
                      history, and CCP's sales tax / broker fee rates
   industry.py        blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
   orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
+  pricing.py         price ticks, the real floor of a sell book (thin-sliver rule), an order's standing
   classify.py        alpha-cap lookup, per-skill classification, clone-state inference
   alphadata.py       packaged/user SDE data loading, transformations, update-data downloader
   planner.py         rank-based SP costs, prerequisite expansion, rate calibration, extractor math

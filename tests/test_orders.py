@@ -15,8 +15,16 @@ import unittest
 from eve_skills import esi, orders, sso
 
 from tests.fake_esi import (
-    ADA, CORP_SHARED, MIRA, FakeEsiEnv, owner_order,
+    ADA, CORP_SHARED, MARKET_DOMAIN, MARKET_FORGE, MIRA, STATION_AMARR, STATION_JITA, FakeEsiEnv,
+    owner_order,
 )
+
+
+def _market_row(order_id: int, price: float, location_id: int, remain: int, *, buy: bool = False) -> dict:
+    """One `/markets/{region}/orders` row as live ESI sends it."""
+    return {"order_id": order_id, "type_id": 34, "location_id": location_id, "system_id": 30000142,
+            "price": price, "volume_remain": remain, "volume_total": remain, "is_buy_order": buy,
+            "issued": "2026-09-01T00:00:00Z", "duration": 90, "min_volume": 1, "range": "station"}
 
 
 class NormalisationTests(unittest.TestCase):
@@ -302,6 +310,49 @@ class OrdersCommandTests(unittest.TestCase):
         _, out, _ = self.env.run(["orders", "--limit", "1"])
         self.assertIn("hidden by --limit", out)
         self.assertIn("624.90", out)                # the portfolio figure still covers all three
+
+    def _install_check_books(self):
+        def orders_at(call):
+            type_id = int(call.query["type_id"])
+            if type_id == 34:   # Jita: Ada 5.75 and Mira 4.99 are ours, one bait unit, the real floor
+                return [_market_row(700001, 5.75, STATION_JITA, 100),
+                        _market_row(700011, 4.99, STATION_JITA, 10),
+                        _market_row(800001, 3.00, STATION_JITA, 1),
+                        _market_row(800002, 5.50, STATION_JITA, 500)]
+            return [_market_row(700002, 3.10, STATION_AMARR, 500, buy=True),
+                    _market_row(800003, 3.20, STATION_AMARR, 1000, buy=True),
+                    _market_row(800004, 9.99, 60099002, 5, buy=True)]   # another station: not ours to beat
+        for region in (MARKET_FORGE, MARKET_DOMAIN):
+            self.env.server.get(f"/markets/{region}/orders", handler=orders_at)
+            self.env.server.get(f"/markets/{region}/history", doc=[])
+
+    def test_check_places_each_order_in_its_station_book(self):
+        self._install_check_books()
+        code, out, err = self.env.run(["orders", "--check", "--json"])
+        self.assertEqual(code, 0)
+        self.assertIn("Vela Krinn: no orders consent", err)    # hints stay off stdout
+        checks = {o["order_id"]: o["check"] for o in json.loads(out)["orders"]}
+        ada_sell, ada_buy, mira = checks[700001], checks[700002], checks[700011]
+        # Our own cheaper order (Mira's) is not competition; the bait unit is skipped.
+        self.assertEqual(("undercut", 501, 5.49), (ada_sell["status"], ada_sell["units_ahead"],
+                                                   ada_sell["suggest"]))
+        self.assertEqual(("behind sliver", None), (mira["status"], mira["suggest"]))
+        # The 9.99 bid sits at another station and is left out.
+        self.assertEqual(("outbid", 3.20, 3.21), (ada_buy["status"], ada_buy["best_other"],
+                                                   ada_buy["suggest"]))
+        # One book per (region, type), however many of our orders share it.
+        self.assertEqual(2, len([c for c in self.env.server.calls if c.path.endswith("/orders")
+                                 and c.path.startswith("/markets/")]))
+        code, text, err = self.env.run(["orders", "--check"])
+        self.assertEqual(code, 0)
+        self.assertIn("behind sliver", text)
+        self.assertIn("2 of 3 order(s) behind a competitor", text)
+
+    def test_check_refuses_closed_and_csv(self):
+        for extra in ("--closed", "--csv"):
+            code, _, err = self.env.run(["orders", "--check", extra])
+            self.assertNotEqual(0, code)
+            self.assertIn("--check", err)
 
     def test_limit_below_one_is_rejected(self):
         code, _, err = self.env.run(["orders", "--limit", "0"])
