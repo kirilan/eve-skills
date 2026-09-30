@@ -203,6 +203,30 @@ class JobsCommandTests(CommandTestCase):
         self.assertIn("no jobs consent", err)   # Vela's hint stays off stdout in CSV mode
         return list(csv.DictReader(out.splitlines()))
 
+    def test_times_report_measured_hours_per_run_and_skip_paused_jobs(self):
+        self.env.install_jobs()
+        code, out, err = self.env.run(["jobs", "--char", "Ada", "--times", "--finish-window", "00-24",
+                                       "--max-hours", "1", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        times = {(r["activity"], r["product"]): r for r in doc["documents"][0]["times"]}
+        # 10 runs over 2.5 h; the invention's 10 attempts over one hour (a delivered job counts).
+        self.assertAlmostEqual(0.25, times[("manufacturing", "Tritanium")]["hours_per_run"])
+        self.assertEqual(1, times[("invention", next(p for a, p in times if a == "invention"))]["jobs"])
+        # The paused job's stale end date is not a run time.
+        self.assertNotIn(("manufacturing", "Mexallon"), times)
+        # 00-24 accepts every end, so each fit is the most runs within --max-hours.
+        self.assertEqual(4, times[("manufacturing", "Tritanium")]["fits"][0]["runs"])
+        code, text, _ = self.env.run(["jobs", "--char", "Ada", "--times"])
+        self.assertEqual(code, 0)
+        self.assertIn("h/run", text)
+
+    def test_window_flags_need_times(self):
+        self.env.install_jobs()
+        code, _, err = self.env.run(["jobs", "--finish-window", "08-10"])
+        self.assertNotEqual(0, code)
+        self.assertIn("--times", err)
+
     def test_running_jobs_are_named_counted_and_timed(self):
         self.env.install_jobs()
         code, out, _ = self.env.run(["jobs"])

@@ -440,6 +440,8 @@ stored consent somehow lacks the skills scope gets a hint line instead of data.
 eve-skills standings --csv > standings.csv
 eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
+eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Sofia --start 09:30
+                                      # measured hours per run, and run counts ending in those windows
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
@@ -462,6 +464,17 @@ prints a per-character warning rather than failing the whole command.
 
 Both endpoints answer with running jobs only; `--completed` is what adds the delivered and
 cancelled ones.
+
+`--times` reads finished jobs too and reports, per activity, product and installer, the median hours
+per run over the last `--days` days (default 14), with the range and the number of jobs. That is the
+real figure after skills, implants, facility and blueprint TE, which the blueprint's base time is not.
+A run is an attempt for invention and a copy for copying (so copy times also vary with the runs per
+copy). Cancelled, reverted and paused jobs are left out: their end dates are not run times.
+`--finish-window 08-10,20-22` adds the run counts that, installed at `--start` (`HH:MM` in `--tz`, or
+an ISO time; default now), end inside a window: the most runs per window occurrence, longest first, up
+to `--max-hours` (default 60). The text shows the two longest; `--json` lists every fit. Cap the answer
+by the runs left on the blueprint yourself. `--tz` takes an IANA zone and follows its daylight saving
+(default UTC). `--times` has no `--group` or `--csv` form.
 
 Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
 `Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
@@ -1852,6 +1865,8 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
 - `tests/test_orders.py` — order normalisation from malformed and partial ESI rows (escrow optional,
   derived closed state), character + corporation fetching with its role diagnosis, and the `orders`
   command's table, totals and footnotes, and `--check` against station books;
+- `tests/test_job_times.py` — window parsing, next-local-time starts, longest fit per window, caps and
+  the winter-time shift, and medians over timed jobs only;
 - `tests/test_pricing.py` — price ticks across powers of ten, the thin-sliver rule on the worked Jita
   examples, and undercut / outbid / sliver standings;
 - `tests/test_planner_catalog.py` — prerequisite closure, ordering, coverage and rank pricing
@@ -2042,6 +2057,7 @@ eve_skills/
   industry.py        blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
   orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
   pricing.py         price ticks, the real floor of a sell book (thin-sliver rule), an order's standing
+  job_times.py       measured hours per run from job history, local-time finish windows and run fitting
   classify.py        alpha-cap lookup, per-skill classification, clone-state inference
   alphadata.py       packaged/user SDE data loading, transformations, update-data downloader
   planner.py         rank-based SP costs, prerequisite expansion, rate calibration, extractor math

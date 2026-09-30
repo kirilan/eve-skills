@@ -189,6 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="collapse identical jobs by installer, status, activity, product and runs")
     p_jobs.add_argument("--slots", action="store_true",
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
+    p_jobs.add_argument("--times", action="store_true",
+                        help="median measured hours per run by activity, product and installer "
+                             "(reads finished jobs too)")
+    p_jobs.add_argument("--days", type=int, default=14, metavar="N",
+                        help="with --times: only jobs started in the last N days (default 14)")
+    p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
+                        help="with --times: run counts that end inside these local-time windows, "
+                             "e.g. 08-10,20-22")
+    p_jobs.add_argument("--tz", metavar="ZONE",
+                        help="time zone for --finish-window and --start, e.g. Europe/Sofia (default UTC)")
+    p_jobs.add_argument("--start", metavar="HH:MM|ISO",
+                        help="with --finish-window: planned install time (default now)")
+    p_jobs.add_argument("--max-hours", type=float, default=60, metavar="H",
+                        help="with --finish-window: longest job to propose (default 60)")
     p_jobs.add_argument("--json", action="store_true", help="machine-readable output with cache timestamps")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
     p_industry = sub.add_parser("industry", help="compact industry operations snapshot")
