@@ -12,6 +12,7 @@ import io
 import json
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from . import divisions, esi as esi_mod, freshness, market, render, sso, universe
 
@@ -423,9 +424,69 @@ def _cmd_job_slots(args):
     print("\n\n".join(blocks))
 
 
+def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
+    """`jobs --times`: measured hours per run, optionally with window-fitting run counts."""
+    from . import job_times  # local: only this view needs zoneinfo
+    now = client.now()
+    tz = job_times.zone(args.tz)
+    windows = job_times.parse_windows(args.finish_window) if args.finish_window else None
+    start = job_times.parse_start(args.start, tz, now) if windows else None
+    since = now - timedelta(days=args.days)
+    documents = []
+    for owner, rows, meta, corp_id in all_rows:
+        times = job_times.median_times(rows, since)
+        if windows:
+            for row in times:
+                row["fits"] = job_times.window_fits(start, row["hours_per_run"], windows, tz,
+                                                    max_hours=args.max_hours)
+        documents.append((owner, meta, corp_id, times))
+    if args.json:
+        print(json.dumps({
+            "days": args.days, "time_zone": args.tz or "UTC",
+            "finish_window": args.finish_window, "start": start.isoformat().replace("+00:00", "Z") if start else None,
+            "max_hours": args.max_hours if windows else None, "hints": hints, "warnings": failures,
+            "documents": [{"owner": owner, "corporation_id": corp_id,
+                           "cache": freshness.document(meta) if corp_id is not None else None,
+                           "times": times} for owner, meta, corp_id, times in documents]}, indent=2))
+        return
+
+    def local(stamp: str) -> str:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(tz)
+        return moment.strftime("%a %H:%M")
+
+    blocks = list(hints)
+    for owner, meta, corp_id, times in documents:
+        headers = ["activity", "product", "installer", "h/run", "range", "jobs"]
+        if windows:
+            headers.append("runs -> end")
+        table_rows = []
+        for row in times:
+            cells = [row["activity"], row["product"], row["installer"], f"{row['hours_per_run']:.2f}",
+                     f"{row['min_hours']:.2f}-{row['max_hours']:.2f}", str(row["jobs"])]
+            if windows:
+                fits = row["fits"][:2]
+                cells.append(" | ".join(f"{f['runs']} -> {local(f['end'])}" for f in fits) or "no fit")
+            table_rows.append(cells)
+        table = render.table(headers, table_rows) if table_rows else f"(no timed jobs in the last {args.days} days)"
+        cache = f"\n{freshness.line('corp jobs', meta)}" if corp_id is not None else ""
+        blocks.append(f"{owner}{cache}\n{table}")
+    if windows:
+        blocks.append(f"runs -> end: the most runs ending in each {args.finish_window} window ({args.tz or 'UTC'}) "
+                      f"when installed {local(start.isoformat())}, longest first, at most {args.max_hours:g} h; "
+                      "cap by the runs left on the blueprint. h/run is the median over the last "
+                      f"{args.days} days (per attempt for invention).")
+    print("\n\n".join(blocks))
+
+
 def cmd_jobs(args):
     if getattr(args, "slots", False):
         return _cmd_job_slots(args)
+    times = getattr(args, "times", False)
+    if times and (args.group or args.csv):
+        raise RuntimeError("--times has its own table and --json; it cannot be combined with --group or --csv")
+    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz")):
+        raise RuntimeError("--finish-window, --start and --tz only apply with --times")
+    completed = args.completed or times
     scope = ("esi-industry.read_corporation_jobs.v1" if args.corp
              else "esi-industry.read_character_jobs.v1")
     client, chars, hints = targets(args, [("jobs", scope)])
@@ -446,7 +507,7 @@ def cmd_jobs(args):
             for tok, public in candidates:
                 cname = public.get("name") or str(tok["character_id"])
                 try:
-                    jobs, meta = _fetch_jobs_meta(client, tok, corp_id, args.completed)
+                    jobs, meta = _fetch_jobs_meta(client, tok, corp_id, completed)
                 except esi_mod.AuthError as err:
                     refused.append(f"{cname}: {err}")
                     continue
@@ -460,7 +521,7 @@ def cmd_jobs(args):
         for tok, public in chars:
             cname = public.get("name") or str(tok["character_id"])
             try:
-                jobs, meta = _fetch_jobs_meta(client, tok, None, args.completed)
+                jobs, meta = _fetch_jobs_meta(client, tok, None, completed)
             except esi_mod.AuthError as err:
                 failures.append(f"{cname}: ESI refused ({err}) - the jobs consent may no longer be granted")
                 continue
@@ -472,6 +533,8 @@ def cmd_jobs(args):
         all_rows.append((owner, rows, payload["meta"], corp_id))
     for line in failures:
         print(f"warning: {line}", file=sys.stderr)
+    if times:
+        return _cmd_job_times(args, client, all_rows, hints, failures)
     if getattr(args, "json", False):
         documents = []
         for owner, rows, meta, corp_id in all_rows:

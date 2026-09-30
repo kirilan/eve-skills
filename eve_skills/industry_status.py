@@ -176,14 +176,26 @@ def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok,
         if recipe:
             materials.update(recipe.materials)
     cid = int(tok["character_id"]) if tok else None
+    # ESI puts a corporation's hangar items inside its office: location_id is the office item and
+    # location_type "item". Map each office back to its station so that stock is counted and named.
+    offices = ({int(a["item_id"]): int(a["location_id"]) for a in assets
+                if a.get("location_flag") == "OfficeFolder" and a.get("item_id") is not None}
+               if corp_id else {})
+
+    def in_hangar(asset):
+        return (asset.get("location_type") in {"station", "other"} or
+                (int(asset["location_id"]) in offices and divisions.number(asset.get("location_flag")) is not None))
+
     relevant_assets = [a for a in assets if
                        (int(a["type_id"]) in materials or
                         (corp_id and a.get("location_flag") == "CorpDeliveries")) and
                        a.get("location_type") in {"station", "other"}]
+    office_rows = [{"location_id": station, "location_type": "station" if station <= esi_mod.INT32_MAX
+                    else "other"} for station in set(offices.values())]
     places = universe.resolve_locations(
-        client, relevant_assets + [dict(bp, location_type=("station" if int(bp["location_id"]) <=
-                                                                esi_mod.INT32_MAX else "other"))
-                                   for bp in blueprints],
+        client, relevant_assets + office_rows +
+        [dict(bp, location_type=("station" if int(bp["location_id"]) <= esi_mod.INT32_MAX else "other"))
+         for bp in blueprints if int(bp["location_id"]) not in offices],
         token=tok["access_token"] if tok else None, corporation_id=corp_id,
         character_id=None if corp_id else cid) if tok else {}
     ids = (materials | {int(bp["type_id"]) for bp in idle} |
@@ -201,8 +213,11 @@ def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok,
         loc, type_id = int(asset["location_id"]), int(asset["type_id"])
         qty = int(asset.get("quantity", 0))
         available[(loc, divisions.number(flag) if corp_id else None, type_id)] += qty
-        if asset.get("location_type") in {"station", "other"}:
+        if in_hangar(asset):
             stock[(loc, flag, type_id)] += qty
+    for office, station in offices.items():
+        if station in places:
+            places[office] = places[station]
     grouped = {}
     for bp in idle:
         type_id, loc = int(bp["type_id"]), int(bp["location_id"])

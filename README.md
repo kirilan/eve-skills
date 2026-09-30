@@ -440,6 +440,8 @@ stored consent somehow lacks the skills scope gets a hint line instead of data.
 eve-skills standings --csv > standings.csv
 eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
+eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Sofia --start 09:30
+                                      # measured hours per run, and run counts ending in those windows
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
@@ -462,6 +464,17 @@ prints a per-character warning rather than failing the whole command.
 
 Both endpoints answer with running jobs only; `--completed` is what adds the delivered and
 cancelled ones.
+
+`--times` reads finished jobs too and reports, per activity, product and installer, the median hours
+per run over the last `--days` days (default 14), with the range and the number of jobs. That is the
+real figure after skills, implants, facility and blueprint TE, which the blueprint's base time is not.
+A run is an attempt for invention and a copy for copying (so copy times also vary with the runs per
+copy). Cancelled, reverted and paused jobs are left out: their end dates are not run times.
+`--finish-window 08-10,20-22` adds the run counts that, installed at `--start` (`HH:MM` in `--tz`, or
+an ISO time; default now), end inside a window: the most runs per window occurrence, longest first, up
+to `--max-hours` (default 60). The text shows the two longest; `--json` lists every fit. Cap the answer
+by the runs left on the blueprint yourself. `--tz` takes an IANA zone and follows its daylight saving
+(default UTC). `--times` has no `--group` or `--csv` form.
 
 Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
 `Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
@@ -677,6 +690,7 @@ eve-skills orders --char Somecharacter --sell   # one character, sells only
 eve-skills orders --type Tritanium              # one type (exact name or numeric id)
 eve-skills orders --corp                        # corporation orders instead of personal ones
 eve-skills orders --closed --limit 200          # ESI's ~90-day history, newest issued first
+eve-skills orders --char Somecharacter --check  # each open order against its station's live book
 eve-skills orders --watch 1                     # poll every minute, announce what changes
 eve-skills orders --csv > orders.csv
 ```
@@ -700,6 +714,44 @@ per corporation even when several stored characters work there, so colleagues' o
 twice. `--closed` switches to ESI's history: price, derived state,
 `filled/total`, station, region, issued and expires — with two footnotes about what history cannot say
 (see [Limitations](#limitations-you-should-know)).
+
+`--check` places every open order in the book of the station it sits in (one regional book and one
+30-day history per region and type, however many orders share them). Every open order the command read
+counts as ours and is left out of the competition, so a sibling order never reads as an undercut. Each
+row gets a status - sell: `cheapest`, `undercut`, `behind sliver`; buy: `top`, `outbid`; `alone` when
+nobody else is there - the best competing price, the competing units priced ahead of ours, those units
+in days of the region's daily volume, and a suggested price one tick past the competition (EVE prices
+carry four significant digits). A sell suggestion ignores a *sliver*: a leading block of at most
+max(5 units, 2 % of daily volume) that is also at most 10 % of our remaining stack and more than 2 %
+cheaper than the next order - undercutting one bait unit would give the gap away on every unit we list,
+so such an order reads `behind sliver` and gets no suggestion. The rule lives in `eve_skills/pricing.py`.
+`--json` adds a `check` object to each order; `--check` cannot be combined with `--closed`, `--csv` or
+`--watch`. Only the issuing character can reprice an order, and only from the order's region.
+
+### `restock` — what the next builds still need, and what to buy for them
+
+```bash
+eve-skills login --scopes assets              # once; corporation hangars also need the Director role
+eve-skills restock --at "Kulelen V - Moon 16 - Lai Dai Corporation Factory" --char Somedirector \
+  --hauler Somehauler --cargo 5000 \
+  "Medium Core Defense Field Extender II=90" "500MN Microwarpdrive II=37:7" \
+  --invent "Small Core Defense Field Extender II=140:Augmentation" --extra "Augmentation Decryptor=500"
+```
+
+Demand comes from the local SDE recipes: a build line `PRODUCT=UNITS[:ME]` is costed as the jobs it
+would really be installed as (the blueprint's maximum runs each, ME rounding per job); `--invent
+T2PRODUCT=ATTEMPTS[:DECRYPTOR]` adds the invention datacores per attempt and, when named, one decryptor
+per attempt; `--extra TYPE=QTY` is a buffer bought in full on top of stock. Materials are direct inputs
+only - a component you build yourself is its own line.
+
+Stock is netted in this order: the corporation's hangars at `--at` (on site, including items inside its
+office and containers); what the corporation and `--hauler` already own at the hub (`pick up`, no ISK);
+and the hauler's personal hangars elsewhere in the build station's solar system (`move` into the
+corporation hangar). The rest is bought at the hub's lowest sell (`--hub`, default jita). With `--cargo`
+the hold is filled in priority order - inventions and extras first, then build lines in the order given -
+and the last line that does not fit is cut to the units that do (stock on site covers the first units for
+free, so the cut is searched, not scaled). The text ends with a Multibuy block, the pick-ups, the moves
+and what the trip leaves out; `--json` has every line and material with its volume and ISK.
 
 ### `ledger` — what the business cost, earned and holds
 
@@ -989,6 +1041,8 @@ eve-skills build-cost Hound --hub amarr           # shop at another trade hub's 
 eve-skills build-cost Hound --system Amarr        # bill the install in Amarr, still shop at Jita
 eve-skills build-cost Hound "Plasma Thruster"     # several products, off one set of order books
 eve-skills build-cost Hound --brief               # table, totals, verdict, essential warnings
+eve-skills build-cost "Small EM Shield Reinforcer II" "Medium Core Defense Field Extender II" --te 6 \
+  --system Kulelen --sell-at jita --seller Somecharacter --brief     # rank lines by ISK per job-hour
 ```
 
 No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
@@ -997,6 +1051,17 @@ products, including each activity's required skills) — and the prices come fro
 so this runs on a machine that has never seen SSO. Nothing about the recipe is estimated: it is
 CCP's own material list for the blueprint that makes
 the type, with that blueprint's own material efficiency applied to the quantities.
+
+`--sell-at HUB --seller CHAR` adds what selling the output would earn: a list price one tick under the
+real floor of that hub station's sell book (a thin, clearly cheaper sliver is ignored, and the seller's
+own orders are left out when their order book is readable - the rule in `eve_skills/pricing.py`), the net
+per unit after that character's sales tax and the station's broker fee, the margin against the build's
+cost per unit, per job and per job-hour, and how many days of the region's 30-day volume the job's
+output is. Several products print one table ranked by ISK per job-hour, which is how lines compete for
+manufacturing slots. The job-hours are the blueprint's base time at `--te`; skills and facilities make
+real jobs shorter, so pass `--hours-per-run` with the measured figure from `jobs --times` when ranking
+matters. It is a marginal figure: a copy's invention cost is sunk and not in it. JSON adds a `sale`
+object per product; `--csv` stays material rows only and is refused with `--sell-at`.
 
 `--brief` retains the material table, totals, buy-versus-build verdict, and any warning that makes
 the number incomplete or stale. It omits explanatory footnotes, request counts, and the scope
@@ -1841,7 +1906,13 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
   without `--system`, a system with no published index — that spend no order-book request at all;
 - `tests/test_orders.py` — order normalisation from malformed and partial ESI rows (escrow optional,
   derived closed state), character + corporation fetching with its role diagnosis, and the `orders`
-  command's table, totals and footnotes;
+  command's table, totals and footnotes, and `--check` against station books;
+- `tests/test_job_times.py` — window parsing, next-local-time starts, longest fit per window, caps and
+  the winter-time shift, and medians over timed jobs only;
+- `tests/test_restock.py` — per-job ME rounding, invention datacores and decryptors, stock netted on site
+  / pick up / move through a corporation office, unpriced materials, and the cargo cut;
+- `tests/test_pricing.py` — price ticks across powers of ten, the thin-sliver rule on the worked Jita
+  examples, and undercut / outbid / sliver standings;
 - `tests/test_planner_catalog.py` — prerequisite closure, ordering, coverage and rank pricing
   against synthetic catalogs, plus one check of the bundled SDE snapshot itself;
 - `tests/test_watch_events.py` — the watch transition model for both halves (training and orders:
@@ -2016,7 +2087,7 @@ eve_skills/
                      seller identity, station ownership and what a named character nets
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
   cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
-  cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals
+  cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals, --check
   cmd_ledger.py      the ledger command: sync, pnl, products, invention, inventory, note and progress
   ledger_db.py       the ledger's SQLite store: schema, migrations, idempotent writes of raw ESI rows
   ledger_sync.py     ESI -> ledger: corporation and member documents, opening prices, watch hook
@@ -2029,6 +2100,9 @@ eve_skills/
                      history, and CCP's sales tax / broker fee rates
   industry.py        blueprint recipes, ME/TE and job-time maths, EIV + install fee, one-level build-or-buy
   orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
+  pricing.py         price ticks, the real floor of a sell book (thin-sliver rule), an order's standing
+  job_times.py       measured hours per run from job history, local-time finish windows and run fitting
+  cmd_restock.py     the restock command: recipe and invention demand, stock netted by place, cargo fit
   classify.py        alpha-cap lookup, per-skill classification, clone-state inference
   alphadata.py       packaged/user SDE data loading, transformations, update-data downloader
   planner.py         rank-based SP costs, prerequisite expansion, rate calibration, extractor math

@@ -23,7 +23,8 @@ from eve_skills import cli, divisions, sso
 from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
     INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
-    SKILL_UNSTARTED, SKILL_WIDE, FakeEsiEnv, industry_jobs, iso,
+    SKILL_UNSTARTED, SKILL_WIDE, BUILD_CELL, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE,
+    STATION_JITA, FakeEsiEnv, industry_jobs, iso,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +202,30 @@ class JobsCommandTests(CommandTestCase):
         self.assertEqual(code, 0)
         self.assertIn("no jobs consent", err)   # Vela's hint stays off stdout in CSV mode
         return list(csv.DictReader(out.splitlines()))
+
+    def test_times_report_measured_hours_per_run_and_skip_paused_jobs(self):
+        self.env.install_jobs()
+        code, out, err = self.env.run(["jobs", "--char", "Ada", "--times", "--finish-window", "00-24",
+                                       "--max-hours", "1", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        doc = json.loads(out)
+        times = {(r["activity"], r["product"]): r for r in doc["documents"][0]["times"]}
+        # 10 runs over 2.5 h; the invention's 10 attempts over one hour (a delivered job counts).
+        self.assertAlmostEqual(0.25, times[("manufacturing", "Tritanium")]["hours_per_run"])
+        self.assertEqual(1, times[("invention", next(p for a, p in times if a == "invention"))]["jobs"])
+        # The paused job's stale end date is not a run time.
+        self.assertNotIn(("manufacturing", "Mexallon"), times)
+        # 00-24 accepts every end, so each fit is the most runs within --max-hours.
+        self.assertEqual(4, times[("manufacturing", "Tritanium")]["fits"][0]["runs"])
+        code, text, _ = self.env.run(["jobs", "--char", "Ada", "--times"])
+        self.assertEqual(code, 0)
+        self.assertIn("h/run", text)
+
+    def test_window_flags_need_times(self):
+        self.env.install_jobs()
+        code, _, err = self.env.run(["jobs", "--finish-window", "08-10"])
+        self.assertNotEqual(0, code)
+        self.assertIn("--times", err)
 
     def test_running_jobs_are_named_counted_and_timed(self):
         self.env.install_jobs()
@@ -568,6 +593,30 @@ class IndustryStatusTests(CommandTestCase):
                             row["quantity"] == 0 and row["division"] == "T2-Prod"
                             for row in owner["materials"]))
 
+
+    def test_stock_inside_a_corporation_office_is_counted_and_named_by_station(self):
+        # Live ESI nests corp hangars in the office item: location_type "item", location_id = office.
+        office = 1055720303518
+        bps = [{"item_id": 930101 + i, "type_id": 930001, "location_id": office,
+                "location_flag": "CorpSAG4", "quantity": -2, "runs": 10,
+                "material_efficiency": 7, "time_efficiency": 14} for i in range(2)]
+        self.env.server.get(f"/corporations/{CORP_SHARED}/blueprints", token=ADA.token, doc=bps)
+        stock = {BUILD_PLATE: 76, BUILD_HOUSING: 500, BUILD_CELL: 100, BUILD_PASTE: 100}
+        rows = [{"item_id": office, "type_id": 27, "quantity": 1, "location_id": STATION_JITA,
+                 "location_flag": "OfficeFolder", "location_type": "station", "is_singleton": True}]
+        rows += [{"item_id": 941000 + i, "type_id": type_id, "quantity": qty, "location_id": office,
+                  "location_flag": "CorpSAG4", "location_type": "item", "is_singleton": False}
+                 for i, (type_id, qty) in enumerate(stock.items())]
+        self.env.server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=rows)
+        code, out, err = self.env.run(["industry", "status", "--corp", "--char", "Ada", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        owner = json.loads(out)["owners"][0]
+        plate = next(r for r in owner["materials"] if r["type_id"] == BUILD_PLATE)
+        self.assertEqual((76, "T2-Prod"), (plate["quantity"], plate["division"]))
+        self.assertNotIn(f"location {office}", plate["location"])
+        bp = next(r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001)
+        self.assertEqual(2, bp["can_build_jobs"])
+        self.assertEqual(plate["location"], bp["location"])
 
     def test_personal_status_uses_personal_documents_without_corp_reads(self):
         code, out, err = self.env.run(["industry", "status", "--char", "Ada", "--json"])

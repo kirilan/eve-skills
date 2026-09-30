@@ -20,7 +20,7 @@ import unittest
 from unittest import mock
 from tests.fake_esi import (
     BUILD_ADDON, BUILD_ALLOY, BUILD_ARTICLE, BUILD_CELL, BUILD_CRYO, BUILD_GOO, BUILD_HOUSING,
-    BUILD_PASTE, BUILD_PLATE, MARKET_FORGE, FakeEsiEnv,
+    BUILD_PASTE, BUILD_PLATE, MARKET_FORGE, ADA, STATION_JITA, FakeEsiEnv,
 )
 
 # The types a one-level quote for the article needs: the product itself, its four materials, and the
@@ -382,3 +382,43 @@ class ComponentMeTests(BuildCostTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SellAtTests(BuildCostTestCase):
+    """`--sell-at`: what the built output would net at a hub, ranked per job-hour."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.install_core()
+        self.env.server.get(f"/characters/{ADA.character_id}/standings", token=ADA.token, doc=[])
+        self.env.server.get(f"/characters/{ADA.character_id}/orders", token=ADA.token, doc=[])
+        self.env.server.get(f"/universe/stations/{STATION_JITA}",
+                            doc={"station_id": STATION_JITA, "system_id": 30000142, "owner": 1234})
+
+    def test_listing_net_and_margin_per_job_hour(self):
+        doc = self.json_doc([str(BUILD_ARTICLE), "--sell-at", "jita", "--seller", ADA.name,
+                             "--hours-per-run", "2"])
+        product = doc["products"][0]
+        sale = product["sale"]
+        # The only ask is 250.00, so one tick under it; net after Ada's tax and broker fee.
+        self.assertEqual(249.9, sale["list_price"])
+        fees = sale["sales_tax_pct"] + sale["broker_fee_pct"]
+        self.assertAlmostEqual(round(249.9 * (1 - fees / 100), 2), sale["net_per_unit"])
+        self.assertAlmostEqual(sale["net_per_unit"] - product["cost_per_unit"], sale["margin_per_unit"])
+        self.assertEqual(("measured", 2.0), (sale["hours_basis"], sale["job_hours"]))
+        self.assertAlmostEqual(sale["margin_per_job"] / 2.0, sale["margin_per_job_hour"])
+
+    def test_text_ranks_products_and_names_the_fee_basis(self):
+        code, out, err = self.env.run(["build-cost", str(BUILD_ARTICLE), "--sell-at", "jita",
+                                       "--seller", ADA.name, "--brief"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("sell at Jita 4-4", out)
+        self.assertIn("ISK/job-h", out)
+        self.assertIn("base time", out)
+
+    def test_sell_at_needs_a_seller_and_the_other_way_round(self):
+        for argv in (["--sell-at", "jita"], ["--seller", ADA.name], ["--hours-per-run", "2"],
+                     ["--sell-at", "nowhere", "--seller", ADA.name]):
+            with self.subTest(argv=argv):
+                code, _, err = self.env.run(["build-cost", str(BUILD_ARTICLE), *argv])
+                self.assertNotEqual(0, code)

@@ -8,7 +8,7 @@ import json
 import sys
 
 
-from . import esi as esi_mod, exports, market, orders, render
+from . import esi as esi_mod, exports, market, orders, pricing, render
 
 
 ORDERS_OPEN_COLUMNS = ["owner", "type", "side", "price", "remaining/total", "filled", "station",
@@ -138,6 +138,49 @@ def order_owners(client: esi_mod.Esi, args, chars) -> tuple[list, list[str]]:
     return owners, failures
 
 
+CHECK_COLUMNS = ["owner", "type", "side", "price", "left", "status", "best other", "ahead", "days",
+                 "suggest", "station"]
+CHECK_HISTORY_DAYS = 30
+
+
+def check_orders(client: esi_mod.Esi, shown, own_ids) -> dict[int, dict]:
+    """Each open order's standing in its station's book, keyed by order id.
+
+    One regional book and one 30-day history per (region, type), however many of our orders share
+    them. Our own orders - every open order of every owner read - are left out of the competition,
+    so an order never counts as undercut by its sibling."""
+    books: dict[tuple[int, int], tuple[list, esi_mod.Meta]] = {}
+    volumes: dict[tuple[int, int], float | None] = {}
+    out = {}
+    for order in shown:
+        key = (order.region_id, order.type_id)
+        if key not in books:
+            books[key] = client.get_meta(market.book_path(*key))
+            stats = market.history_stats(client, order.region_id, order.type_id, CHECK_HISTORY_DAYS)
+            volumes[key] = stats.volume_per_day if stats else None
+        rows, meta = books[key]
+        here = [(order.region_id, row) for row in rows
+                if market._id(row.get("location_id")) == order.location_id]
+        side = market._order_depth(here, len(here) or 1)["buy" if order.is_buy else "sell"]
+        doc = pricing.standing(order.is_buy, order.price, order.volume_remain, side, own_ids,
+                               volumes[key])
+        doc["volume_per_day"] = volumes[key]
+        doc["book_as_of"] = market.iso_utc(meta.last_modified)
+        out[order.order_id] = doc
+    return out
+
+
+def check_row(order, check: dict, names: dict[int, str]) -> list[str]:
+    side = "buy" if order.is_buy else "sell"
+    days = check.get("days_ahead")
+    return [order.owner_name, exports.name_or_id(names, order.type_id), side, render.isk(order.price),
+            f"{order.volume_remain:,}/{order.volume_total:,}", check["status"],
+            render.isk(check["best_other"]) if check["best_other"] is not None else "-",
+            f"{check['units_ahead']:,}", "-" if days is None else f"{days:.1f}",
+            render.isk(check["suggest"]) if check["suggest"] is not None else "-",
+            exports.name_or_id(names, order.location_id)]
+
+
 def orders_side_filter(args) -> bool | None:
     """True for buys only, False for sells only, None for the whole book (both flags = no filter)."""
     if args.buy and not args.sell:
@@ -149,11 +192,18 @@ def orders_side_filter(args) -> bool | None:
 
 def cmd_orders(args):
     """The order book of every stored character that consented - or of their corporations."""
+    if args.watch and getattr(args, "check", False):
+        raise RuntimeError("--check is a one-shot comparison; it cannot be used with --watch")
     if args.watch:
         from . import cmd_watch   # local: cmd_watch imports this module at import time
         return cmd_watch.cmd_orders_watch(args)
     if args.limit is not None and args.limit < 1:
         raise RuntimeError("--limit needs a positive number of rows")
+    check = getattr(args, "check", False)
+    if check and args.closed:
+        raise RuntimeError("--check compares open orders with the live book; it cannot be used with --closed")
+    if check and args.csv:
+        raise RuntimeError("--check has a table and --json; --csv is not supported with it")
     feature = orders.CORPORATION_FEATURE if args.corp else orders.CHARACTER_FEATURE
     scope = orders.CORPORATION_SCOPE if args.corp else orders.CHARACTER_SCOPE
     client, chars, hints = exports.targets(args, [(feature, scope)])
@@ -168,6 +218,8 @@ def cmd_orders(args):
     # orders looks for. Its UTC stamps sort correctly as written.
     book.sort(key=lambda o: o.issued, reverse=True)
     shown = book[:args.limit] if args.limit else book
+    checks = (check_orders(client, shown, {o.order_id for owner in owners for o in owner.open})
+              if check else {})
     ids = {i for o in shown for i in (o.type_id, o.region_id, o.location_id, o.issued_by) if i}
     names = esi_mod.resolve_names(client, ids) if ids else {}
     # --csv sends the hint lines to stderr inside targets(); --json needs the same treatment here
@@ -185,7 +237,8 @@ def cmd_orders(args):
                         "history_ok": o.history_ok} for o in owners],
             "matched": len(book),
             "shown": len(shown),
-            "orders": [order_doc(o, names) for o in shown],
+            "orders": [dict(order_doc(o, names), **({"check": checks[o.order_id]} if check else {}))
+                       for o in shown],
             # A closed book has nothing still at stake; the derived states are the answer there.
             "totals": None if args.closed else orders_totals(book),
         }, indent=2))
@@ -203,6 +256,29 @@ def cmd_orders(args):
         sys.stdout.write(buf.getvalue())
         return
     blocks = list(hints)
+    if check:
+        if not shown:
+            blocks.append("(no open orders)")
+        else:
+            order_key = {"undercut": 0, "outbid": 0, "behind sliver": 1}
+            rows = sorted(shown, key=lambda o: (order_key.get(checks[o.order_id]["status"], 2),
+                                                exports.name_or_id(names, o.location_id),
+                                                exports.name_or_id(names, o.type_id)))
+            lines = [render.table(CHECK_COLUMNS, [check_row(o, checks[o.order_id], names) for o in rows])]
+            behind = sum(1 for c in checks.values() if c["status"] in ("undercut", "outbid"))
+            stamps = sorted(c["book_as_of"] for c in checks.values() if c["book_as_of"])
+            lines += ["", f"{behind} of {len(checks)} order(s) behind a competitor; ahead = competing units "
+                          "priced better than ours, days = those units / the region's "
+                          f"{CHECK_HISTORY_DAYS}-day daily volume.",
+                      "* suggest: one tick past the best competitor; a sell order ignores a thin, clearly "
+                      "cheaper sliver (behind sliver = leave it). Only the issuing character can reprice, "
+                      "from the order's region.",
+                      f"* books as of {stamps[0][11:16]}-{stamps[-1][11:16]} UTC; character orders are "
+                      "cached up to 20 minutes, so a reprice made just now may not show yet."
+                      if stamps else "* no book timestamps"]
+            blocks.append("\n".join(lines))
+        print("\n\n".join(blocks))
+        return
     columns = (ORDERS_CLOSED_COLUMNS if args.closed
                else ORDERS_OPEN_COLUMNS + (ORDERS_CORP_COLUMNS if args.corp else []))
     now = client.now()

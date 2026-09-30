@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -189,6 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="collapse identical jobs by installer, status, activity, product and runs")
     p_jobs.add_argument("--slots", action="store_true",
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
+    p_jobs.add_argument("--times", action="store_true",
+                        help="median measured hours per run by activity, product and installer "
+                             "(reads finished jobs too)")
+    p_jobs.add_argument("--days", type=int, default=14, metavar="N",
+                        help="with --times: only jobs started in the last N days (default 14)")
+    p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
+                        help="with --times: run counts that end inside these local-time windows, "
+                             "e.g. 08-10,20-22")
+    p_jobs.add_argument("--tz", metavar="ZONE",
+                        help="time zone for --finish-window and --start, e.g. Europe/Sofia (default UTC)")
+    p_jobs.add_argument("--start", metavar="HH:MM|ISO",
+                        help="with --finish-window: planned install time (default now)")
+    p_jobs.add_argument("--max-hours", type=float, default=60, metavar="H",
+                        help="with --finish-window: longest job to propose (default 60)")
     p_jobs.add_argument("--json", action="store_true", help="machine-readable output with cache timestamps")
     p_jobs.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the tables")
     p_industry = sub.add_parser("industry", help="compact industry operations snapshot")
@@ -387,6 +401,16 @@ def build_parser() -> argparse.ArgumentParser:
                               metavar="F",
                               help="aggregate material bonus as a fraction of the blueprint's requirements "
                                    "(default 1.0 = none; 0.95 is a 5%% reduction, so quantities and cost fall)")
+    p_build_cost.add_argument("--sell-at", dest="sell_at", metavar="HUB",
+                              help=f"also price selling the output at this hub's station "
+                                   f"({', '.join(market.HUBS)}): list price, net after --seller's fees, "
+                                   f"margin per unit, per job and per job-hour, days of regional volume")
+    p_build_cost.add_argument("--seller", metavar="CHAR",
+                              help="with --sell-at: stored character whose sales tax and broker fee apply "
+                                   "and whose own orders are left out of the book")
+    p_build_cost.add_argument("--hours-per-run", dest="hours_per_run", type=float, metavar="H",
+                              help="with --sell-at: measured hours per run (see jobs --times) for ISK per "
+                                   "job-hour, instead of the blueprint's base time")
     p_build_cost.add_argument("--brief", action="store_true",
                               help="compact text: material table, totals, verdict, essential warnings "
                                    "and one scope line; omit explanatory footnotes and request counts")
@@ -394,6 +418,31 @@ def build_parser() -> argparse.ArgumentParser:
                               help="machine-readable output, including the build option that lost")
     p_build_cost.add_argument("--csv", action="store_true",
                               help="CSV material rows on stdout; the notes go to stderr")
+
+    p_restock = sub.add_parser("restock",
+                               help="what planned builds and inventions still need after corp stock, what "
+                                    "to pick up or buy at a hub, fitted to a cargo hold (needs login "
+                                    "--scopes assets and the Director role for corp hangars)")
+    p_restock.add_argument("line", nargs="*", metavar="PRODUCT=UNITS[:ME]",
+                           help="a build line: product units to make, optional blueprint ME (default 0)")
+    p_restock.add_argument("--invent", action="append", metavar="T2PRODUCT=ATTEMPTS[:DECRYPTOR]",
+                           help="invention attempts for this T2 product: datacores from the SDE recipe, "
+                                "plus one decryptor per attempt when named (e.g. Augmentation); repeatable")
+    p_restock.add_argument("--extra", action="append", metavar="TYPE=QTY",
+                           help="buy this quantity in full, on top of stock (a buffer); repeatable")
+    p_restock.add_argument("--at", required=True, metavar="STATION",
+                           help="build station (exact name or id): the corporation's hangars there are "
+                                "the stock already on site")
+    p_restock.add_argument("--hub", default="jita", metavar="HUB",
+                           help=f"where to buy and pick up (default jita): {', '.join(market.HUBS)}")
+    p_restock.add_argument("--char", help="stored character that reads the corporation's assets")
+    p_restock.add_argument("--hauler", metavar="CHAR",
+                           help="stored character whose personal hangars also count: at the hub as "
+                                "pick-ups, in the build station's system as moves")
+    p_restock.add_argument("--cargo", type=float, metavar="M3",
+                           help="hold size: inventions and extras first, then lines in the order given, "
+                                "the last one cut to what fits")
+    p_restock.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_colonies = sub.add_parser("colonies", help="live planetary colonies of stored characters (read-only ESI; needs login --scopes planets)")
     p_colonies.add_argument("--char", help="stored character name or id (default: every stored character)")
@@ -497,6 +546,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="newest N rows only; the ISK totals still cover every matching order")
     p_orders.add_argument("--json", action="store_true", help="machine-readable output")
     p_orders.add_argument("--csv", action="store_true", help="CSV rows on stdout instead of the table")
+    p_orders.add_argument("--check", action="store_true",
+                          help="compare each open order with its station's live book: undercut/outbid, "
+                               "competing units ahead in days of volume, and a suggested price "
+                               "(one regional book + 30-day history per type)")
     p_orders.add_argument("--watch", type=int, nargs="?", const=5, metavar="MIN",
                           help="keep refreshing every MIN minutes (default 5), announcing filled/expired/cancelled orders; Ctrl-C stops")
     p_orders.add_argument("--notify", action="store_true",
@@ -602,7 +655,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:
