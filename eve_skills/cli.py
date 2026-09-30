@@ -524,8 +524,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                      "sold, net price and profit")
     p_lprod.add_argument("--since", metavar="YYYY-MM-DD", help="first day included")
     p_lprod.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded")
-    p_lprod.add_argument("--scope", choices=["all", "invention", "other"], default="all",
-                         help="invention lines (built from blueprints the business invented), other, or all")
+    p_lprod.add_argument("--scope", choices=["all", "invention", "other", "disposal"], default="all",
+                         help="invention lines (built from blueprints the business invented), other jobs, "
+                              "disposal (pre-existing stock sold as-is, no job of ours ever made it), or all")
     p_lprod.add_argument("--limit", type=int, metavar="N", help="only the N most profitable rows")
     p_lprod.add_argument("--json", action="store_true", help="machine-readable output")
     p_linv = ledger_sub.add_parser("invention", help="per invented blueprint: decryptor, attempts, success "

@@ -279,6 +279,12 @@ class FeeTests(unittest.TestCase):
                                      journal(1, "contract_brokers_fee", -9.0, wallet=f"char:{CHAR}")]))
         self.assertEqual([("office rent", -25.0)], [(e.label, e.amount) for e in lines(book, "overhead")])
 
+    def test_gm_cash_transfer_is_overhead_and_offsets_a_reimbursed_fee(self):
+        book = replay(facts(entries=[journal(1, "brokers_fee", -99.0),
+                                     journal(2, "gm_cash_transfer", 99.0)]))
+        overhead = {(e.label, e.amount) for e in book.entries if e.scope == ledger.SCOPE_OVERHEAD}
+        self.assertEqual({("broker fee, order not matched", -99.0), ("GM reimbursement", 99.0)}, overhead)
+
 
 class PnlTests(unittest.TestCase):
     def book(self) -> ledger.Book:
@@ -292,15 +298,19 @@ class PnlTests(unittest.TestCase):
             entries=[journal(1, "office_rental_fee", -100.0)],
             blueprints=[copy(1, T2_BP, 2, 4, seen=stamp(4))], opening={CORE: 1.0, MINERAL: 3.0}))
 
-    def test_invention_lines_are_reported_apart_from_other_trade_and_overhead(self):
+    def test_invention_lines_are_reported_apart_from_disposal_and_overhead(self):
+        # MINERAL is sold straight from opening stock: no job of ours ever made it, so it is disposal
+        # (pre-existing stock cashed out as-is) - reported apart, and left out of the total and net profit.
         (row,) = ledger.pnl(self.book())
         self.assertAlmostEqual(2000.0, row[ledger.SCOPE_INVENTION]["revenue"])
-        self.assertAlmostEqual(50.0, row[ledger.SCOPE_OTHER]["revenue"])
-        self.assertAlmostEqual(-30.0, row[ledger.SCOPE_OTHER]["cogs_opening_stock"])
+        self.assertAlmostEqual(50.0, row[ledger.SCOPE_DISPOSAL]["revenue"])
+        self.assertAlmostEqual(-30.0, row[ledger.SCOPE_DISPOSAL]["cogs_opening_stock"])
+        self.assertAlmostEqual(-30.0, row[ledger.SCOPE_DISPOSAL]["cogs"])
         # 10 units from 49 parts at ME 2 (490), plus the invention's 2 cores and job fee (12)
         self.assertAlmostEqual(-502.0, row[ledger.SCOPE_INVENTION]["cogs"])
         self.assertEqual({"office rent": -100.0}, row["overhead"])
-        self.assertAlmostEqual(2050.0 - 502.0 - 30.0 - 100.0, row["net_profit"])
+        self.assertAlmostEqual(2000.0, row["total"]["revenue"])
+        self.assertAlmostEqual(2000.0 - 502.0 - 100.0, row["net_profit"])
 
     def test_a_period_filter_and_weekly_rows(self):
         self.assertEqual([], ledger.pnl(self.book(), since=stamp(9)[:10]))
@@ -485,9 +495,11 @@ class LedgerCommandTests(unittest.TestCase):
         code, out, err = self.env.run(["ledger", "pnl", "--json"])
         self.assertEqual(0, code, err)
         (row,) = json.loads(out)["periods"]
-        self.assertAlmostEqual(160.0, row["total"]["revenue"])           # 2 x 50 corp + 1 x 60 personal
+        # No job in this fixture ever built MINERAL, so its sale is disposal - out of the total.
+        self.assertAlmostEqual(0.0, row["total"]["revenue"])
+        self.assertAlmostEqual(160.0, row[ledger.SCOPE_DISPOSAL]["revenue"])   # 2 x 50 corp + 1 x 60 personal
         self.assertAlmostEqual(60.0, row["revenue_personal_wallets"])
-        self.assertAlmostEqual(-96.0, row["total"]["cogs"])              # 3 old units at the 32 median
+        self.assertAlmostEqual(-96.0, row[ledger.SCOPE_DISPOSAL]["cogs"])      # 3 old units at the 32 median
         self.assertEqual({"office rent": -1000.0}, row["overhead"])
         code, out, _err = self.env.run(["ledger", "pnl"])
         self.assertIn("net profit", out)
@@ -521,7 +533,8 @@ class LedgerCommandTests(unittest.TestCase):
         self.assertEqual(0, code, err)
         (snap,) = json.loads(out)["snapshots"]
         self.assertEqual("2026-09-01", snap["pnl_since"])
-        self.assertAlmostEqual(160.0, snap["total_revenue"])
+        # No job in this fixture ever built MINERAL, so its sale is disposal - out of total_revenue.
+        self.assertAlmostEqual(0.0, snap["total_revenue"])
         self.assertEqual({}, snap["jobs_running"])
         code, out, _err = self.env.run(["ledger", "progress"])
         self.assertIn("open to-dos (0)", out)

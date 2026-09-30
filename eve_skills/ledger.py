@@ -34,9 +34,12 @@ The model, stated once:
   business's characters or corporations moves stock between pockets and is skipped on both sides.
 
 Scopes: a product is on an *invention line* when it was manufactured from a blueprint the business
-invented. Its revenue and cost of goods are reported apart from everything else (recovered stock,
-surplus minerals, T1), and overhead (office rent, contract fees, research jobs, fees nothing could
-be matched to) is reported apart from both.
+invented; *other* when some job of ours (manufacturing or reaction, from a bought or recovered
+blueprint) made it, but not from an invented one; *disposal* when it was sold without any job of ours
+ever having made it - pre-existing stock (recovered loot, surplus minerals, old ships) cashed out
+as-is. Total profitability is invention plus other; disposal is reported apart and never counted
+toward it, since no operational work produced it. Overhead (office rent, contract fees, research
+jobs, fees nothing could be matched to, GM reimbursements) is reported apart from all three.
 """
 
 from __future__ import annotations
@@ -75,10 +78,12 @@ OVERHEAD_REF_TYPES = {
     "contract_brokers_fee": "contract fees",
     "contract_sales_tax": "contract fees",
     "contract_reward": "courier contracts",
+    "gm_cash_transfer": "GM reimbursement",
 }
 
 SCOPE_INVENTION = "invention"
 SCOPE_OTHER = "other"
+SCOPE_DISPOSAL = "disposal"
 SCOPE_OVERHEAD = "overhead"
 
 # How far a fee may stray from its issuer's measured rate and still be matched to a modified order.
@@ -179,6 +184,7 @@ class Book:
     pools: dict[tuple[str, int], Pool] = field(default_factory=dict)
     jobs: dict[int, JobCost] = field(default_factory=dict)
     invention_products: set[int] = field(default_factory=set)
+    produced_products: set[int] = field(default_factory=set)
     decryptors: dict[int, int | None] = field(default_factory=dict)   # T2 blueprint -> decryptor
     opening_draws: dict[int, dict] = field(default_factory=dict)      # type -> qty, value, unpriced
     notes: Counter = field(default_factory=Counter)
@@ -346,6 +352,9 @@ class _Replay:
         book.invention_products = {j["product_type_id"] for j in jobs
                                    if j["activity_id"] == MANUFACTURING and j["blueprint_type_id"] in invented
                                    and j["product_type_id"] is not None}
+        book.produced_products = {j["product_type_id"] for j in jobs
+                                  if j["activity_id"] in (MANUFACTURING, *REACTIONS)
+                                  and j["product_type_id"] is not None and j["status"] not in JOB_LOST}
 
         fees_by_job: dict[int, float] = defaultdict(float)
         job_ids = {j["job_id"] for j in jobs}
@@ -431,7 +440,11 @@ class _Replay:
         return book
 
     def _scope(self, type_id: int | None) -> str:
-        return SCOPE_INVENTION if type_id in self.book.invention_products else SCOPE_OTHER
+        if type_id in self.book.invention_products:
+            return SCOPE_INVENTION
+        if type_id in self.book.produced_products:
+            return SCOPE_OTHER
+        return SCOPE_DISPOSAL
 
     def _on_trade(self, date, t, *_):
         pool = self.book.pool("item", t["type_id"])
@@ -610,7 +623,9 @@ _ENTRY_LINE = {"revenue": "revenue", "sales_tax": "sales_tax", "broker_fee": "br
 
 def pnl(book: Book, since: str | None = None, until: str | None = None, by: str = "total") -> list[dict]:
     """Profit and loss per period: each line split into invention lines, other trade and their total,
-    then overhead (which belongs to the business, not to either scope) and net profit."""
+    then overhead (which belongs to the business, not to any scope) and net profit. Disposal (stock
+    sold that no job of ours ever produced) is reported alongside but excluded from the total and
+    from net profit - it is cashing out what was already there, not something the operation earned."""
     periods: dict[str, dict] = {}
     for e in book.entries:
         if not _in(e.date, since, until):
@@ -618,7 +633,7 @@ def pnl(book: Book, since: str | None = None, until: str | None = None, by: str 
         key = period_key(e.date, by)
         row = periods.setdefault(key, {
             "period": key, "from": e.date, "to": e.date,
-            **{scope: dict.fromkeys(_PNL_LINES, 0.0) for scope in (SCOPE_INVENTION, SCOPE_OTHER)},
+            **{scope: dict.fromkeys(_PNL_LINES, 0.0) for scope in (SCOPE_INVENTION, SCOPE_OTHER, SCOPE_DISPOSAL)},
             "overhead": defaultdict(float), "revenue_personal_wallets": 0.0})
         row["from"], row["to"] = min(row["from"], e.date), max(row["to"], e.date)
         if e.scope == SCOPE_OVERHEAD:
@@ -633,9 +648,11 @@ def pnl(book: Book, since: str | None = None, until: str | None = None, by: str 
     out = []
     for key in sorted(periods):
         row = periods[key]
-        for scope in (SCOPE_INVENTION, SCOPE_OTHER):
+        for scope in (SCOPE_INVENTION, SCOPE_OTHER, SCOPE_DISPOSAL):
             lines = row[scope]
             lines["gross_profit"] = lines["revenue"] + lines["sales_tax"] + lines["broker_fees"] + lines["cogs"]
+        # Total profitability is invention plus other; disposal (pre-existing stock no job of ours
+        # ever made) is reported in its own scope above but never folded in here.
         row["total"] = {line: row[SCOPE_INVENTION][line] + row[SCOPE_OTHER][line]
                         for line in (*_PNL_LINES, "gross_profit")}
         row["overhead"] = dict(sorted(row["overhead"].items()))
@@ -650,8 +667,10 @@ def products(book: Book, since: str | None = None, until: str | None = None, sco
     rows: dict[int, dict] = {}
 
     def row(type_id: int) -> dict:
+        scope = (SCOPE_INVENTION if type_id in book.invention_products
+                else SCOPE_OTHER if type_id in book.produced_products else SCOPE_DISPOSAL)
         return rows.setdefault(type_id, {
-            "type_id": type_id, "scope": SCOPE_INVENTION if type_id in book.invention_products else SCOPE_OTHER,
+            "type_id": type_id, "scope": scope,
             "built": 0.0, "build_cost": 0.0, "materials": 0.0, "blueprint": 0.0, "fees": 0.0,
             "opening_stock": 0.0, "sold": 0.0, "revenue": 0.0, "sales_tax": 0.0, "broker_fees": 0.0,
             "cogs": 0.0})

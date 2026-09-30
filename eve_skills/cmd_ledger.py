@@ -196,13 +196,22 @@ def cmd_pnl(args) -> int:
             lines.append(render.table(["", "invention lines", "other", "total"], table))
             if row["revenue_personal_wallets"]:
                 lines.append(f"revenue booked through personal wallets: {_compact(row['revenue_personal_wallets'])}")
+            disposal = row[ledger.SCOPE_DISPOSAL]
+            if disposal["revenue"] or disposal["cogs"]:
+                lines.append("")
+                lines.append("asset disposal (pre-existing stock no job of ours ever produced - old ships, "
+                             "recovered loot sold as-is; excluded from the total and net profit above):")
+                dtable = [[label, _compact(disposal[key])] for label, key in _STATEMENT]
+                lines.append(render.table(["", "disposal"], dtable))
         else:
             table = [[r["period"], _compact(r[ledger.SCOPE_INVENTION]["revenue"]),
                       _compact(r[ledger.SCOPE_INVENTION]["gross_profit"]), _compact(r["total"]["revenue"]),
-                      _compact(r["total"]["gross_profit"]), _compact(r["overhead_total"]), _compact(r["net_profit"])]
+                      _compact(r["total"]["gross_profit"]), _compact(r["overhead_total"]),
+                      _compact(r["net_profit"]), _compact(r[ledger.SCOPE_DISPOSAL]["gross_profit"])]
                      for r in rows]
             lines.append(render.table(["period", "invention revenue", "invention gross", "total revenue",
-                                       "total gross", "overhead", "net profit"], table))
+                                       "total gross", "overhead", "net profit", "disposal gross (excluded)"],
+                                      table))
         _print_notes(lines, header)
         print("\n".join(lines))
         return 0
@@ -225,7 +234,9 @@ def cmd_products(args) -> int:
             print(json.dumps({**header, "since": args.since, "until": args.until, "products": rows}, indent=2))
             return 0
         lines = _print_header("ledger products", header)
-        table = [[_name(names, r["type_id"]), "invention" if r["scope"] == ledger.SCOPE_INVENTION else "other",
+        table = [[_name(names, r["type_id"]),
+                  "invention" if r["scope"] == ledger.SCOPE_INVENTION
+                  else "disposal" if r["scope"] == ledger.SCOPE_DISPOSAL else "other",
                   f"{r['built']:,.0f}", _compact(r["unit_cost"]), f"{r['sold']:,.0f}", _compact(r["net_per_unit"]),
                   _compact(r["revenue"]), _compact(r["profit"]),
                   "-" if r["margin_pct"] is None else f"{r['margin_pct']:.0f}%"]

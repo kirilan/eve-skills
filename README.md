@@ -752,8 +752,12 @@ of history. The rules:
 - Trades between the business's own wallets are skipped on both sides.
 
 Reports split **invention lines** (products built from blueprints the business invented) from **other**
-trade (recovered stock, minerals, T1) and from **overhead** (office rent, contract fees, research jobs,
-cancelled jobs, fees that matched nothing). Each ends with an *assumptions* block counting every place
+(products some manufacturing or reaction job of ours made, from a bought or recovered blueprint), from
+**disposal** (stock sold that no job of ours ever made - recovered loot, surplus minerals, old ships -
+shown apart and left out of total revenue, gross and net profit, because cashing out what was already
+there is not something the operation earned; `ledger products --scope disposal` lists it) and from
+**overhead** (office rent, contract fees, research jobs, cancelled jobs, fees that matched nothing, and
+GM cash transfers such as a reimbursed fee). Each ends with an *assumptions* block counting every place
 a rule had to assume something — copies older than the ledger costed at 0, unknown ME or decryptor,
 fees taken from the job row — so a figure is never more certain than it looks. `inventory` is the one
 report that reads ESI live: today's corporation and member assets plus open sell orders, valued at
