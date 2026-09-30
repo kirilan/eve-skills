@@ -401,6 +401,16 @@ def build_parser() -> argparse.ArgumentParser:
                               metavar="F",
                               help="aggregate material bonus as a fraction of the blueprint's requirements "
                                    "(default 1.0 = none; 0.95 is a 5%% reduction, so quantities and cost fall)")
+    p_build_cost.add_argument("--sell-at", dest="sell_at", metavar="HUB",
+                              help=f"also price selling the output at this hub's station "
+                                   f"({', '.join(market.HUBS)}): list price, net after --seller's fees, "
+                                   f"margin per unit, per job and per job-hour, days of regional volume")
+    p_build_cost.add_argument("--seller", metavar="CHAR",
+                              help="with --sell-at: stored character whose sales tax and broker fee apply "
+                                   "and whose own orders are left out of the book")
+    p_build_cost.add_argument("--hours-per-run", dest="hours_per_run", type=float, metavar="H",
+                              help="with --sell-at: measured hours per run (see jobs --times) for ISK per "
+                                   "job-hour, instead of the blueprint's base time")
     p_build_cost.add_argument("--brief", action="store_true",
                               help="compact text: material table, totals, verdict, essential warnings "
                                    "and one scope line; omit explanatory footnotes and request counts")

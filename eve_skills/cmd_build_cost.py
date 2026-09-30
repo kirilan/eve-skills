@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 
 
-from . import alphadata, esi as esi_mod, exports, industry, market, render, sso
+from . import alphadata, esi as esi_mod, exports, industry, market, orders, pricing, render, sso
 
 
 BUILD_COST_COLUMNS = ["material", "qty", "buy/u", "build/u", "source", "cost", "surplus"]
@@ -178,6 +178,79 @@ class BuildRun:
     targets: tuple[BuildTarget, ...]
     rules: str | None
     warnings: tuple[str, ...]
+    # `--sell-at`: per product id, what listing the output at a hub would net against its cost.
+    sales: dict | None = None
+    sale_notes: tuple[str, ...] = ()
+
+
+SALE_HISTORY_DAYS = 30
+SALE_COLUMNS = ["product", "units", "cost/u", "list", "net/u", "margin/u", "per job", "ISK/job-h",
+                "vol/day", "days"]
+
+
+def _sale_figures(client: esi_mod.Esi, args, targets) -> tuple[dict, list[str]]:
+    """What each product would net when listed at `--sell-at` by `--seller`, against its build cost.
+
+    The listing price follows the bulk-pricing rule (`pricing.sell_price`): one tick under the real
+    floor of the hub's sell book, ignoring a thin, clearly cheaper sliver, with the seller's own orders
+    left out when their order book is readable. Net is after the seller's sales tax and the station's
+    broker fee. Per job-hour uses `--hours-per-run` when given (a measured figure, see `jobs --times`),
+    otherwise the blueprint's base time at this TE, which skills and facilities shorten."""
+    from . import cmd_market   # local: cmd_market is heavy and only this option needs it
+    scope = market.hub_scope(args.sell_at)
+    seller, hint = cmd_market.resolve_seller(client, args.seller)
+    notes = [hint] if hint else []
+    own: set[int] = set()
+    try:
+        record = sso.get_access_token(seller.character_id)
+        own = {o.order_id for o in orders.fetch_character(client, record).open}
+    except (esi_mod.EsiError, RuntimeError, KeyError):
+        notes.append(f"{seller.name}'s orders were not readable, so they count as competition in the book")
+    place = cmd_market.listing_places(client, seller, [scope.location_id]).get(scope.location_id)
+    fee = None if place is None else place.fee_pct
+    out = {}
+    for target in targets:
+        plan = target.plan
+        _quote, depth = market.quote(client, target.type_id, scope, depth=200)
+        sells = [row for row in depth["sell"] if row["order_id"] not in own]
+        stats = market.history_stats(client, scope.region_id, target.type_id, SALE_HISTORY_DAYS)
+        per_day = stats.volume_per_day if stats else None
+        listing, skipped = pricing.sell_price(sells, per_day or 0.0, plan.units)
+        net = (market.net_price(listing, fee + seller.sales_tax_pct)
+               if listing is not None and fee is not None else None)
+        margin = (net - plan.cost_per_unit) if net is not None and plan.cost_per_unit is not None else None
+        measured = args.hours_per_run is not None
+        hours = (args.hours_per_run * plan.runs) if measured else plan.time / 3600.0
+        out[target.type_id] = {
+            "hub": scope.label, "seller": seller.name, "list_price": listing,
+            "ignored_sliver": [{"price": r["price"], "volume": r["volume"]} for r in skipped],
+            "sales_tax_pct": seller.sales_tax_pct, "broker_fee_pct": fee, "net_per_unit": net,
+            "margin_per_unit": margin, "margin_per_job": None if margin is None else margin * plan.units,
+            "job_hours": hours, "hours_basis": "measured" if measured else "base",
+            "margin_per_job_hour": None if margin is None or not hours else margin * plan.units / hours,
+            "volume_per_day": per_day,
+            "days_of_volume": plan.units / per_day if per_day else None}
+    notes.append(f"sale: listed at {scope.label} one tick under the real floor (a thin, clearly cheaper "
+                 f"sliver is ignored), net of {seller.name}'s {seller.sales_tax_pct:.2f}% sales tax and "
+                 + ("an unknown broker fee" if fee is None else f"{fee:.2f}% broker fee")
+                 + "; ISK/job-h on " + ("--hours-per-run" if args.hours_per_run is not None
+                                        else "the blueprint's base time - skills and facilities make it "
+                                             "shorter; pass --hours-per-run from `jobs --times`"))
+    return out, notes
+
+
+def _sale_rows(run) -> list[list[str]]:
+    rows = []
+    ranked = sorted(run.targets, key=lambda t: -(run.sales[t.type_id]["margin_per_job_hour"] or float("-inf")))
+    for target in ranked:
+        sale, plan = run.sales[target.type_id], target.plan
+        days = sale["days_of_volume"]
+        rows.append([target.name, f"{plan.units:,}", render.isk(plan.cost_per_unit), render.isk(sale["list_price"]),
+                     render.isk(sale["net_per_unit"]), render.isk(sale["margin_per_unit"]),
+                     render.isk(sale["margin_per_job"]), render.isk(sale["margin_per_job_hour"]),
+                     "-" if sale["volume_per_day"] is None else f"{sale['volume_per_day']:,.0f}",
+                     "-" if days is None else f"{days:.1f}"])
+    return rows
 
 
 def _esi_age(meta: esi_mod.Meta, now: float) -> str:
@@ -410,6 +483,10 @@ def build_cost_text(run: BuildRun, brief: bool = False) -> str:
         else:
             lines += [f"  {line}" for line in product_notes]
         blocks.append("\n".join(lines))
+    if run.sales:
+        blocks.append("\n".join([f"sell at {next(iter(run.sales.values()))['hub']} (best ISK per job-hour first):",
+                                 render.table(SALE_COLUMNS, _sale_rows(run))] +
+                                [f"  {line}" for line in run.sale_notes]))
     if brief:
         if run.rules:
             blocks.append(f"warning: {run.rules}")
@@ -476,13 +553,14 @@ def build_cost_json(run: BuildRun) -> dict:
                        "max_buy": figures.max_buy.get(target.type_id)},
             "unpriced": _typed_docs(target.plan.unpriced, run.names),
             "eiv_missing": _typed_docs(target.plan.eiv_missing, run.names),
+            **({"sale": run.sales[target.type_id]} if run.sales else {}),
         } for target in run.targets],
         "figures": {"fetched": figures.fetched, "cached": figures.cached, "failed": figures.failed,
                     "last_modified": market.iso_utc(figures.meta.last_modified),
                     "expires": market.iso_utc(figures.meta.expires),
                     "age_seconds": None if figures.meta.last_modified is None
                     else round(run.now - figures.meta.last_modified, 1)},
-        "warnings": list(run.warnings),
+        "warnings": list(run.warnings) + list(run.sale_notes),
     }
 
 
@@ -521,6 +599,17 @@ def cmd_build_cost(args):
                            "directions; pick one and override the few you mean with --build/--buy")
     if args.brief and (args.json or args.csv):
         raise RuntimeError("--brief selects compact text output; do not combine it with --json or --csv")
+    if (args.seller or args.hours_per_run is not None) and not args.sell_at:
+        raise RuntimeError("--seller and --hours-per-run only apply with --sell-at HUB")
+    if args.sell_at:
+        if not args.seller:
+            raise RuntimeError("--sell-at needs --seller NAME: the net price depends on that character's "
+                               "sales tax and broker fee")
+        if args.csv:
+            raise RuntimeError("--sell-at has a text table and --json; --csv carries material rows only")
+        market.hub_scope(args.sell_at)   # an unknown hub fails before any book is read
+        if args.hours_per_run is not None and args.hours_per_run <= 0:
+            raise RuntimeError("--hours-per-run must be positive")
     facility_tax = _percent(args.facility_tax, "--facility-tax")
     # The caps `plan_build` enforces anyway, checked against its own constants before a single order
     # book is read: refusing ME 11 after twenty-six books have already cost their time is a bad
@@ -617,11 +706,13 @@ def cmd_build_cost(args):
         if target.plan.unpriced:
             warnings.append(f"{target.name}: {len(target.plan.unpriced)} material(s) with no price "
                             f"are excluded from every total rather than counted as free")
+    sales, sale_notes = _sale_figures(client, args, targets) if args.sell_at else (None, [])
     run = BuildRun(now=client.now().timestamp(), scope=scope, system_id=system_id,
                    facility_tax=facility_tax, scc_surcharge=industry.SCC_SURCHARGE,
                    material_multiplier=args.material_multiplier, indices_used=indices_used,
                    index_meta=indices.meta, figures=figures, reference=price_doc, names=names,
-                   targets=tuple(targets), rules=rules, warnings=tuple(warnings))
+                   targets=tuple(targets), rules=rules, warnings=tuple(warnings),
+                   sales=sales, sale_notes=tuple(sale_notes))
     if args.json:
         print(json.dumps(build_cost_json(run), indent=2))
     elif args.csv:

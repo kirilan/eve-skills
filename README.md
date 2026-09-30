@@ -1012,6 +1012,8 @@ eve-skills build-cost Hound --hub amarr           # shop at another trade hub's 
 eve-skills build-cost Hound --system Amarr        # bill the install in Amarr, still shop at Jita
 eve-skills build-cost Hound "Plasma Thruster"     # several products, off one set of order books
 eve-skills build-cost Hound --brief               # table, totals, verdict, essential warnings
+eve-skills build-cost "Small EM Shield Reinforcer II" "Medium Core Defense Field Extender II" --te 6 \
+  --system Kulelen --sell-at jita --seller Somecharacter --brief     # rank lines by ISK per job-hour
 ```
 
 No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
@@ -1020,6 +1022,17 @@ products, including each activity's required skills) — and the prices come fro
 so this runs on a machine that has never seen SSO. Nothing about the recipe is estimated: it is
 CCP's own material list for the blueprint that makes
 the type, with that blueprint's own material efficiency applied to the quantities.
+
+`--sell-at HUB --seller CHAR` adds what selling the output would earn: a list price one tick under the
+real floor of that hub station's sell book (a thin, clearly cheaper sliver is ignored, and the seller's
+own orders are left out when their order book is readable - the rule in `eve_skills/pricing.py`), the net
+per unit after that character's sales tax and the station's broker fee, the margin against the build's
+cost per unit, per job and per job-hour, and how many days of the region's 30-day volume the job's
+output is. Several products print one table ranked by ISK per job-hour, which is how lines compete for
+manufacturing slots. The job-hours are the blueprint's base time at `--te`; skills and facilities make
+real jobs shorter, so pass `--hours-per-run` with the measured figure from `jobs --times` when ranking
+matters. It is a marginal figure: a copy's invention cost is sunk and not in it. JSON adds a `sale`
+object per product; `--csv` stays material rows only and is refused with `--sell-at`.
 
 `--brief` retains the material table, totals, buy-versus-build verdict, and any warning that makes
 the number incomplete or stale. It omits explanatory footnotes, request counts, and the scope
