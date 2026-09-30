@@ -75,8 +75,9 @@ class SellPlanTests(unittest.TestCase):
         self.set_daytrading(3)
         code, output, _ = self.run_plan()
         self.assertEqual(code, 0)
-        self.assertTrue(next(row for row in json.loads(output)["routes"]
-                             if row["hub"] == "amarr")["can_reprice"])
+        # Amarr is within 10 jumps but in another region, so remote repricing is still impossible.
+        self.assertFalse(next(row for row in json.loads(output)["routes"]
+                              if row["hub"] == "amarr")["can_reprice"])
         self.assertEqual(next(row for row in json.loads(output)["items"][0]["hubs"]
                               if row["hub"] == "amarr")["allocated"], 15)
 

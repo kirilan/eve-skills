@@ -100,8 +100,10 @@ def _routes(client, origin: int, origin_region: int, hubs: list[str], level: int
             except esi_mod.EsiError:
                 jumps[flag] = None
         distance = jumps["shortest"]
+        # Remote order changes need the same region as the order, and within Marketing's jump range.
         reachable = (origin == hub.system_id if level < 2 else
-                     distance is not None and distance <= 5 * (2 ** (level - 2)) if level < 5 else
+                     origin_region == hub.region_id and distance is not None
+                     and distance <= 5 * (2 ** (level - 2)) if level < 5 else
                      origin_region == hub.region_id)
         routes.append({"hub": key, "station_id": hub.station_id, "system_id": hub.system_id,
                        "region_id": hub.region_id, "shortest_jumps": distance,
