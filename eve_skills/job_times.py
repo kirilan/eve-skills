@@ -8,6 +8,7 @@ it also says how many runs, installed at `--start`, end inside a window such as 
 
 from __future__ import annotations
 
+import re
 import statistics
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Iterable, Sequence
@@ -44,13 +45,44 @@ def parse_windows(spec: str) -> list[tuple[int, int]]:
     return windows
 
 
+_OFFSET = re.compile(r"^(?:UTC|GMT)?\s*([+-])(\d{1,2})(?::?(\d{2}))?$", re.IGNORECASE)
+
+
 def zone(name: str | None) -> tzinfo:
-    if not name or name.upper() == "UTC":
+    """UTC, a fixed offset (`+03:00`, `UTC+3`, `-0530`) or an IANA name (`Europe/Sofia`).
+
+    An IANA zone follows daylight saving; it needs a time zone database, which Linux and macOS ship
+    and Windows does not - there Python only finds one when the optional `tzdata` package is
+    installed, and this tool adds no dependencies. A fixed offset works everywhere but never
+    switches between summer and winter time."""
+    if not name or name.strip().upper() in ("UTC", "GMT", "Z"):
         return timezone.utc
+    match = _OFFSET.match(name.strip())
+    if match:
+        sign, hours, minutes = match.groups()
+        delta = timedelta(hours=int(hours), minutes=int(minutes or 0))
+        if delta > timedelta(hours=14):
+            raise RuntimeError(f"time zone offset '{name}' is outside -14:00..+14:00")
+        return timezone(-delta if sign == "-" else delta)
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        raise RuntimeError(f"unknown time zone '{name}' - use an IANA name such as Europe/Sofia")
+        if not zone_database_available():
+            raise RuntimeError(
+                f"no time zone database on this machine to look up '{name}' (Windows ships none) - "
+                f"install the optional tzdata package (pip install tzdata), or pass a fixed offset "
+                f"such as +03:00, which does not follow daylight saving") from None
+        raise RuntimeError(f"unknown time zone '{name}' - use an IANA name such as Europe/Sofia, "
+                           f"or a fixed offset such as +03:00") from None
+
+
+def zone_database_available() -> bool:
+    """Whether IANA names can be resolved here at all (system database or the tzdata package)."""
+    try:
+        ZoneInfo("Europe/London")
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
 
 
 def parse_start(spec: str | None, tz: tzinfo, now: datetime) -> datetime:

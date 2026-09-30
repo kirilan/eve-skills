@@ -473,8 +473,10 @@ copy). Cancelled, reverted and paused jobs are left out: their end dates are not
 `--finish-window 08-10,20-22` adds the run counts that, installed at `--start` (`HH:MM` in `--tz`, or
 an ISO time; default now), end inside a window: the most runs per window occurrence, longest first, up
 to `--max-hours` (default 60). The text shows the two longest; `--json` lists every fit. Cap the answer
-by the runs left on the blueprint yourself. `--tz` takes an IANA zone and follows its daylight saving
-(default UTC). `--times` has no `--group` or `--csv` form.
+by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `Europe/Sofia`, which
+follows daylight saving, or a fixed offset such as `+03:00` / `UTC+3`, which does not (default UTC).
+IANA names need a time zone database: Linux and macOS have one, Windows does not unless the optional
+`tzdata` package is installed (`pip install tzdata`) - without it, use the offset. `--times` has no `--group` or `--csv` form.
 
 Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
 `Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
