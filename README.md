@@ -728,6 +728,31 @@ so such an order reads `behind sliver` and gets no suggestion. The rule lives in
 `--json` adds a `check` object to each order; `--check` cannot be combined with `--closed`, `--csv` or
 `--watch`. Only the issuing character can reprice an order, and only from the order's region.
 
+### `restock` — what the next builds still need, and what to buy for them
+
+```bash
+eve-skills login --scopes assets              # once; corporation hangars also need the Director role
+eve-skills restock --at "Kulelen V - Moon 16 - Lai Dai Corporation Factory" --char Somedirector \
+  --hauler Somehauler --cargo 5000 \
+  "Medium Core Defense Field Extender II=90" "500MN Microwarpdrive II=37:7" \
+  --invent "Small Core Defense Field Extender II=140:Augmentation" --extra "Augmentation Decryptor=500"
+```
+
+Demand comes from the local SDE recipes: a build line `PRODUCT=UNITS[:ME]` is costed as the jobs it
+would really be installed as (the blueprint's maximum runs each, ME rounding per job); `--invent
+T2PRODUCT=ATTEMPTS[:DECRYPTOR]` adds the invention datacores per attempt and, when named, one decryptor
+per attempt; `--extra TYPE=QTY` is a buffer bought in full on top of stock. Materials are direct inputs
+only - a component you build yourself is its own line.
+
+Stock is netted in this order: the corporation's hangars at `--at` (on site, including items inside its
+office and containers); what the corporation and `--hauler` already own at the hub (`pick up`, no ISK);
+and the hauler's personal hangars elsewhere in the build station's solar system (`move` into the
+corporation hangar). The rest is bought at the hub's lowest sell (`--hub`, default jita). With `--cargo`
+the hold is filled in priority order - inventions and extras first, then build lines in the order given -
+and the last line that does not fit is cut to the units that do (stock on site covers the first units for
+free, so the cut is searched, not scaled). The text ends with a Multibuy block, the pick-ups, the moves
+and what the trip leaves out; `--json` has every line and material with its volume and ISK.
+
 ### `ledger` — what the business cost, earned and holds
 
 ```bash
@@ -1880,6 +1905,8 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
   command's table, totals and footnotes, and `--check` against station books;
 - `tests/test_job_times.py` — window parsing, next-local-time starts, longest fit per window, caps and
   the winter-time shift, and medians over timed jobs only;
+- `tests/test_restock.py` — per-job ME rounding, invention datacores and decryptors, stock netted on site
+  / pick up / move through a corporation office, unpriced materials, and the cargo cut;
 - `tests/test_pricing.py` — price ticks across powers of ten, the thin-sliver rule on the worked Jita
   examples, and undercut / outbid / sliver standings;
 - `tests/test_planner_catalog.py` — prerequisite closure, ordering, coverage and rank pricing
@@ -2071,6 +2098,7 @@ eve_skills/
   orders.py          character/corporation order fetching, normalisation, access (consent vs role) diagnosis
   pricing.py         price ticks, the real floor of a sell book (thin-sliver rule), an order's standing
   job_times.py       measured hours per run from job history, local-time finish windows and run fitting
+  cmd_restock.py     the restock command: recipe and invention demand, stock netted by place, cargo fit
   classify.py        alpha-cap lookup, per-skill classification, clone-state inference
   alphadata.py       packaged/user SDE data loading, transformations, update-data downloader
   planner.py         rank-based SP costs, prerequisite expansion, rate calibration, extractor math

@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -419,6 +419,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_cost.add_argument("--csv", action="store_true",
                               help="CSV material rows on stdout; the notes go to stderr")
 
+    p_restock = sub.add_parser("restock",
+                               help="what planned builds and inventions still need after corp stock, what "
+                                    "to pick up or buy at a hub, fitted to a cargo hold (needs login "
+                                    "--scopes assets and the Director role for corp hangars)")
+    p_restock.add_argument("line", nargs="*", metavar="PRODUCT=UNITS[:ME]",
+                           help="a build line: product units to make, optional blueprint ME (default 0)")
+    p_restock.add_argument("--invent", action="append", metavar="T2PRODUCT=ATTEMPTS[:DECRYPTOR]",
+                           help="invention attempts for this T2 product: datacores from the SDE recipe, "
+                                "plus one decryptor per attempt when named (e.g. Augmentation); repeatable")
+    p_restock.add_argument("--extra", action="append", metavar="TYPE=QTY",
+                           help="buy this quantity in full, on top of stock (a buffer); repeatable")
+    p_restock.add_argument("--at", required=True, metavar="STATION",
+                           help="build station (exact name or id): the corporation's hangars there are "
+                                "the stock already on site")
+    p_restock.add_argument("--hub", default="jita", metavar="HUB",
+                           help=f"where to buy and pick up (default jita): {', '.join(market.HUBS)}")
+    p_restock.add_argument("--char", help="stored character that reads the corporation's assets")
+    p_restock.add_argument("--hauler", metavar="CHAR",
+                           help="stored character whose personal hangars also count: at the hub as "
+                                "pick-ups, in the build station's system as moves")
+    p_restock.add_argument("--cargo", type=float, metavar="M3",
+                           help="hold size: inventions and extras first, then lines in the order given, "
+                                "the last one cut to what fits")
+    p_restock.add_argument("--json", action="store_true", help="machine-readable output")
+
     p_colonies = sub.add_parser("colonies", help="live planetary colonies of stored characters (read-only ESI; needs login --scopes planets)")
     p_colonies.add_argument("--char", help="stored character name or id (default: every stored character)")
     p_colonies.add_argument("--detail", action="store_true",
@@ -629,7 +654,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:
