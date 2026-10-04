@@ -359,7 +359,7 @@ class StoreTests(unittest.TestCase):
             ledger_db.connect(self.path, readonly=True)
         self.assertFalse(os.path.exists(self.path))
 
-    def test_a_version_1_ledger_gains_the_log_and_keeps_its_rows(self):
+    def test_a_version_1_ledger_gains_the_log_and_price_tables_and_keeps_its_rows(self):
         conn = sqlite3.connect(self.path)
         conn.executescript(ledger_db._SCHEMA_V1)
         conn.execute("PRAGMA user_version = 1")
@@ -372,6 +372,9 @@ class StoreTests(unittest.TestCase):
         with conn:
             ledger_db.add_note(conn, stamp(1), "update", "first")
         self.assertEqual(["first"], [n["title"] for n in ledger_db.notes(conn)])
+        with conn:
+            ledger_db.upsert_market_history(conn, 10000002, 34, [{"date": "2026-09-01", "average": 5.0}])
+        self.assertEqual(1, len(ledger_db.market_history(conn, 10000002, 34)))
 
     def test_only_a_to_do_can_be_closed(self):
         conn = self.connect()

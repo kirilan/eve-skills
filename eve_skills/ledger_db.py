@@ -30,7 +30,7 @@ from . import paths
 FILE_NAME = "ledger.sqlite3"
 
 # Bumped with every schema change; `_migrate` walks an older file forward one step at a time.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ESI serves this many days of wallet journal and transactions; a row older than that which no sync
 # stored is gone for good. Reports and `doctor` warn once the last sync is STALE_SYNC_DAYS old, which
@@ -200,6 +200,53 @@ CREATE TABLE snapshots (
 CREATE INDEX notes_ts ON notes (ts);
 """
 
+# Version 3: price tracking. ESI's daily regional history is served for about 13 months and then
+# forgotten like the wallet is, and a station's order book is only ever "now", so both are kept here:
+# `market_history` one row per region, type and day (re-read rows replace the stored ones, since ESI
+# fills the newest day in late), `book_snapshots` one reduced station book per poll, stamped with the
+# book's own `Last-Modified` so two polls inside one five-minute ESI window store one row. The
+# watchlist holds only what a person changed - added or excluded types; the automatic part is
+# derived from sales and jobs on every read (`price_watch.watchlist`).
+_SCHEMA_V3 = """
+CREATE TABLE market_history (
+    region_id   INTEGER NOT NULL,
+    type_id     INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    average     REAL,
+    highest     REAL,
+    lowest      REAL,
+    volume      INTEGER,
+    order_count INTEGER,
+    PRIMARY KEY (region_id, type_id, day)
+);
+
+CREATE TABLE book_snapshots (
+    location_id     INTEGER NOT NULL,
+    type_id         INTEGER NOT NULL,
+    ts              TEXT NOT NULL,
+    polled_at       TEXT NOT NULL,
+    best_sell       REAL,
+    best_buy        REAL,
+    sell_units      INTEGER NOT NULL,
+    sell_orders     INTEGER NOT NULL,
+    buy_units       INTEGER NOT NULL,
+    buy_orders      INTEGER NOT NULL,
+    sell_units_1pct INTEGER NOT NULL,
+    sell_units_5pct INTEGER NOT NULL,
+    our_sell_units  INTEGER NOT NULL,
+    our_best_sell   REAL,
+    PRIMARY KEY (location_id, type_id, ts)
+);
+
+CREATE TABLE watchlist (
+    type_id INTEGER PRIMARY KEY,
+    mode    TEXT NOT NULL CHECK (mode IN ('add', 'exclude')),
+    changed TEXT NOT NULL
+);
+
+CREATE INDEX book_snapshots_type ON book_snapshots (type_id, ts);
+"""
+
 # What a note can be. A to-do is the only kind with a status: open until `done` closes it.
 NOTE_KINDS = ("update", "decision", "todo", "incident", "analysis")
 
@@ -251,6 +298,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(_SCHEMA_V2)
             conn.execute("PRAGMA user_version = 2")
+    if version < 3:
+        with conn:
+            conn.executescript(_SCHEMA_V3)
+            conn.execute("PRAGMA user_version = 3")
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -490,3 +541,72 @@ def sources(conn: sqlite3.Connection) -> list[dict]:
                             "MAX(newest) AS newest FROM sync_log GROUP BY source ORDER BY source"):
         out.append(dict(row))
     return out
+
+
+# ---------------------------------------------------------------------------
+# price tracking
+# ---------------------------------------------------------------------------
+
+def upsert_market_history(conn: sqlite3.Connection, region_id: int, type_id: int,
+                          rows: Iterable[Mapping]) -> int:
+    """Store one type's daily regional history; returns how many days were new. A day ESI serves
+    again replaces the stored one - its newest day is filled in after the first read."""
+    usable = [r for r in rows if r.get("date")]
+    days = [str(r["date"])[:10] for r in usable]
+    new = _count_new(conn, "market_history", "region_id = ? AND type_id = ? AND day = ?",
+                     [(region_id, type_id, day) for day in days])
+    conn.executemany(
+        """INSERT OR REPLACE INTO market_history (region_id, type_id, day, average, highest, lowest, volume,
+               order_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [(region_id, type_id, day, _float(r.get("average")), _float(r.get("highest")), _float(r.get("lowest")),
+          _int(r.get("volume")), _int(r.get("order_count"))) for day, r in zip(days, usable)])
+    return new
+
+
+def market_history(conn: sqlite3.Connection, region_id: int, type_id: int) -> list[dict]:
+    """One type's stored days, oldest first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT day, average, highest, lowest, volume, order_count FROM market_history "
+        "WHERE region_id = ? AND type_id = ? ORDER BY day", (region_id, type_id))]
+
+
+def newest_history_day(conn: sqlite3.Connection, region_id: int, type_id: int) -> str | None:
+    row = conn.execute("SELECT MAX(day) FROM market_history WHERE region_id = ? AND type_id = ?",
+                       (region_id, type_id)).fetchone()
+    return row[0] if row else None
+
+
+_SNAPSHOT_COLUMNS = ("location_id", "type_id", "ts", "polled_at", "best_sell", "best_buy", "sell_units",
+                     "sell_orders", "buy_units", "buy_orders", "sell_units_1pct", "sell_units_5pct",
+                     "our_sell_units", "our_best_sell")
+
+
+def insert_book_snapshot(conn: sqlite3.Connection, snap: Mapping) -> int:
+    """Store one reduced station book; 0 when a poll already stored the same ESI book."""
+    cur = conn.execute(f"INSERT OR IGNORE INTO book_snapshots ({', '.join(_SNAPSHOT_COLUMNS)}) "
+                       f"VALUES ({', '.join('?' * len(_SNAPSHOT_COLUMNS))})",
+                       tuple(snap[c] for c in _SNAPSHOT_COLUMNS))
+    return cur.rowcount
+
+
+def book_snapshots(conn: sqlite3.Connection, location_id: int, type_id: int,
+                   since: str | None = None) -> list[dict]:
+    """One type's snapshots at one station, oldest first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM book_snapshots WHERE location_id = ? AND type_id = ? AND ts >= ? ORDER BY ts",
+        (location_id, type_id, since or ""))]
+
+
+def watchlist_changes(conn: sqlite3.Connection) -> dict[int, str]:
+    """type id -> 'add' | 'exclude', for the types a person changed."""
+    return {int(r[0]): r[1] for r in conn.execute("SELECT type_id, mode FROM watchlist")}
+
+
+def set_watchlist(conn: sqlite3.Connection, type_id: int, mode: str | None, changed: str) -> None:
+    """Add or exclude one type by hand; `mode=None` forgets the change, back to the automatic rule."""
+    if mode is None:
+        conn.execute("DELETE FROM watchlist WHERE type_id = ?", (type_id,))
+        return
+    conn.execute("INSERT INTO watchlist (type_id, mode, changed) VALUES (?, ?, ?) "
+                 "ON CONFLICT (type_id) DO UPDATE SET mode = excluded.mode, changed = excluded.changed",
+                 (type_id, mode, changed))

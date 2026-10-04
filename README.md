@@ -826,6 +826,41 @@ figures (jobs running and ready per activity, T2 units built and sold, invention
 profit, net profit, stock at cost, work in progress, open sell and buy orders), so `ledger progress`
 shows the trend one row per day (`--all` for every sync) beside the open to-dos and the latest notes.
 
+### `prices` — is today's Jita price a dip worth waiting out?
+
+```bash
+eve-skills prices sync                 # Jita history (when behind) + one book snapshot per watched type
+eve-skills prices signal               # now vs normal per type: dip / high / falling, hold or sell how much
+eve-skills prices backtest --sold-only # what holding each past dip earned per unit
+eve-skills prices watch list           # watched types; `watch add|exclude|reset NAME` changes the list
+```
+
+Watched types are the ones we sold at least 3 times, or built, in the last 60 days, plus manual
+additions minus exclusions. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
+every 4 hours while ESI has not published yesterday yet) and a reduced Jita 4-4 book per type (lowest
+ask from other sellers, highest bid, units within 1% and 5% of it, and our own units apart) in the ledger file, schema v3.
+It is meant to run hourly — on the operation's workstation a systemd user timer does that:
+
+```bash
+systemctl --user enable --now eve-prices.timer   # units in ~/.config/systemd/user/eve-prices.{service,timer}
+journalctl --user -u eve-prices.service          # problems only (the timer runs with --quiet)
+```
+
+`signal` and `backtest` read only the ledger. *Normal* is the median daily average over 30 days and one
+*spread* is its median absolute deviation (×1.4826, at least 1% of normal). *Now* is the newest snapshot's
+lowest ask, or the newest daily average when no snapshot is under 3 hours old (marked `~`). Two spreads
+under normal is a **dip** — unless the last 7 days have been that low as well, which is **falling**, a new
+level; two over is **high**. Only a dip is held, and never more than 14 days of our own sales (the last 30
+days, every hub); the rest is listed. One listing per item per hub, so held stock waits in the hangar -
+or, when the whole stack is held, it may go up once at normal and fill when the price comes back. Net is after the sales tax and broker fees we actually paid over the last 30 days
+(`!` marks a net below the ledger's unit cost).
+
+What that is worth was measured on 2026-10-04 over a year of history for the 15 T2 rigs and modules we
+sell, holding each dip until the first day back near normal or 14 days: a median **+2.3%** per held unit
+(mean +5.0%, 56% of holds gained), against −1.2% for falling starts and +0.4% for mild lows. Gating a dip
+on how the same type's earlier dips went made it worse, so a type's record is shown, never required. It
+is a small, noisy edge measured on daily averages; the snapshots will show whether asks behave the same.
+
 ### `market` — live prices, spread and volume
 
 ```bash

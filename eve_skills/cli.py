@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -627,6 +627,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
     p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
 
+    p_prices = sub.add_parser(
+        "prices", help="track Jita prices of what we sell in the ledger and flag temporary dips worth "
+                       "holding through (history and book snapshots; signal and backtest work offline)")
+    prices_sub = p_prices.add_subparsers(dest="prices_action")
+    p_psync = prices_sub.add_parser("sync", help="store Jita daily history (when behind) and one book snapshot "
+                                                 "per watched type; meant to run hourly")
+    p_psync.add_argument("--no-history", action="store_true", help="only the book snapshots")
+    p_psync.add_argument("--no-book", action="store_true", help="only the daily history")
+    p_psync.add_argument("--quiet", action="store_true", help="print only problems (for a timer)")
+    p_psync.add_argument("--json", action="store_true", help="machine-readable output")
+    p_psig = prices_sub.add_parser("signal", help="per watched type: now vs normal, dip/high/falling, and how "
+                                                  "much stock to hold or sell (two weeks of our sales at most)")
+    p_psig.add_argument("--all", action="store_true", help="also types with no stock and a normal price")
+    p_psig.add_argument("--json", action="store_true", help="machine-readable output")
+    p_pbt = prices_sub.add_parser("backtest", help="replay the dip rule over the stored history: what holding "
+                                                   "each dip earned per unit, and falling starts for contrast")
+    p_pbt.add_argument("--proxy", choices=["average", "highest"], default="average",
+                       help="the daily figure a unit is assumed to sell at (default average)")
+    p_pbt.add_argument("--sold-only", action="store_true",
+                       help="only types watched for our sales, not job products")
+    p_pbt.add_argument("--json", action="store_true", help="machine-readable output")
+    p_pwatch = prices_sub.add_parser("watch", help="the watched types: sold 3+ times or built in the last 60 "
+                                                   "days, plus manual changes")
+    watch_sub = p_pwatch.add_subparsers(dest="watch_action")
+    p_pwlist = watch_sub.add_parser("list", help="watched types, why, and how far their data reaches")
+    p_pwlist.add_argument("--json", action="store_true", help="machine-readable output")
+    for action, text in (("add", "watch a type the automatic rule misses"),
+                         ("exclude", "stop watching a type the automatic rule picks"),
+                         ("reset", "forget a manual change")):
+        watch_sub.add_parser(action, help=text).add_argument("type", help="exact type name or id")
+    p_pwatch.set_defaults(json=False)
+
     p_extract = sub.add_parser("extract", help="Skill Extractor math for one character")
     p_extract.add_argument("--char", help="stored character name or id (required when several are stored)")
 
@@ -655,7 +687,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:
