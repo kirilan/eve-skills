@@ -134,7 +134,7 @@ class _State:
         self.wake = threading.Event()
         self.body: bytes | None = None
         self.refreshing = False
-        self.last_attempt: float = 0.0
+        self.last_attempt: float | None = None   # monotonic; None until the first refresh starts
         self.last_error: str | None = None
         self.next_refresh: str | None = None
         try:
@@ -188,7 +188,9 @@ class _State:
 
     def request_refresh(self) -> bool:
         with self.lock:
-            if self.refreshing or time.monotonic() - self.last_attempt < MIN_MANUAL_REFRESH_SECONDS:
+            recent = (self.last_attempt is not None
+                      and time.monotonic() - self.last_attempt < MIN_MANUAL_REFRESH_SECONDS)
+            if self.refreshing or recent:
                 return False
         self.wake.set()
         return True

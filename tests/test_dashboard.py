@@ -136,7 +136,8 @@ class ServerTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=10) as res:
                 return res.status, res.headers.get("Content-Type"), res.read()
         except urllib.error.HTTPError as err:
-            return err.code, err.headers.get("Content-Type"), err.read()
+            with err:
+                return err.code, err.headers.get("Content-Type"), err.read()
 
     def test_the_page_is_served(self):
         code, kind, body = self.get("/")
@@ -154,6 +155,11 @@ class ServerTests(unittest.TestCase):
         for path in ("/../../etc/passwd", "/data/dashboard.html", "/api/refresh"):
             self.assertEqual(404, self.get(path)[0], path)
         self.assertEqual(404, self.get("/api/dashboard", method="POST")[0])
+
+    def test_a_manual_refresh_works_right_after_boot(self):
+        # time.monotonic() counts from boot: a fresh machine must not read "no refresh yet" as "just now"
+        with mock.patch.object(cmd_dashboard.time, "monotonic", return_value=12.0):
+            self.assertEqual(202, self.get("/api/refresh", method="POST")[0])
 
     def test_a_manual_refresh_is_rate_limited(self):
         code, _kind, body = self.get("/api/refresh", method="POST")
