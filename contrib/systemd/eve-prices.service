@@ -1,0 +1,10 @@
+# One `prices sync` run; eve-prices.timer starts it hourly. Install alongside the timer (see README, `prices`)
+# and edit the two /path/to/eve-tools paths.
+[Unit]
+Description=eve-skills: store Jita price history and a book snapshot for watched types
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/eve-tools
+ExecStart=/path/to/eve-tools/.venv/bin/python -m eve_skills prices sync --quiet
+Nice=10

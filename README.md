@@ -866,13 +866,33 @@ so hangars and materials have a measured history from the first refresh on.
 It listens on every interface (`--host 0.0.0.0`) so other machines on the local network can open it. There
 is no login: anyone who can reach the port sees the figures and character names, and can ask for an early
 refresh. Keep it behind your router or bind it to `127.0.0.1`. The last document is cached in the cache
-root (`dashboard.json`), so a restarted server shows data at once. On the operation's workstation a systemd
-user service keeps it running:
+root (`dashboard.json`), so a restarted server shows data at once.
+
+**Running it as a service.** On the operation's workstation a systemd user service keeps it running. The
+unit is in `contrib/systemd/eve-dashboard.service`; copy it, point its two paths at your checkout, and set
+`--since` to the day the operation started:
 
 ```bash
-systemctl --user enable --now eve-dashboard.service   # unit in ~/.config/systemd/user/eve-dashboard.service
-journalctl --user -u eve-dashboard.service            # one line per refresh, plus problems
+cp contrib/systemd/eve-dashboard.service ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/eve-dashboard.service   # WorkingDirectory, ExecStart, --since
+loginctl enable-linger "$USER"                        # start at boot without a login session (once)
+systemctl --user daemon-reload
+systemctl --user enable --now eve-dashboard.service
 ```
+
+```bash
+systemctl --user status eve-dashboard.service         # running, since when, PID
+journalctl --user -u eve-dashboard.service -f         # one line per refresh, plus problems
+systemctl --user restart eve-dashboard.service        # after pulling, merging or switching branches
+systemctl --user disable --now eve-dashboard.service  # stop it and keep it stopped
+```
+
+The service runs `python -m eve_skills` from the checkout itself, not from an installed copy, so it runs
+whichever branch is checked out there, and only picks up new code (and a new page) when restarted. The
+ledger refuses to be opened by code older than its schema, so a checkout switched to a branch from before a
+schema change stops the service, the prices timer and every command with "written by a newer eve-skills"
+until it is switched back. It restarts itself 30 s after a crash. A refresh that fails (ESI down, a report
+erroring) is logged and the page keeps the last good data, showing the error.
 
 ### `prices` — is today's Jita price a dip worth waiting out?
 
@@ -887,10 +907,14 @@ Watched types are the ones we sold at least 3 times, or built, in the last 60 da
 additions minus exclusions. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
 every 4 hours while ESI has not published yesterday yet) and a reduced Jita 4-4 book per type (lowest
 ask from other sellers, highest bid, units within 1% and 5% of it, and our own units apart) in the ledger file, schema v3.
-It is meant to run hourly — on the operation's workstation a systemd user timer does that:
+It is meant to run hourly — on the operation's workstation a systemd user timer does that. The units are
+in `contrib/systemd/eve-prices.{service,timer}`; copy both and point the service's two paths at your checkout:
 
 ```bash
-systemctl --user enable --now eve-prices.timer   # units in ~/.config/systemd/user/eve-prices.{service,timer}
+cp contrib/systemd/eve-prices.service contrib/systemd/eve-prices.timer ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/eve-prices.service     # WorkingDirectory and ExecStart
+systemctl --user daemon-reload
+systemctl --user enable --now eve-prices.timer
 journalctl --user -u eve-prices.service          # problems only (the timer runs with --quiet)
 ```
 
@@ -2210,6 +2234,7 @@ tests/               unittest suite: pure units, ESI transport, persistence conc
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end
                      to end, universe catalogue/locations, orders, watch/events, doctor (POSIX + forced
                      Windows), packaging
+contrib/systemd/     user units for the dashboard server and the hourly prices sync (copy, then edit paths)
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 
