@@ -136,6 +136,7 @@ class Entry:
     wallet: str | None = None
     label: str | None = None
     opening: float = 0.0  # the part of a cogs amount valued at opening-stock prices
+    location_id: int | None = None  # the station a sale, its tax or its order's broker fee happened at
 
 
 @dataclass
@@ -188,6 +189,10 @@ class Book:
     decryptors: dict[int, int | None] = field(default_factory=dict)   # T2 blueprint -> decryptor
     opening_draws: dict[int, dict] = field(default_factory=dict)      # type -> qty, value, unpriced
     notes: Counter = field(default_factory=Counter)
+    # What jobs consumed, per item type and day; and every produced type's pool at the end of each day
+    # something happened - the ledger's own view of how inputs are used and finished goods build up.
+    consumed: dict[int, dict[str, float]] = field(default_factory=dict)       # type -> day -> qty
+    daily_stock: dict[str, dict[int, tuple[float, float]]] = field(default_factory=dict)  # day -> type -> (qty, cost)
     first_date: str | None = None
     last_date: str | None = None
 
@@ -433,11 +438,29 @@ class _Replay:
                 push(end or j["start_date"], 3, ("finish", j))
 
         events.sort(key=lambda ev: (ev[0], ev[1], ev[2]))
+        day = None
         for date, _order, _seq, (kind, payload) in events:
+            if day is not None and date[:10] != day:
+                self._close_day(day)
+            day = date[:10]
             book.first_date = book.first_date or date
             book.last_date = date
             getattr(self, f"_on_{kind}")(date, payload, sells_by_stamp, orders_by_stamp, invented)
+        if day is not None:
+            self._close_day(day)
         return book
+
+    def _close_day(self, day: str) -> None:
+        pools = self.book.pools
+        self.book.daily_stock[day] = {t: (pools[("item", t)].qty, pools[("item", t)].cost)
+                                      for t in self.book.produced_products if ("item", t) in pools}
+
+    def _consume(self, date: str, type_id: int, qty: float) -> tuple[float, float]:
+        """`_draw` for a job's input, remembered per day so input usage can be measured."""
+        if qty > 0:
+            per_day = self.book.consumed.setdefault(type_id, {})
+            per_day[date[:10]] = per_day.get(date[:10], 0.0) + qty
+        return self._draw(type_id, qty)
 
     def _scope(self, type_id: int | None) -> str:
         if type_id in self.book.invention_products:
@@ -454,9 +477,11 @@ class _Replay:
             return
         scope = self._scope(t["type_id"])
         cost, opening = self._draw(t["type_id"], t["quantity"])
-        self.book.entries.append(Entry(date, "revenue", scope, value, t["type_id"], t["quantity"], t["wallet"]))
+        where = t.get("location_id")
+        self.book.entries.append(Entry(date, "revenue", scope, value, t["type_id"], t["quantity"], t["wallet"],
+                                       location_id=where))
         self.book.entries.append(Entry(date, "cogs", scope, -cost, t["type_id"], t["quantity"], t["wallet"],
-                                       opening=-opening))
+                                       opening=-opening, location_id=where))
 
     def _on_sales_tax(self, date, e, sells_by_stamp, *_):
         amount = e["amount"] or 0.0
@@ -469,7 +494,7 @@ class _Replay:
         for s in sells:
             share = amount * s["quantity"] * s["unit_price"] / total
             self.book.entries.append(Entry(date, "sales_tax", self._scope(s["type_id"]), share, s["type_id"],
-                                           wallet=e["wallet"]))
+                                           wallet=e["wallet"], location_id=s.get("location_id")))
 
     def _on_broker_fee(self, date, e, _sells, orders_by_stamp, *_):
         amount = e["amount"] or 0.0
@@ -491,7 +516,7 @@ class _Replay:
                 self.book.pool("item", o["type_id"]).add(0.0, -share)   # part of what the stock cost
             else:
                 self.book.entries.append(Entry(date, "broker_fee", self._scope(o["type_id"]), share,
-                                               o["type_id"], wallet=e["wallet"]))
+                                               o["type_id"], wallet=e["wallet"], location_id=o.get("location_id")))
 
     def _modified_order(self, date: str, issuer: int | None, fee: float) -> dict | None:
         """The first order `issuer` last touched after `date` whose value `fee` fits at their rate."""
@@ -522,7 +547,7 @@ class _Replay:
             me = max(0, min(me, industry.MAX_ME))
             cost.me = me
             for material, base in recipe.materials.items():
-                total, opening = self._draw(material, industry.required_quantity(base, runs, me))
+                total, opening = self._consume(date, material, industry.required_quantity(base, runs, me))
                 cost.materials += total
                 cost.opening += opening
             if not self._is_bpo(j["blueprint_id"]):
@@ -536,7 +561,7 @@ class _Replay:
                 self.note("missing_invention_recipe")
                 return
             for material, per_attempt in row["m"].items():
-                total, opening = self._draw(int(material), per_attempt * runs)
+                total, opening = self._consume(date, int(material), per_attempt * runs)
                 cost.materials += total
                 cost.opening += opening
             known, dec = self.decryptor_for(j["product_type_id"], j["end_date"])
@@ -548,7 +573,7 @@ class _Replay:
             if known:
                 self.book.decryptors[j["product_type_id"]] = dec
             if dec is not None:
-                total, opening = self._draw(dec, runs)
+                total, opening = self._consume(date, dec, runs)
                 cost.materials += total
                 cost.opening += opening
             taken, short = self.book.pool("bpc", j["blueprint_type_id"]).take(runs)
@@ -713,6 +738,39 @@ def products(book: Book, since: str | None = None, until: str | None = None, sco
         r["margin_pct"] = r["profit"] / r["revenue"] * 100 if r["revenue"] else None
         out.append(r)
     out.sort(key=lambda r: (-r["profit"], -r["build_cost"]))
+    return out
+
+
+def markets(book: Book, since: str | None = None, until: str | None = None) -> list[dict]:
+    """Per station we sold at: revenue, tax, broker fees, the average cost of what sold there, and
+    profit. Covers invention lines and other trade - the scopes net profit counts - so the rows add up
+    to the period's total gross profit; disposal and overhead belong to no market. A sell order's
+    broker fee lands where the order was placed, so a station can carry fees before its first sale."""
+    rows: dict[int | None, dict] = {}
+    for e in book.entries:
+        if e.scope not in (SCOPE_INVENTION, SCOPE_OTHER) or not _in(e.date, since, until):
+            continue
+        r = rows.setdefault(e.location_id, {
+            "location_id": e.location_id, "sold": 0.0, "sales": 0, "types": set(), "revenue": 0.0,
+            "sales_tax": 0.0, "broker_fees": 0.0, "cogs": 0.0, "first_sale": None, "last_sale": None})
+        if e.kind == "revenue":
+            r["sold"] += e.qty
+            r["sales"] += 1
+            r["types"].add(e.type_id)
+            r["revenue"] += e.amount
+            r["first_sale"] = min(r["first_sale"] or e.date, e.date)
+            r["last_sale"] = max(r["last_sale"] or e.date, e.date)
+        elif e.kind == "cogs":
+            r["cogs"] += e.amount
+        else:
+            r[_ENTRY_LINE[e.kind]] += e.amount
+    out = []
+    for r in rows.values():
+        r["types"] = len(r["types"])
+        r["profit"] = r["revenue"] + r["sales_tax"] + r["broker_fees"] + r["cogs"]
+        r["margin_pct"] = r["profit"] / r["revenue"] * 100 if r["revenue"] else None
+        out.append(r)
+    out.sort(key=lambda r: (-r["revenue"], -r["profit"]))
     return out
 
 

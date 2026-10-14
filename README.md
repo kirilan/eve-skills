@@ -763,6 +763,7 @@ eve-skills ledger sync                        # copy jobs, wallets, orders, blue
 eve-skills ledger pnl                         # profit and loss since the cutover
 eve-skills ledger pnl --since 2026-09-19 --by week
 eve-skills ledger products --scope invention  # unit cost, net price and profit per T2 line
+eve-skills ledger markets                     # revenue, tax and fees, profit per station sold at
 eve-skills ledger invention                   # decryptor, success rate, cost per invented run
 eve-skills ledger inventory                   # stock and work in progress at cost and at Jita
 eve-skills skills --watch --ledger            # keep syncing, at most once an hour
@@ -816,8 +817,10 @@ a rule had to assume something — copies older than the ledger costed at 0, unk
 fees taken from the job row — so a figure is never more certain than it looks. `inventory` is the one
 report that reads ESI live: today's corporation and member assets plus open sell orders, valued at
 Jita's best sell (CCP's average where Jita has none, marked `~`), beside their ledger cost (`*` marks
-opening-price cost), and running jobs at cost so far and expected output value. Every report takes
-`--json`.
+opening-price cost), and running jobs at cost so far and expected output value. `markets` splits the
+same invention-plus-other figures by the station each sale happened at (its sales tax with it, and a sell
+order's broker fee where the order was placed), so its rows add up to the period's gross profit. Every
+report takes `--json`.
 
 The same file is the operation's **log**. `ledger note` keeps dated notes — `update` (the default),
 `decision`, `incident`, `analysis` and `todo`, which stays open until `note done` — with a Markdown body
@@ -825,6 +828,71 @@ from `--body`, a file or stdin, and `--at` to backdate one. Every sync also stor
 figures (jobs running and ready per activity, T2 units built and sold, invention revenue and gross
 profit, net profit, stock at cost, work in progress, open sell and buy orders), so `ledger progress`
 shows the trend one row per day (`--all` for every sync) beside the open to-dos and the latest notes.
+
+### `dashboard` — profitability, jobs and orders in a browser
+
+```bash
+eve-skills dashboard serve                         # http://<this machine>:8765/, rebuilt every 60 minutes
+eve-skills dashboard serve --host 127.0.0.1 --port 9000 --since 2026-09-19
+eve-skills dashboard build --out dashboard.json    # the same data once, as JSON
+```
+
+`serve` runs a small web server (standard library only) and one refresh thread. Every `--refresh` minutes
+(default 60) it runs `ledger sync` when the last sync is that old (`--no-sync` leaves syncing to someone
+else), replays the ledger, and runs `industry status --corp` and `orders --check` for live slots, jobs and
+order standing (`--no-live` skips them; `--orders-char` limits the orders to one character). The page polls
+for new data every 5 minutes and has a *Refresh now* button, accepted at most once per 5 minutes.
+
+The page shows net profit and its parts for the last 7 days, 30 days or since `--since` (default the
+cutover); gross profit per day or ISO week and the running net profit; profit per product (invention lines
+and other builds) and per market station, each with a table view; industry slots per character with jobs
+ready to deliver and running jobs by end time; and every open order with its status in the station's book
+(cheapest, undercut, outbid), units ahead and a suggested price. The figures are `ledger pnl`'s: disposal is
+left out and the assumptions block is printed underneath.
+
+The **stockpile** part answers two questions. *Is a line piling up?* Per finished good: units held and listed
+(live, from `ledger inventory`), units built and sold per day over the last 14 days (or since the line's
+first job, if newer), and days of stock (on hand / sold per day): over 14 days or nothing sold is *piling
+up*, 7-14 is *slow*. Beside it, *market days* (on hand / units Jita's region trades per day, from the
+`prices` history) tells a line the market could absorb but we have not listed or priced right from one the
+market is too thin for. *Are we running out of an input?* Per item jobs consume (materials, data cores,
+decryptors, T1 modules): units held, units jobs used per day (from the ledger's recipes), and days of cover:
+none left is *out*, under 3 days *low*, under 7 *watch*, and *short* when an idle copy of a line run in the
+last 14 days cannot start one job at the factory for want of it (from `industry status`). History comes from
+two places: the ledger reconstructs finished goods on hand day by day from jobs and sales, back to the
+cutover; and every refresh stores the measured stock per type in the ledger (`stock_snapshots`, schema v4),
+so hangars and materials have a measured history from the first refresh on.
+
+It listens on every interface (`--host 0.0.0.0`) so other machines on the local network can open it. There
+is no login: anyone who can reach the port sees the figures and character names, and can ask for an early
+refresh. Keep it behind your router or bind it to `127.0.0.1`. The last document is cached in the cache
+root (`dashboard.json`), so a restarted server shows data at once.
+
+**Running it as a service.** On the operation's workstation a systemd user service keeps it running. The
+unit is in `contrib/systemd/eve-dashboard.service`; copy it, point its two paths at your checkout, and set
+`--since` to the day the operation started:
+
+```bash
+cp contrib/systemd/eve-dashboard.service ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/eve-dashboard.service   # WorkingDirectory, ExecStart, --since
+loginctl enable-linger "$USER"                        # start at boot without a login session (once)
+systemctl --user daemon-reload
+systemctl --user enable --now eve-dashboard.service
+```
+
+```bash
+systemctl --user status eve-dashboard.service         # running, since when, PID
+journalctl --user -u eve-dashboard.service -f         # one line per refresh, plus problems
+systemctl --user restart eve-dashboard.service        # after pulling, merging or switching branches
+systemctl --user disable --now eve-dashboard.service  # stop it and keep it stopped
+```
+
+The service runs `python -m eve_skills` from the checkout itself, not from an installed copy, so it runs
+whichever branch is checked out there, and only picks up new code (and a new page) when restarted. The
+ledger refuses to be opened by code older than its schema, so a checkout switched to a branch from before a
+schema change stops the service, the prices timer and every command with "written by a newer eve-skills"
+until it is switched back. It restarts itself 30 s after a crash. A refresh that fails (ESI down, a report
+erroring) is logged and the page keeps the last good data, showing the error.
 
 ### `prices` — is today's Jita price a dip worth waiting out?
 
@@ -839,10 +907,14 @@ Watched types are the ones we sold at least 3 times, or built, in the last 60 da
 additions minus exclusions. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
 every 4 hours while ESI has not published yesterday yet) and a reduced Jita 4-4 book per type (lowest
 ask from other sellers, highest bid, units within 1% and 5% of it, and our own units apart) in the ledger file, schema v3.
-It is meant to run hourly — on the operation's workstation a systemd user timer does that:
+It is meant to run hourly — on the operation's workstation a systemd user timer does that. The units are
+in `contrib/systemd/eve-prices.{service,timer}`; copy both and point the service's two paths at your checkout:
 
 ```bash
-systemctl --user enable --now eve-prices.timer   # units in ~/.config/systemd/user/eve-prices.{service,timer}
+cp contrib/systemd/eve-prices.service contrib/systemd/eve-prices.timer ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/eve-prices.service     # WorkingDirectory and ExecStart
+systemctl --user daemon-reload
+systemctl --user enable --now eve-prices.timer
 journalctl --user -u eve-prices.service          # problems only (the timer runs with --quiet)
 ```
 
@@ -2125,7 +2197,10 @@ eve_skills/
   cmd_build_cost.py  the build-cost command: job parameters, build-or-buy forcing, totals and notes
   cmd_pi.py          the pi command: recipe-tree quantities, per-step value added and customs, colony fits, planet closure
   cmd_orders.py      the orders command: live book and ~90-day history, per-owner totals, --check
-  cmd_ledger.py      the ledger command: sync, pnl, products, invention, inventory, note and progress
+  cmd_ledger.py      the ledger command: sync, pnl, products, markets, invention, inventory, note and progress
+  cmd_dashboard.py   the dashboard command: the web server, its hourly refresh thread, build to JSON
+  dashboard.py       the dashboard document: ledger figures per period, product and market, live jobs and orders
+  stockpile.py       stock over time: days of stock per finished good, days of cover per input, blocked copies
   ledger_db.py       the ledger's SQLite store: schema, migrations, idempotent writes of raw ESI rows
   ledger_sync.py     ESI -> ledger: corporation and member documents, opening prices, watch hook
   ledger.py          the accounting replay: weighted-average costing, job inputs, invention, fee matching
@@ -2153,12 +2228,13 @@ eve_skills/
   render.py          timestamps, SP/duration/ISK formatting, CSV cells, plain-text tables
   data/              packaged SDE snapshot (clone_grades, bloodline_races, skill_catalog,
                      blueprint_materials, planet_industry, system_planets, market_types,
-                     blueprint_invention)
+                     blueprint_invention) and dashboard.html, the dashboard's page
 tests/               unittest suite: pure units, ESI transport, persistence concurrency + the injected
                      Windows lock backend, path layout on both branches, fake-ESI command integration,
                      planner catalog, market (+ quote cache), industry cost model and `build-cost` end
                      to end, universe catalogue/locations, orders, watch/events, doctor (POSIX + forced
                      Windows), packaging
+contrib/systemd/     user units for the dashboard server and the hourly prices sync (copy, then edit paths)
 pyproject.toml / LICENSE / RELEASE.md   packaging metadata, the GPL-3.0 text, the release procedure
 ```
 

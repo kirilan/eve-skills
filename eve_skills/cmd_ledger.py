@@ -251,6 +251,36 @@ def cmd_products(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# markets
+# ---------------------------------------------------------------------------
+
+def cmd_markets(args) -> int:
+    with contextlib.closing(_open()) as conn:
+        book, header, _recipes, _inv = _state(conn)
+        args.since = args.since or header["cutover"]
+        rows = ledger.markets(book, since=args.since, until=args.until)
+        names = _names(_client(), [r["location_id"] for r in rows])
+        for r in rows:
+            r["location_name"] = names.get(r["location_id"]) if r["location_id"] is not None else None
+        if args.json:
+            print(json.dumps({**header, "since": args.since, "until": args.until, "markets": rows}, indent=2))
+            return 0
+        lines = _print_header("ledger markets", header)
+        table = [[r["location_name"] or ("-" if r["location_id"] is None else f"location {r['location_id']}"),
+                  f"{r['sold']:,.0f}", f"{r['types']:,}", _compact(r["revenue"]),
+                  _compact(r["sales_tax"] + r["broker_fees"]), _compact(r["profit"]),
+                  "-" if r["margin_pct"] is None else f"{r['margin_pct']:.0f}%"]
+                 for r in rows]
+        lines.append(render.table(["station", "units sold", "types", "revenue", "tax + fees", "profit", "margin"],
+                                  table) if table else "nothing sold in that period")
+        lines.append("invention lines and other trade, as in the pnl total; a sell order's broker fee is booked "
+                     "where the order was placed")
+        _print_notes(lines, header)
+        print("\n".join(lines))
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # invention
 # ---------------------------------------------------------------------------
 
@@ -554,10 +584,11 @@ def cmd_progress(args) -> int:
 
 
 def cmd_ledger(args) -> int:
-    handler = {"sync": cmd_sync, "pnl": cmd_pnl, "products": cmd_products, "invention": cmd_invention,
+    handler = {"sync": cmd_sync, "pnl": cmd_pnl, "products": cmd_products, "markets": cmd_markets,
+               "invention": cmd_invention,
                "inventory": cmd_inventory, "note": cmd_note, "progress": cmd_progress}.get(args.ledger_action)
     if handler is None:
-        print("usage: eve-skills ledger {sync,pnl,products,invention,inventory,note,progress} [--help]",
+        print("usage: eve-skills ledger {sync,pnl,products,markets,invention,inventory,note,progress} [--help]",
               file=sys.stderr)
         return 2
     return handler(args)
