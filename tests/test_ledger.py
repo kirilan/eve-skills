@@ -323,6 +323,45 @@ class PnlTests(unittest.TestCase):
         self.assertAlmostEqual(50.2, item["unit_cost"])
         self.assertAlmostEqual(1498.0, item["profit"])
 
+    def test_job_inputs_are_counted_per_day_and_produced_stock_per_day_end(self):
+        book = self.book()
+        self.assertEqual({"2026-09-04": 49.0}, book.consumed[PART])      # 10 runs x 5 at ME 2
+        self.assertEqual({"2026-09-02": 2.0}, book.consumed[CORE])       # the invention's data cores
+        self.assertEqual(10.0, book.daily_stock["2026-09-05"][T2_ITEM][0])
+        self.assertEqual(0.0, book.daily_stock["2026-09-08"][T2_ITEM][0])
+        self.assertNotIn("2026-09-06", book.daily_stock)                 # quiet days are carried by readers
+
+    def test_markets_add_up_to_the_total_and_leave_disposal_out(self):
+        book = self.book()
+        (row,) = ledger.pnl(book)
+        (jita,) = ledger.markets(book)
+        self.assertEqual((60003760, 10, 1), (jita["location_id"], jita["sold"], jita["types"]))
+        self.assertAlmostEqual(row["total"]["gross_profit"], jita["profit"])
+        self.assertAlmostEqual(2000.0, jita["revenue"])        # MINERAL is disposal: not a market's sale
+
+    def test_each_station_carries_its_own_sales_tax_and_listing_fee(self):
+        hek = 60005686
+        sold_hek = tx(3, MINERAL, 6, 100.0, buy=False)
+        sold_hek["location_id"] = hek
+        listing = order(1, MINERAL, buy=False, issued=stamp(2), price=100.0, volume=6)
+        listing["location_id"] = hek
+        book = replay(facts(
+            transactions=[tx(1, MINERAL, 10, 50.0, buy=True), tx(2, PART, 1, 1.0, buy=True),
+                          sold_hek, tx(3, MINERAL, 4, 100.0, buy=False, minute=5)],
+            jobs=[job(1, ledger.MANUFACTURING, blueprint_type=T2_BP, product=MINERAL, runs=1, start=stamp(1),
+                      end=stamp(1, 13))],
+            entries=[journal(2, "brokers_fee", -12.0), journal(3, "transaction_tax", -30.0),
+                     journal(3, "transaction_tax", -20.0, minute=5)],
+            orders=[listing]))
+        by_station = {r["location_id"]: r for r in ledger.markets(book)}
+        self.assertEqual({hek, 60003760}, set(by_station))
+        self.assertAlmostEqual(-12.0, by_station[hek]["broker_fees"])
+        self.assertAlmostEqual(-30.0, by_station[hek]["sales_tax"])
+        self.assertAlmostEqual(-20.0, by_station[60003760]["sales_tax"])
+        self.assertAlmostEqual(0.0, by_station[60003760]["broker_fees"])
+        (row,) = ledger.pnl(book)
+        self.assertAlmostEqual(row["total"]["gross_profit"], sum(r["profit"] for r in by_station.values()))
+
 
 # -- store -------------------------------------------------------------------------------------------
 
@@ -337,6 +376,17 @@ class StoreTests(unittest.TestCase):
         conn = ledger_db.connect(self.path)
         self.addCleanup(conn.close)
         return conn
+
+    def test_stock_snapshots_replace_a_repeated_poll_and_read_back_in_order(self):
+        conn = self.connect()
+        rows = [{"type_id": T2_ITEM, "class": "finished", "held": 5, "listed": 3, "unit_cost": 10.0,
+                 "unit_market": 20.0}]
+        ledger_db.insert_stock_snapshot(conn, stamp(2), rows)
+        ledger_db.insert_stock_snapshot(conn, stamp(1), rows)
+        ledger_db.insert_stock_snapshot(conn, stamp(2), [{**rows[0], "held": 7}])
+        got = ledger_db.stock_snapshots(conn)
+        self.assertEqual([(stamp(1), 5), (stamp(2), 7)], [(r["ts"], r["held"]) for r in got])
+        self.assertEqual([stamp(2)], [r["ts"] for r in ledger_db.stock_snapshots(conn, since=stamp(2))])
 
     def test_writing_the_same_rows_twice_counts_them_once(self):
         conn = self.connect()

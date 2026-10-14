@@ -30,7 +30,7 @@ from . import paths
 FILE_NAME = "ledger.sqlite3"
 
 # Bumped with every schema change; `_migrate` walks an older file forward one step at a time.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ESI serves this many days of wallet journal and transactions; a row older than that which no sync
 # stored is gone for good. Reports and `doctor` warn once the last sync is STALE_SYNC_DAYS old, which
@@ -247,6 +247,24 @@ CREATE TABLE watchlist (
 CREATE INDEX book_snapshots_type ON book_snapshots (type_id, ts);
 """
 
+# Version 4: stock over time. Assets are only ever "now" on ESI, so the dashboard stores what is held in
+# hangars and listed in open sell orders per type each time it refreshes: one row per poll and type, with
+# the poll's class for it (finished good or material) and its unit cost and market price at that moment.
+_SCHEMA_V4 = """
+CREATE TABLE stock_snapshots (
+    ts          TEXT NOT NULL,
+    type_id     INTEGER NOT NULL,
+    class       TEXT NOT NULL,
+    held        INTEGER NOT NULL,
+    listed      INTEGER NOT NULL,
+    unit_cost   REAL,
+    unit_market REAL,
+    PRIMARY KEY (ts, type_id)
+);
+
+CREATE INDEX stock_snapshots_type ON stock_snapshots (type_id, ts);
+"""
+
 # What a note can be. A to-do is the only kind with a status: open until `done` closes it.
 NOTE_KINDS = ("update", "decision", "todo", "incident", "analysis")
 
@@ -302,6 +320,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(_SCHEMA_V3)
             conn.execute("PRAGMA user_version = 3")
+    if version < 4:
+        with conn:
+            conn.executescript(_SCHEMA_V4)
+            conn.execute("PRAGMA user_version = 4")
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -595,6 +617,24 @@ def book_snapshots(conn: sqlite3.Connection, location_id: int, type_id: int,
     return [dict(r) for r in conn.execute(
         "SELECT * FROM book_snapshots WHERE location_id = ? AND type_id = ? AND ts >= ? ORDER BY ts",
         (location_id, type_id, since or ""))]
+
+
+_STOCK_COLUMNS = ("ts", "type_id", "class", "held", "listed", "unit_cost", "unit_market")
+
+
+def insert_stock_snapshot(conn: sqlite3.Connection, ts: str, rows: Iterable[Mapping]) -> int:
+    """Store one poll of stock per type; a poll with the same stamp replaces its earlier rows."""
+    values = [(ts, int(r["type_id"]), r["class"], int(r["held"]), int(r["listed"]),
+               _float(r.get("unit_cost")), _float(r.get("unit_market"))) for r in rows]
+    conn.executemany(f"INSERT OR REPLACE INTO stock_snapshots ({', '.join(_STOCK_COLUMNS)}) "
+                     f"VALUES ({', '.join('?' * len(_STOCK_COLUMNS))})", values)
+    return len(values)
+
+
+def stock_snapshots(conn: sqlite3.Connection, since: str | None = None) -> list[dict]:
+    """Every stored stock row from `since` on, oldest poll first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM stock_snapshots WHERE ts >= ? ORDER BY ts, type_id", (since or "",))]
 
 
 def watchlist_changes(conn: sqlite3.Connection) -> dict[int, str]:

@@ -64,7 +64,7 @@ include = ["eve_skills*"]
 
 [tool.setuptools.package-data]
 # The SDE snapshot the CLI falls back to when $XDG_DATA_HOME has nothing newer.
-eve_skills = ["data/*.json"]
+eve_skills = ["data/*.json", "data/*.html"]
 
 [tool.setuptools.dynamic]
 # Single source of truth: `eve-skills --version` and the shipped metadata cannot drift.

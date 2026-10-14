@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -582,6 +582,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "disposal (pre-existing stock sold as-is, no job of ours ever made it), or all")
     p_lprod.add_argument("--limit", type=int, metavar="N", help="only the N most profitable rows")
     p_lprod.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lmkt = ledger_sub.add_parser("markets", help="per station sold at: units, revenue, tax and fees, profit")
+    p_lmkt.add_argument("--since", metavar="YYYY-MM-DD", help="first day included (default: the cutover)")
+    p_lmkt.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded (default: no end)")
+    p_lmkt.add_argument("--json", action="store_true", help="machine-readable output")
     p_linv = ledger_sub.add_parser("invention", help="per invented blueprint: decryptor, attempts, success "
                                                      "rate and cost per invented run")
     p_linv.add_argument("--json", action="store_true", help="machine-readable output")
@@ -626,6 +630,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_lprog.add_argument("--all", action="store_true", help="every sync, not one row per day")
     p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
     p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
+
+    p_dash = sub.add_parser("dashboard", help="web page with profit over time, by product and by market, plus "
+                                              "industry slots and market orders (refreshes itself hourly)")
+    dash_sub = p_dash.add_subparsers(dest="dashboard_action")
+    p_dserve = dash_sub.add_parser("serve", help="run the dashboard web server")
+    p_dserve.add_argument("--host", default="0.0.0.0",
+                          help="address to listen on (default 0.0.0.0: every interface, so the local network "
+                               "can reach it; 127.0.0.1 for this machine only)")
+    p_dserve.add_argument("--port", type=int, default=cmd_dashboard.DEFAULT_PORT,
+                          help=f"TCP port (default {cmd_dashboard.DEFAULT_PORT})")
+    p_dserve.add_argument("--refresh", type=int, default=cmd_dashboard.DEFAULT_REFRESH_MINUTES, metavar="MIN",
+                          help=f"rebuild the data every MIN minutes (default {cmd_dashboard.DEFAULT_REFRESH_MINUTES})")
+    p_dserve.add_argument("--no-sync", action="store_true",
+                          help="never run a ledger sync; report what is stored (another timer syncs)")
+    p_dserve.add_argument("--verbose", action="store_true", help="log every HTTP request")
+    p_dbuild = dash_sub.add_parser("build", help="write the dashboard document as JSON once and exit")
+    p_dbuild.add_argument("--out", metavar="PATH", help="file to write (default: stdout)")
+    for p_dash_action in (p_dserve, p_dbuild):
+        p_dash_action.add_argument("--since", metavar="YYYY-MM-DD",
+                                   help="first day of the 'since start' figures and the charts (default: the cutover)")
+        p_dash_action.add_argument("--orders-char", metavar="CHAR",
+                                   help="only this stored character's orders (default: every stored character)")
+        p_dash_action.add_argument("--no-live", action="store_true",
+                                   help="ledger figures only: skip the live industry status and order checks")
 
     p_prices = sub.add_parser(
         "prices", help="track Jita prices of what we sell in the ledger and flag temporary dips worth "
@@ -687,7 +715,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:
