@@ -25,6 +25,72 @@ $ eve-skills orders --watch 1                            # announce my own fills
 
 ---
 
+## Quick start
+
+Python 3.11 or newer and git. The rest of this README goes into detail; these five steps get you from
+nothing to a logged-in character.
+
+**1. Install.** Linux shell:
+
+```bash
+git clone https://github.com/kirilan/eve-skills.git
+cd eve-skills
+python3 -m venv .venv
+.venv/bin/pip install -e .
+source .venv/bin/activate          # puts eve-skills on PATH for this shell
+eve-skills --version
+```
+
+PowerShell:
+
+```powershell
+git clone https://github.com/kirilan/eve-skills.git
+cd eve-skills
+python -m venv .venv
+.\.venv\Scripts\pip install -e .
+.\.venv\Scripts\Activate.ps1       # puts eve-skills on PATH for this shell
+eve-skills --version
+```
+
+With [uv](https://docs.astral.sh/uv/) installed, `uv tool install git+https://github.com/kirilan/eve-skills.git`
+does all of that in one line. Market prices already work at this point, with no login:
+`eve-skills market Tritanium --hub jita`.
+
+**2. Download the game data** (~100 MB, once, and again after a game patch). `build-cost`, `plan`,
+`pi`, `can-build` and `restock` read recipes and skills from it:
+
+```bash
+eve-skills update-data
+```
+
+**3. Register an EVE application** at <https://developers.eveonline.com/applications>: callback URL
+exactly `http://localhost:8635/callback`, and tick every scope in the
+[scope table](#eve-developer-application), since step 4 asks for all of them. Copy its **Client ID**.
+
+**4. Log in**, once per character. A browser opens; pick the character and approve:
+
+```bash
+eve-skills login --client-id <your-client-id> --scopes all   # the client ID is remembered afterwards
+eve-skills login --scopes all                                 # the next character
+```
+
+On a machine reached over SSH, add `--manual` and paste the URL the browser ends on back into the
+terminal — see [Remote host](#remote-host-ssh----manual).
+
+**5. Use it:**
+
+```bash
+eve-skills summary                       # one line per character
+eve-skills skills                        # skills, queue and clone state
+eve-skills industry status --corp        # slots, jobs, idle blueprints, stock and orders
+eve-skills dashboard serve               # web dashboard on http://localhost:8765/
+eve-skills doctor                        # if something does not work
+```
+
+Run `eve-skills <command> --help` for any command's options; [What it shows](#what-it-shows) lists them all.
+
+---
+
 ## What it shows
 
 | Command | Purpose | Extra consent needed |
