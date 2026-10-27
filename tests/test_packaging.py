@@ -203,6 +203,15 @@ class MetadataTests(unittest.TestCase):
         module_name, _, attribute = target.partition(":")
         self.assertTrue(callable(getattr(importlib.import_module(module_name), attribute)))
 
+    def test_windows_executable_bundles_the_same_data_as_the_wheel(self):
+        # The PyInstaller spec lists its data files by hand; a pattern added to package-data and not
+        # to the spec would ship in the wheel and be missing from eve-skills.exe.
+        spec = (REPO_ROOT / "packaging" / "windows" / "eve-skills.spec").read_text(encoding="utf-8")
+        listed = re.search(r'for pattern in \(([^)]*)\)', spec)
+        self.assertIsNotNone(listed, "eve-skills.spec no longer lists its data patterns the expected way")
+        bundled = {f"data/{p}" for p in re.findall(r'"([^"]+)"', listed[1])}
+        self.assertEqual(set(PYPROJECT["tool"]["setuptools"]["package-data"]["eve_skills"]), bundled)
+
 
 class ReleaseArtifactIgnoreTests(unittest.TestCase):
     """Built artifacts are rebuildable and must never reach the repository."""

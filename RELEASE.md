@@ -1,7 +1,8 @@
 # Releasing eve-skills
 
-How to go from a working tree to a tagged, installable release. Nothing here is automated:
-every step is a command you can read before you run it.
+How to go from a working tree to a tagged, installable release. Everything up to the tag is a
+command you can read before you run it; the one automated piece is the Windows executable, which a
+pushed tag builds into a *draft* GitHub release (step 7).
 
 Two toolchains work and produce the same artifacts: **uv** or a plain virtualenv with `pip`. Pick one per
 run — mixing them is how an install lands in the wrong environment. Proven here with uv 0.12.6 on
@@ -240,3 +241,44 @@ procedure runs the installed command rather than a venv-relative path.
 Never hand-edit `dist/` contents and re-tag: rebuild from the tagged commit
 (`git archive` the tag into a clean directory, then repeat steps 3–5) so the artifact matches
 the source it claims.
+
+## 7. Windows executable
+
+Linux users get the package; Windows users can also get `eve-skills-$V-windows-x64.zip` — a single
+`eve-skills.exe` built with PyInstaller (its own Python 3.13, the bundled SDE documents, no
+dependencies), plus `LICENSE` and `packaging/windows/README.txt`. Nothing about it is built on your
+machine: `.github/workflows/release-windows.yml` does it on a `windows-latest` runner.
+
+**On a tag push** (`v*`, from step 6) the workflow runs the suite, refuses a tag that does not equal
+`v` + `eve_skills.__version__`, builds `packaging/windows/eve-skills.spec`, smoke-tests the `.exe` from
+outside the checkout with an empty profile (`--version`, every `data.*` row of `doctor` resolving from the
+bundle, a bare run failing for want of a login instead of hanging), and attaches the zip and its
+`.sha256` to a **draft** release for the tag with generated notes. Read the draft, add the SDE build
+number from step 1, and press *Publish* — until then nobody sees it. Re-running the workflow replaces the
+assets on the same release.
+
+**Before tagging**, the same build can be tried from any branch without creating a release:
+
+```bash
+gh workflow run release-windows.yml --ref <branch>
+gh run watch                                      # then: gh run download <run-id>
+```
+
+A pull request that changes `packaging/` or the workflow runs it by itself. Either way the zip is
+uploaded as a workflow artifact only. Copy it to a Windows machine, extract, and
+`.\eve-skills.exe doctor` in PowerShell is the one check a runner cannot make: a real user profile and a
+real console, double-click included.
+
+**Checking the spec on Linux.** The spec builds on Linux too (a Linux binary, not shipped), which is how
+to see a change to it work without Windows:
+
+```bash
+uv run --no-project --with pyinstaller==6.22.3 \
+  pyinstaller --clean --noconfirm --distpath dist --workpath build/pyinstaller packaging/windows/eve-skills.spec
+dist/eve-skills --version && dist/eve-skills doctor     # exit 1 expected with no login
+```
+
+Things that differ in a frozen build, should you change code near them: `sys.executable` is the `.exe`,
+not an interpreter, so the tool re-invokes itself as `[sys.executable, *args]` when `sys.frozen` is set
+(`cmd_dashboard._self_command`), never with `-m eve_skills`; and bundled data is listed in the spec by
+hand — `tests/test_packaging.py` fails if it drifts from `pyproject.toml`'s `package-data`.

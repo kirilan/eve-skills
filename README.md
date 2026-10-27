@@ -27,10 +27,17 @@ $ eve-skills orders --watch 1                            # announce my own fills
 
 ## Quick start
 
-Python 3.11 or newer and git. The rest of this README goes into detail; these five steps get you from
-nothing to a logged-in character.
+Python 3.11 or newer and git — or, on Windows, neither: see the standalone executable below. The rest
+of this README goes into detail; these five steps get you from nothing to a logged-in character.
 
-**1. Install.** Linux shell:
+**1. Install.** On Windows the simplest route needs no Python: download
+`eve-skills-<version>-windows-x64.zip` from the [releases page](https://github.com/kirilan/eve-skills/releases),
+extract it to a folder that will stay (say `%LOCALAPPDATA%\Programs\eve-skills`), open PowerShell there and
+run `.\eve-skills.exe --version`. The `README.txt` in the zip shows how to put that folder on `PATH` so
+plain `eve-skills` works everywhere; then go on to step 2. More in
+[Windows standalone executable](#windows-standalone-executable).
+
+From source, Linux shell:
 
 ```bash
 git clone https://github.com/kirilan/eve-skills.git
@@ -133,6 +140,9 @@ problem.
 Python 3.11 or newer, standard library only — no runtime dependencies and nothing to compile. Linux
 and Windows are both supported; [Platform support](#platform-support) says exactly what differs.
 
+On Linux, install it as the Python package it is (below). On Windows you can do the same, or skip
+Python entirely with the [standalone executable](#windows-standalone-executable).
+
 ### With uv
 
 [uv](https://docs.astral.sh/uv/) is the shortest path, and it needs no pre-existing virtualenv.
@@ -209,6 +219,40 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e .
 .\.venv\Scripts\eve-skills.exe --version
 ```
+
+### Windows standalone executable
+
+Each release carries `eve-skills-<version>-windows-x64.zip` on the
+[releases page](https://github.com/kirilan/eve-skills/releases), next to a `.sha256` file with its checksum.
+Inside are `eve-skills.exe`, `LICENSE` and a short `README.txt`. The executable is the same code as the
+package, frozen with [PyInstaller](https://pyinstaller.org) together with its own Python and the bundled
+SDE snapshot, so nothing else needs installing: every command, flag and output format in this README
+applies unchanged.
+
+```powershell
+# after extracting the zip to %LOCALAPPDATA%\Programs\eve-skills
+$dir = "$env:LOCALAPPDATA\Programs\eve-skills"
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$dir", "User")
+# open a new terminal, then:
+eve-skills --version
+```
+
+What to expect:
+
+- **It is a console program.** Run it from PowerShell or Windows Terminal; double-clicking it in
+  Explorer only shows a note saying so and waits for Enter.
+- **Your data does not live next to it.** Logins, config, caches and `update-data` downloads go to
+  `%LOCALAPPDATA%\eve-skills`, exactly as with the Python package — so upgrading is replacing the
+  `.exe`, and switching between the executable and a pip install keeps every login.
+- **SmartScreen may warn on first run.** The executable is not code-signed, so Windows can show
+  "Windows protected your PC"; *More info → Run anyway*. Compare the zip against its `.sha256` if you
+  want to be sure it is the file the release workflow built.
+- **Each start unpacks itself** to a temporary folder first, so a command takes a little longer to
+  begin than under a Python install — more while an antivirus scans the unpacked files. Irrelevant for
+  `--watch` and `dashboard serve`; if you script hundreds of calls, the Python package is the better fit.
+
+There is no Linux build of this kind on purpose: there the package installs with tools every
+distribution already has.
 
 ### No install at all
 

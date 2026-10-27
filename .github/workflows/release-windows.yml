@@ -1,0 +1,140 @@
+# The Windows binary release: one eve-skills.exe built with PyInstaller, so a Windows user needs no
+# Python, venv or PATH juggling. Linux stays a plain Python package (see RELEASE.md).
+#
+# A `v*` tag push builds, smoke-tests and attaches the zip to a DRAFT GitHub release for that tag -
+# nothing is published until a maintainer reads the draft and presses Publish. A manual run
+# (workflow_dispatch, any branch) and a pull request that touches the build do the same build and
+# test and only upload the zip as a workflow artifact, which is how to try a build before tagging.
+name: release-windows
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build eve-skills.exe
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The interpreter is frozen into the .exe, so this choice is the Python every Windows user runs.
+      # PyInstaller is pinned: a release must be rebuildable from its tag with the same bundler.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install the bundler and the packaging tier's build backend
+        run: python -m pip install --upgrade pip "pyinstaller==6.22.3" "setuptools>=77" build
+
+      # A release is built from whatever the tag points at, which ci.yml may never have seen.
+      - name: Run the suite
+        run: python -m unittest discover -s tests -t . -q
+
+      - name: Read the version, and hold a tag to it
+        id: version
+        shell: bash
+        run: |
+          version=$(python -c "import eve_skills; print(eve_skills.__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error title=tag does not match the package::tag $GITHUB_REF_NAME, eve_skills.__version__ $version"
+            exit 1
+          fi
+
+      - name: Build
+        run: pyinstaller --clean --noconfirm --distpath dist --workpath build/pyinstaller packaging/windows/eve-skills.spec
+
+      # Run the .exe the way a user would: from outside the checkout, with a profile nobody has logged
+      # into, so it can only see what is inside the executable. The XDG pins keep it off the runner's
+      # real %LOCALAPPDATA%.
+      - name: Smoke-test the executable
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          exe="$PWD/dist/eve-skills.exe"
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke" && cd "$smoke"
+          export HOME="$smoke/home" XDG_CONFIG_HOME="$smoke/cfg" XDG_CACHE_HOME="$smoke/cache" \
+                 XDG_DATA_HOME="$smoke/data" XDG_STATE_HOME="$smoke/state"
+
+          test "$("$exe" --version)" = "eve-skills $VERSION"
+
+          # No login: doctor exits 1 by design. Every bundled SDE document must resolve from the exe.
+          set +e; "$exe" doctor --json > doctor.json; code=$?; set -e
+          [[ $code == 0 || $code == 1 ]] || { echo "doctor exited $code"; exit 1; }
+          python - doctor.json <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1], encoding="utf-8"))
+          print("package", report["versions"]["package"], "on Python", report["versions"]["python"])
+          bad = [c for c in report["checks"] if c["name"].startswith("data.") and c["status"] != "ok"]
+          for check in report["checks"]:
+              if check["name"].startswith("data."):
+                  print(f'{check["name"]:<26} {check["status"]:<5} {check.get("origin", "")}')
+          sys.exit(f"{len(bad)} data check(s) not ok" if bad else 0)
+          PY
+
+          # No arguments and no console of its own (a runner has none): the default command must run
+          # and fail for want of a login, not sit waiting for the Enter a double-click would get.
+          set +e; timeout 60 "$exe" < /dev/null; code=$?; set -e
+          [[ $code == 1 ]] || { echo "bare run exited $code, expected 1 (not logged in)"; exit 1; }
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="eve-skills-$VERSION-windows-x64"
+          mkdir -p "release/$name"
+          cp dist/eve-skills.exe LICENSE "release/$name/"
+          # Notepad copes with LF today, but CRLF is what every Windows reader expects of a .txt.
+          sed 's/$/\r/' packaging/windows/README.txt > "release/$name/README.txt"
+          cd release
+          7z a -tzip -mx=9 "$name.zip" "$name" > /dev/null
+          sha256sum "$name.zip" > "$name.zip.sha256"
+          cat "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: eve-skills-${{ steps.version.outputs.version }}-windows-x64
+          path: |
+            release/*.zip
+            release/*.zip.sha256
+          if-no-files-found: error
+
+  draft-release:
+    name: attach to a draft release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # this job alone: create the draft release and upload to it
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: eve-skills-${{ needs.build.outputs.version }}-windows-x64
+          path: release
+
+      # Reuses a release that already exists for the tag (a re-run, or one written by hand) and only
+      # replaces the Windows assets on it; otherwise opens a draft with generated notes.
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --draft --verify-tag --generate-notes --title "eve-skills $TAG"
+          fi
+          gh release upload "$TAG" release/*.zip release/*.zip.sha256 --clobber

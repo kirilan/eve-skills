@@ -48,9 +48,20 @@ def _log(message: str) -> None:
     print(f"{_iso(_now())} dashboard: {message}", file=sys.stderr, flush=True)
 
 
+def _self_command() -> list[str]:
+    """How to start this tool again in a child process.
+
+    From an installed package that is the interpreter plus `-m eve_skills`. In the frozen Windows
+    build (PyInstaller) `sys.executable` is eve-skills.exe itself, which has no `-m`: it would read
+    `-m` as an unknown flag and every live section would fail."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, "-m", "eve_skills"]
+
+
 def _live(*args: str) -> tuple[dict | None, str | None]:
     """Run one of our own reports with --json in a child process: (document, error)."""
-    command = [sys.executable, "-m", "eve_skills", *args, "--json"]
+    command = [*_self_command(), *args, "--json"]
     try:
         run = subprocess.run(command, capture_output=True, text=True, timeout=LIVE_TIMEOUT_SECONDS,
                              encoding="utf-8")

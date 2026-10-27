@@ -111,6 +111,24 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual("Part", doc["stockpile"]["materials"][0]["name"])
         self.assertEqual("no stock analysis", self.doc()["stockpile"]["error"])
 
+class LiveCommandTests(unittest.TestCase):
+    """The live sections re-run this tool; the frozen Windows build has no interpreter to pass -m to."""
+
+    def run_live(self, frozen):
+        done = mock.Mock(returncode=0, stdout='{"ok": true}', stderr="")
+        with mock.patch.object(cmd_dashboard.sys, "executable", "/x/runner"), \
+                mock.patch.object(cmd_dashboard.sys, "frozen", frozen, create=True), \
+                mock.patch.object(cmd_dashboard.subprocess, "run", return_value=done) as run:
+            self.assertEqual(({"ok": True}, None), cmd_dashboard._live("orders", "--check"))
+        return run.call_args.args[0]
+
+    def test_an_installed_package_runs_the_module(self):
+        self.assertEqual(["/x/runner", "-m", "eve_skills", "orders", "--check", "--json"], self.run_live(False))
+
+    def test_a_frozen_executable_runs_itself(self):
+        self.assertEqual(["/x/runner", "orders", "--check", "--json"], self.run_live(True))
+
+
 def _args(**over):
     base = dict(host="127.0.0.1", port=0, refresh=60, no_sync=True, no_live=True, since=None,
                 orders_char=None, verbose=False)
