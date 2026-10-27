@@ -129,6 +129,50 @@ class BookTest(unittest.TestCase):
         self.assertEqual((100.0, 90.0, 7), (snap["best_sell"], snap["our_best_sell"], snap["sell_units"]))
 
 
+class BuySideTest(unittest.TestCase):
+    """The dip rule read by a buyer: extra units on a dip, scaled by depth and capped three ways."""
+
+    def days(self) -> list[pw.Day]:
+        return series(flat(40))
+
+    def test_the_multiple_grows_with_the_depth_of_the_dip(self):
+        self.assertEqual([1.5, 1.5, 2.0, 3.0, 3.0, 4.0],
+                         [pw.dip_multiple(d) for d in (2.0, 4.9, 5.0, 10.0, 19.9, 35.0)])
+
+    def test_a_dip_buys_the_trip_need_times_the_multiple_from_asks_under_the_dip_line(self):
+        # 12% under normal: x3, so 2 x 30 more on top of the trip's 30, all under the dip line.
+        asks = [(88.0, 1000), (99.0, 1000)]
+        advice = pw.buy_advice(self.days(), asks, need=30, buy=30, held=0, buffer=0, cover_days=3)
+        self.assertEqual((pw.DIP, 3.0, 60, "multiple"), (advice.state, advice.multiple, advice.extra, advice.limit))
+        self.assertAlmostEqual(60 * 88.0, advice.extra_isk)
+
+    def test_a_dip_never_takes_stock_past_two_weeks_of_use(self):
+        # Use is 10 a day: 140 units cover 14 days; 100 owned plus the 30 bought leave room for 10.
+        asks = [(75.0, 1000)]
+        advice = pw.buy_advice(self.days(), asks, need=30, buy=30, held=100, buffer=0, cover_days=3)
+        self.assertEqual((4.0, 10, "cover"), (advice.multiple, advice.extra, advice.limit))
+
+    def test_a_thin_sliver_under_the_line_is_not_a_reason_to_buy_more(self):
+        # 40 cheap units: the trip's own 30 take the first of them, so only 10 extra are a bargain.
+        asks = [(88.0, 40), (100.0, 1000)]
+        advice = pw.buy_advice(self.days(), asks, need=30, buy=30, held=0, buffer=0, cover_days=3)
+        self.assertEqual((10, "book"), (advice.extra, advice.limit))
+        self.assertAlmostEqual(10 * 88.0, advice.extra_isk)
+
+    def test_a_high_price_drops_the_buffer_and_normal_or_falling_buy_nothing_more(self):
+        high = pw.buy_advice(self.days(), [(115.0, 1000)], need=30, buy=230, held=0, buffer=200, cover_days=3)
+        self.assertEqual((pw.HIGH, 0, 200), (high.state, high.extra, high.skip_buffer))
+        normal = pw.buy_advice(self.days(), [(100.0, 1000)], need=30, buy=30, held=0, buffer=0, cover_days=3)
+        self.assertEqual((pw.NORMAL, 0, 0), (normal.state, normal.extra, normal.skip_buffer))
+        lower = series(flat(30) + [88.0] * pw.SHORT_DAYS)
+        falling = pw.buy_advice(lower, [(88.0, 1000)], need=30, buy=30, held=0, buffer=0, cover_days=3)
+        self.assertEqual((pw.FALLING, 0), (falling.state, falling.extra))
+
+    def test_no_ask_or_no_baseline_is_not_judged(self):
+        self.assertIsNone(pw.buy_advice(self.days(), [], 30, 30, 0, 0, 3).state)
+        self.assertIsNone(pw.buy_advice(series(flat(5)), [(80.0, 10)], 30, 30, 0, 0, 3).state)
+
+
 class StubClient:
     """ESI as the sync reads it: history rows, and a station book with its Last-Modified."""
 
@@ -174,6 +218,21 @@ class SyncTest(unittest.TestCase):
         with self.conn:
             ledger_db.set_watchlist(self.conn, 500, None, "x")
         self.assertEqual({500: "sales", 600: "manual"}, pw.watchlist(self.conn, NOW))
+
+    def test_inputs_we_buy_often_are_watched_for_the_buy_side_unless_we_also_sell_them(self):
+        def buy(tid: int, type_id: int, wallet: str = "corp:1:1") -> None:
+            with self.conn:
+                ledger_db.insert_transactions(self.conn, wallet, [
+                    {"transaction_id": tid, "date": "2026-02-10T00:00:00Z", "type_id": type_id, "quantity": 5,
+                     "unit_price": 10.0, "is_buy": True}])
+        for tid in range(100, 103):
+            buy(tid, 800)
+            buy(tid + 10, 500)
+            self.sale(tid + 20, 500, "2026-02-10T00:00:00Z")
+        buy(130, 900)                                                # once is not often
+        for tid in range(140, 143):
+            buy(tid, 950, wallet="char:7")                           # a member's own fittings
+        self.assertEqual({800: "buys", 500: "sales"}, pw.watchlist(self.conn, NOW))
 
     def test_sync_stores_history_once_and_a_snapshot_per_esi_book(self):
         history = {500: [{"date": "2026-02-18", "average": 10.0, "highest": 11.0, "lowest": 9.0, "volume": 4,

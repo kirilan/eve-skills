@@ -29,6 +29,7 @@ The edge is small and noisy, and it is measured on the daily average, not on the
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
@@ -49,9 +50,11 @@ HIGH_Z = 2.0            # ... and this many over is high
 RECOVER_Z = 0.5         # back within this many spreads of normal counts as recovered
 HORIZON_DAYS = 14       # how long a dip may be waited out (two weeks of stock, decided 2026-10-04)
 
-# The automatic watchlist: what we sold at least this often lately, and what our jobs made.
+# The automatic watchlist: what we sold at least this often lately, what our jobs made, and what we
+# bought at least this often (inputs, watched for the buy side only).
 WATCH_SALES_DAYS = 60
 WATCH_MIN_SALES = 3
+WATCH_MIN_BUYS = 3
 MANUFACTURING = 1
 
 SNAPSHOT_MAX_AGE_HOURS = 3   # an older snapshot is not "now"; the signal falls back to history
@@ -298,11 +301,17 @@ def _iso(moment: datetime) -> str:
 
 
 def watchlist(conn: sqlite3.Connection, now: datetime) -> dict[int, str]:
-    """type id -> why it is watched ('sales', 'jobs' or 'manual'). Automatic: sold at least
-    WATCH_MIN_SALES times in the last WATCH_SALES_DAYS, or made by one of our manufacturing jobs in
-    that time. Manual additions and exclusions win over the rule."""
+    """type id -> why it is watched ('buys', 'sales', 'jobs' or 'manual'). Automatic: sold at least
+    WATCH_MIN_SALES times in the last WATCH_SALES_DAYS, made by one of our manufacturing jobs in that
+    time, or else bought at least WATCH_MIN_BUYS times from a corporation wallet (an input: its asks
+    feed the buy side, not the sell signal). Manual additions and exclusions win over the rule."""
     since = _iso(now - timedelta(days=WATCH_SALES_DAYS))
     out: dict[int, str] = {}
+    # Corporation wallets only: what members buy for themselves (fittings, shuttles) is not an input.
+    for (type_id,) in conn.execute("SELECT type_id FROM transactions WHERE is_buy = 1 AND date >= ? "
+                                   "AND wallet LIKE 'corp:%' GROUP BY type_id HAVING COUNT(*) >= ?",
+                                   (since, WATCH_MIN_BUYS)):
+        out[int(type_id)] = "buys"
     for (type_id,) in conn.execute("SELECT product_type_id FROM jobs WHERE activity_id = ? AND start_date >= ? "
                                    "AND product_type_id IS NOT NULL GROUP BY product_type_id",
                                    (MANUFACTURING, since)):
@@ -488,3 +497,94 @@ def advise(type_id: int, days: Sequence[Day], snapshot: Mapping | None, stock: S
     action = HOLD if hold > 0 else SELL
     return Advice(type_id, state, price, source, base, z, ev, stock, cap, hold, stock.qty - hold,
                   target if state == DIP else None, net, action, reason)
+
+
+# ---------------------------------------------------------------------------
+# the buy side: is an input cheap enough today to buy ahead?
+# ---------------------------------------------------------------------------
+#
+# The same rule read from the other side of the book: a Jita ask DIP_Z spreads under the input's
+# normal (and not low for a week, which is a new level) is a dip worth buying ahead of the next trips.
+# Measured on 2026-10-27 over a year of Forge history for the 22 inputs we buy most: a unit bought on
+# the first dip day cost a median 7% less than the same unit on recovery or after HORIZON_DAYS, and
+# more the deeper the dip (under 5%: +4%, 5-10%: +7%, 10-20%: +9%, 20%+: +24%). That is on daily
+# averages, which mix bid and ask fills, so it overstates what buying at the ask saves; the book
+# snapshots of watched inputs are what will measure it on asks.
+
+BUY_COVER_DAYS = HORIZON_DAYS   # dip extras never take an input past this many days of its use
+# Extra bought on a dip as a multiple of the trip's own need, by depth under normal - deeper buys
+# more (user, 2026-10-27). Read top down: the first floor the depth reaches wins.
+DIP_MULTIPLES = ((20.0, 4.0), (10.0, 3.0), (5.0, 2.0), (0.0, 1.5))
+
+
+def dip_multiple(depth_pct: float) -> float:
+    """Multiple of the trip's need to buy at a dip `depth_pct` percent under normal."""
+    return next(multiple for floor, multiple in DIP_MULTIPLES if depth_pct >= floor)
+
+
+@dataclass(frozen=True)
+class BuyAdvice:
+    state: str | None            # high | normal | dip | falling; None without a baseline or an ask
+    ask: float | None            # lowest ask at the hub station
+    base: Baseline | None
+    z: float | None
+    depth_pct: float | None      # % under normal at the ask (negative when above)
+    multiple: float | None       # on a dip: what the trip's need is scaled to
+    extra: int                   # units to buy on top of the trip, 0 unless a dip
+    extra_isk: float | None      # their cost, walking the asks past the trip's own buy
+    limit: str | None            # what capped `extra`: multiple | cover | book
+    skip_buffer: int             # on a high: buffer units (--extra) better left for a cheaper day
+    reason: str
+
+
+def buy_advice(days: Sequence[Day], asks: Sequence[tuple[float, int]], need: float, buy: int, held: float,
+               buffer: int, cover_days: float) -> BuyAdvice:
+    """Buy more of one input today, or less, and why.
+
+    `asks` are the hub station's sell orders as (price, units), cheapest first; `need` is what the
+    trip's builds and inventions use over `cover_days`, `buy` what the trip already buys (buffers
+    included), `held` what we already own of it anywhere the trip counts, and `buffer` the part of
+    `buy` that is a fixed --extra. On a dip the extra is the trip's need times (multiple - 1), never
+    past BUY_COVER_DAYS of use counting what we hold, and only from asks still under the dip line
+    after the trip's own buy has taken the cheapest ones: a thin sliver at the top is not a dip."""
+    ask = asks[0][0] if asks else None
+    base = baseline(days, days[-1].day) if days else None
+    if ask is None or base is None:
+        return BuyAdvice(None, ask, base, None, None, None, 0, None, None, 0,
+                         "no sell order at the hub" if ask is None else
+                         "no baseline yet: fewer than %d trading days in the last %d" % (MIN_ROWS, BASELINE_DAYS))
+    state, z = classify(ask, base)
+    depth = (1 - ask / base.median) * 100
+    if state == HIGH:
+        skip = min(buffer, buy)
+        return BuyAdvice(state, ask, base, z, depth, None, 0, None, None, skip,
+                         "above normal - buy only what the trip needs"
+                         + (f", leave the {skip:,} buffer" if skip else ""))
+    if state == FALLING:
+        return BuyAdvice(state, ask, base, z, depth, None, 0, None, None, 0,
+                         "low for a week already: a new level, nothing to buy ahead")
+    if state != DIP:
+        return BuyAdvice(state, ask, base, z, depth, None, 0, None, None, 0, "normal price")
+    multiple = dip_multiple(depth)
+    wanted = need * (multiple - 1)
+    cover = need / cover_days * BUY_COVER_DAYS - held - buy if cover_days > 0 else 0.0
+    line = base.median - DIP_Z * base.scale
+    under = sum(units for price, units in asks if price <= line) - buy
+    bounds = {"multiple": wanted, "cover": cover, "book": under}
+    limit = min(bounds, key=lambda k: bounds[k])
+    extra = max(0, math.floor(bounds[limit] + 1e-9))
+    cost, skip, left = 0.0, buy, extra
+    for price, units in asks:
+        take = max(0, units - skip)
+        skip = max(0, skip - units)
+        take = min(take, left)
+        cost += take * price
+        left -= take
+        if not left:
+            break
+    why = {"multiple": f"x{multiple:g} of the trip's need",
+           "cover": f"capped at {BUY_COVER_DAYS} days of use",
+           "book": f"only {max(0, under):,.0f} more units under {line:,.2f}"}[limit]
+    return BuyAdvice(state, ask, base, z, depth, multiple, extra, cost if extra else None, limit, 0,
+                     f"dip {depth:.1f}% under normal - buy {extra:,} more ({why})" if extra else
+                     f"dip {depth:.1f}% under normal, but nothing more to buy ({why})")

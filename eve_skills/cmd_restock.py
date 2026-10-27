@@ -17,7 +17,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 
-from . import alphadata, esi as esi_mod, exports, freshness, industry, market, render, sso, universe
+from . import alphadata, esi as esi_mod, exports, freshness, industry, market, price_watch as pw, render, sso, universe
 
 
 @dataclass
@@ -112,6 +112,82 @@ def _roots(assets: list[dict]) -> dict[int, int]:
             loc = parent[loc]
         roots[start] = loc
     return roots
+
+
+def price_check(client, hub: market.Scope, demands: list[Demand], rows: list[dict], held: Counter,
+                cover_days: float) -> dict:
+    """The buy side of `price_watch` for every material this trip buys: dips get extra units scaled by
+    depth, highs lose their --extra buffer. Reads each one's daily history in the hub's region and
+    the hub station's asks; a document that fails leaves that material unjudged, never guessed."""
+    need, buffer = Counter(), Counter()
+    for d in demands:
+        for t, r in d.need.items():
+            if d.kind == "extra":
+                buffer[t] += r["buy"]
+            else:
+                need[t] += r["need"]
+    bought = [r for r in rows if r["buy"]]
+    ids = [r["type_id"] for r in bought]
+    history = client.get_many_meta([f"/markets/{hub.region_id}/history?type_id={t}" for t in ids])
+    books = market._read_books(client, ids, hub)
+    items, failed = [], []
+    for r in bought:
+        t = r["type_id"]
+        answer = history.get(f"/markets/{hub.region_id}/history?type_id={t}")
+        book = books.get(t)
+        if not isinstance(answer, tuple) or not isinstance(book, tuple):
+            failed.append(r["name"])
+            continue
+        asks = sorted((float(o["price"]), int(o.get("volume_remain") or 0))
+                      for o in market._scope_rows(book[0], hub)
+                      if not o.get("is_buy_order") and o.get("price") is not None)
+        a = pw.buy_advice(pw.days_from_rows(answer[0]), asks, need[t], r["buy"], held[t], buffer[t], cover_days)
+        items.append({"type_id": t, "name": r["name"], "state": a.state, "ask": a.ask,
+                      "normal": a.base.median if a.base else None, "depth_pct": a.depth_pct, "z": a.z,
+                      "multiple": a.multiple, "extra": a.extra, "extra_isk": a.extra_isk, "limit": a.limit,
+                      "skip_buffer": a.skip_buffer, "reason": a.reason})
+    notes = [f"normal = median daily average in the hub's region over the last {pw.BASELINE_DAYS} days; "
+             f"a dip is an ask {pw.DIP_Z:g} spreads under it, unless the last {pw.SHORT_DAYS} days were that "
+             f"low too (a new level)",
+             "dip extras: the trip's need x " + ", ".join(f"{m:g} from {f:g}%" for f, m in
+                                                          reversed(pw.DIP_MULTIPLES))
+             + f" under normal, at most {pw.BUY_COVER_DAYS} days of use including stock we own, and only "
+               "from asks still under the dip line",
+             "measured on daily averages (2026-10-27, 22 inputs, a year): buying a dip saved a median 7%, "
+             "more the deeper it was; the ask-side edge is smaller and not yet measured"]
+    if failed:
+        notes.append("no history or book for: " + ", ".join(failed) + " - not judged")
+    return {"hub": hub.label, "cover_days": cover_days, "cap_days": pw.BUY_COVER_DAYS, "items": items,
+            "notes": notes}
+
+
+def price_check_text(check: dict, rows: list[dict]) -> str:
+    flagged = [i for i in check["items"] if i["state"] in (pw.DIP, pw.HIGH, pw.FALLING)]
+    calm = len(check["items"]) - len(flagged)
+    if not flagged:
+        lines = [f"price check ({check['hub']}): all {calm:,} bought materials at normal prices"]
+    else:
+        order = {pw.DIP: 0, pw.HIGH: 1, pw.FALLING: 2}
+        flagged.sort(key=lambda i: (order[i["state"]], i["name"]))
+        lines = [f"price check ({check['hub']} ask vs {pw.BASELINE_DAYS}-day normal; "
+                 f"lines cover {check['cover_days']:g} days):",
+                 render.table(["material", "state", "ask", "normal", "vs normal", "extra", "extra ISK", "why"],
+                              [[i["name"], i["state"], render.isk(i["ask"]), render.isk(i["normal"]),
+                                f"{-i['depth_pct']:+.1f}%", f"{i['extra']:,}" if i["extra"] else
+                                (f"-{i['skip_buffer']:,}" if i["skip_buffer"] else "-"),
+                                render.isk(i["extra_isk"]) if i["extra_isk"] else "-", i["reason"]]
+                               for i in flagged])]
+        if calm:
+            lines.append(f"{calm:,} other bought materials at normal prices (or not judged)")
+        change = {i["type_id"]: i["extra"] - i["skip_buffer"] for i in flagged if i["extra"] or i["skip_buffer"]}
+        if change:
+            extra_isk = sum(i["extra_isk"] or 0 for i in flagged)
+            lines += ["", "Multibuy with the price check applied"
+                      + (f" (dip extras {render.isk(extra_isk)} ISK):" if extra_isk else ":")]
+            lines += [f"{r['name']} {r['buy'] + change.get(r['type_id'], 0)}" for r in rows
+                      if r["buy"] + change.get(r["type_id"], 0) > 0]
+    lines += [f"* {n}" for n in check["notes"]]
+    return "\n".join(lines)
 
 
 def cmd_restock(args):
@@ -212,6 +288,7 @@ def cmd_restock(args):
                 move[type_id] += qty
         notes.append(f"{hname}'s personal hangars counted: at {hub.label} as pick-ups, elsewhere in "
                      f"{at_name.split(' ')[0]}'s system as moves into the corporation hangar")
+    held = usable + pickup + move     # before the allocation spends them: what we own, for the price check
 
     # ---- prices and volumes
     figures = market.book_figures(client, sorted(wanted), hub)
@@ -283,11 +360,20 @@ def cmd_restock(args):
         notes.append(f"no sell order at {hub.label} for: {', '.join(unpriced)} - their cost is left out")
     total_m3 = sum(r["haul_m3"] for r in rows)
     total_isk = sum(r["buy_isk"] or 0 for r in rows)
+    check = None
+    if args.price_check and args.days > 0:
+        check = price_check(client, hub, ordered, rows, held, args.days)
+        for r in check["items"]:
+            r["extra_m3"] = r["extra"] * m3(r["type_id"])
+        extra_m3 = sum(r["extra_m3"] for r in check["items"])
+        if args.cargo is not None and extra_m3 > args.cargo - total_m3 + 1e-9:
+            check["notes"].append(f"the dip extras ({extra_m3:,.0f} m3) do not fit the "
+                                  f"{max(0.0, args.cargo - total_m3):,.0f} m3 left in the hold")
     doc = {"generated": market.iso_utc(client.now().timestamp()), "build_station": {"id": at_id, "name": at_name},
            "hub": hub.label, "cargo_m3": args.cargo, "haul_m3": total_m3, "buy_isk": total_isk,
            "lines": [{"kind": d.kind, "label": d.label, "units": d.units, "fit": d.fit, "status": d.status,
                       "haul_m3": haul(d.need)} for d in ordered],
-           "materials": rows, "hints": hints, "notes": notes}
+           "materials": rows, "price_check": check, "hints": hints, "notes": notes}
     if args.json:
         for line in hints:
             print(line, file=sys.stderr)
@@ -319,6 +405,8 @@ def cmd_restock(args):
     if short:
         lines += ["", "not covered this trip: " + "; ".join(f"{d.label} ({d.units - d.fit:,})" for d in short)]
     blocks.append("\n".join(lines))
+    if check is not None:
+        blocks.append(price_check_text(check, rows))
     blocks.append("\n".join(f"* {n}" for n in notes + [
         "materials are direct inputs only: a component you build yourself is its own line",
         "on site = the corporation's hangars at the build station; extras are bought in full"]))

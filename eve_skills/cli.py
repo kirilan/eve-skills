@@ -442,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_restock.add_argument("--cargo", type=float, metavar="M3",
                            help="hold size: inventions and extras first, then lines in the order given, "
                                 "the last one cut to what fits")
+    p_restock.add_argument("--days", type=float, default=3.0, metavar="N",
+                           help="days of builds and inventions the lines cover (default 3): the price "
+                                "check scales dip extras from the use per day")
+    p_restock.add_argument("--no-price-check", dest="price_check", action="store_false",
+                           help="skip the price check: no history or book depth read for the materials")
     p_restock.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_colonies = sub.add_parser("colonies", help="live planetary colonies of stored characters (read-only ESI; needs login --scopes planets)")
@@ -677,7 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="only types watched for our sales, not job products")
     p_pbt.add_argument("--json", action="store_true", help="machine-readable output")
     p_pwatch = prices_sub.add_parser("watch", help="the watched types: sold 3+ times or built in the last 60 "
-                                                   "days, plus manual changes")
+                                                   "days, inputs bought 3+ times (restock's dip check), plus "
+                                                   "manual changes")
     watch_sub = p_pwatch.add_subparsers(dest="watch_action")
     p_pwlist = watch_sub.add_parser("list", help="watched types, why, and how far their data reaches")
     p_pwlist.add_argument("--json", action="store_true", help="machine-readable output")

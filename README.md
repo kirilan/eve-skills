@@ -866,6 +866,20 @@ and the last line that does not fit is cut to the units that do (stock on site c
 free, so the cut is searched, not scaled). The text ends with a Multibuy block, the pick-ups, the moves
 and what the trip leaves out; `--json` has every line and material with its volume and ISK.
 
+**Price check.** Every material the trip buys is then judged by the `prices` dip rule from the buyer's
+side: the hub's lowest ask against the median daily average of the hub's region over 30 days (ESI history,
+read live; `--no-price-check` skips it). A **dip** (two spreads under normal, and not low for the whole
+last week) adds extra units: the trip's need times 1.5 under 5% below normal, 2 from 5%, 3 from 10% and 4
+from 20% (deeper dips have paid more: over a year of Forge history for our 22 main inputs a unit bought on
+the first dip day cost a median 4% / 7% / 9% / 24% less in those bands than on recovery or two weeks
+later, measured on daily averages, so the saving at the ask is smaller). The extra never takes the
+material past 14 days of use counting what we already own (`--days`, default 3, says how many days the
+lines cover), and comes only from asks still under the dip line once the trip's own buy has taken the
+cheapest ones. A **high** input (two spreads over) is flagged and its `--extra` buffer is left for a
+cheaper day; **falling** buys nothing ahead. The text adds a price-check table and, when anything
+changes, a second Multibuy with the check applied; `--json` has a `price_check` object. Dip extras are
+not fitted to `--cargo`; a note says when they do not fit what is left.
+
 ### `ledger` — what the business cost, earned and holds
 
 ```bash
@@ -1015,7 +1029,8 @@ eve-skills prices watch list           # watched types; `watch add|exclude|reset
 ```
 
 Watched types are the ones we sold at least 3 times, or built, in the last 60 days, plus manual
-additions minus exclusions. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
+additions minus exclusions. Inputs bought at least 3 times in that time from a corporation wallet are watched too (`why` = `buys`),
+so their asks build up for `restock`'s price check; `signal` leaves them out. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
 every 4 hours while ESI has not published yesterday yet) and a reduced Jita 4-4 book per type (lowest
 ask from other sellers, highest bid, units within 1% and 5% of it, and our own units apart) in the ledger file, schema v3.
 It is meant to run hourly — on the operation's workstation a systemd user timer does that. The units are
@@ -2129,7 +2144,7 @@ uv run python -m unittest discover -s tests -t . -q                     # 513: p
   command's table, totals and footnotes, and `--check` against station books;
 - `tests/test_job_times.py` — window parsing, next-local-time starts, longest fit per window, caps and
   the winter-time shift, and medians over timed jobs only;
-- `tests/test_restock.py` — per-job ME rounding, invention datacores and decryptors, stock netted on site
+- `tests/test_restock.py` — per-job ME rounding, invention datacores and decryptors, the price check's dip extras and high flags, stock netted on site
   / pick up / move through a corporation office, unpriced materials, and the cargo cut;
 - `tests/test_pricing.py` — price ticks across powers of ten, the thin-sliver rule on the worked Jita
   examples, and undercut / outbid / sliver standings;

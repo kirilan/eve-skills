@@ -55,7 +55,8 @@ def cmd_signal(args) -> int:
     now = _now()
     with contextlib.closing(cmd_ledger._open()) as conn:
         book, header, _recipes, _invention = cmd_ledger._state(conn)
-        watched = _types(conn, args)
+        # Inputs are watched for restock's buy side; holding or listing them is not a question.
+        watched = {t: why for t, why in _types(conn, args).items() if why != "buys"}
         stocks = pw.stock_figures(conn, book.pools, now, watched)
         fee = pw.realised_fee_pct(book.entries, now)
         advice = []

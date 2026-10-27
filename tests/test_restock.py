@@ -12,13 +12,20 @@ import unittest
 from eve_skills import cmd_restock, industry, sso
 from tests.fake_esi import (
     ADA, BUILD_ARTICLE, BUILD_CELL, BUILD_CRYO, BUILD_GOO, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE,
-    CORP_SHARED, STATION_JITA, FakeEsiEnv, iso,
+    CORP_SHARED, MARKET_FORGE, STATION_JITA, FakeEsiEnv, iso,
 )
 
 BUILD_STATION = 60099001      # where the corporation's office and factory are
 NEARBY_STATION = 60099003     # another station in the same system: the hauler's own hangar
 OFFICE = 1055720303518
 AUGMENTATION = 34203
+
+# Forge history for the price check: housing and cell both traded at 8.00 for 40 days, so housing's
+# 7.00 ask is a dip 12.5% under normal (x3) and cell's 9.00 is high. Other types have no history.
+HISTORY = {t: [{"date": f"2026-01-{d + 1:02d}" if d < 31 else f"2026-02-{d - 30:02d}", "average": 8.0 * (1 + w),
+                "highest": 8.0, "lowest": 8.0, "volume": 1000, "order_count": 10}
+               for d, w in enumerate([0.0, 0.01, -0.01, 0.005, -0.005] * 8)]
+           for t in (BUILD_HOUSING, BUILD_CELL)}
 
 
 class RequirementTests(unittest.TestCase):
@@ -71,6 +78,8 @@ class RestockCommandTests(unittest.TestCase):
         server = self.env.server
         server.get(f"/corporations/{CORP_SHARED}/assets", token=ADA.token, doc=corp)
         server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token, doc=own)
+        server.get(f"/markets/{MARKET_FORGE}/history",
+                   handler=lambda call: HISTORY.get(int(call.query["type_id"]), []))
         for station in (BUILD_STATION, NEARBY_STATION, STATION_JITA):
             server.get(f"/universe/stations/{station}", doc={"station_id": station, "system_id": 30000142})
         for type_id, volume in ((BUILD_PLATE, 1.0), (BUILD_HOUSING, 1.0), (BUILD_CELL, 2.0),
@@ -101,6 +110,28 @@ class RestockCommandTests(unittest.TestCase):
         self.assertIsNone(m[BUILD_PASTE]["buy_isk"])
         self.assertTrue(any("no sell order" in n for n in doc["notes"]))
         self.assertAlmostEqual(sum(r["haul_m3"] for r in doc["materials"]), doc["haul_m3"])
+
+    def test_the_price_check_buys_more_at_a_dip_and_flags_a_high(self):
+        doc = self.run_json(f"{BUILD_ARTICLE}=20")
+        items = {i["type_id"]: i for i in doc["price_check"]["items"]}
+        housing, cell = items[BUILD_HOUSING], items[BUILD_CELL]
+        # Housing: the trip needs 200 (40 picked up, 160 bought); a 12.5% dip triples the need.
+        self.assertEqual(("dip", 3.0, 400, "multiple"), (housing["state"], housing["multiple"], housing["extra"],
+                                                        housing["limit"]))
+        self.assertAlmostEqual(400 * 7.0, housing["extra_isk"])
+        self.assertAlmostEqual(400 * 1.0, housing["extra_m3"])
+        self.assertEqual(("high", 0), (cell["state"], cell["extra"]))
+        # Paste has no ask and plate is not bought: neither is judged as a dip.
+        self.assertIsNone(items[BUILD_PASTE]["state"])
+        self.assertNotIn(BUILD_PLATE, items)
+        code, out, err = self.env.run(["restock", "--at", str(BUILD_STATION), "--char", ADA.name,
+                                       "--hauler", ADA.name, f"{BUILD_ARTICLE}=20"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Multibuy with the price check applied", out)
+        self.assertIn("Bulk Casing 560", out)
+
+    def test_the_price_check_can_be_skipped(self):
+        self.assertIsNone(self.run_json(f"{BUILD_ARTICLE}=20", "--no-price-check")["price_check"])
 
     def test_cargo_cuts_the_last_line_to_what_fits(self):
         doc = self.run_json(f"{BUILD_ARTICLE}=20", "--cargo", "200")
