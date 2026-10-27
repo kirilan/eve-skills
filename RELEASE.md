@@ -10,12 +10,13 @@ Linux: `uv venv`, `uv pip install -e .`, `uv run eve-skills --version`,
 `uv run python -m unittest discover -s tests -t . -q`, `uv build`, and `uv tool install .` /
 `uv tool list` / `uv tool uninstall eve-skills`. Not proven here — documented forms written from
 `uv --help`: `uv run --with setuptools …`, `uvx twine check …`, and the `git+https://…` tool install in
-step 6. Nothing in either toolchain has ever been run on Windows.
+step 6. On Windows only pip has been run, and only by CI: `ci.yml` installs the package on a
+`windows-latest` runner and `release-windows.yml` builds the executable there; uv never has.
 
-Status today: **no release has been published yet** — `git tag` is empty, so `0.1.0` in
-`eve_skills/__init__.py` is the current *development* version, not a shipped one. The source
-lives at <https://github.com/kirilan/eve-skills> (remote `origin`, branch `main`); no package
-index account is configured, so `twine upload` below stays optional.
+Status today: **v0.1.0 is the latest release** (tagged and published 2026-10-27, the first one), with
+the Windows executable attached; Linux users install it from the tag or source. The source lives at
+<https://github.com/kirilan/eve-skills> (remote `origin`, branch `main`); no package index account is
+configured, so `twine upload` below stays optional.
 
 ## Versioning
 

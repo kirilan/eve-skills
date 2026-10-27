@@ -316,12 +316,13 @@ console ignores the escape sequence unless virtual-terminal processing is switch
 turns it on once per run; a console that refuses gets a plain 72-character rule line instead of escape
 codes, with the timestamped header still separating the frames.
 
-**How much of this has been run.** No Windows machine was involved in testing: every Windows branch —
-the `msvcrt` backend, profile-folder path resolution, doctor's skips and its cmd-shaped hints, the
-virtual-terminal fallback — is covered by tests that *force* the platform (a fake `msvcrt`, an injected
-platform judgement), not by a live Windows run. See
-[Testing and verification status](#testing-and-verification-status) for what that buys and what it does
-not.
+**How much of this has been run.** Every Windows branch — the `msvcrt` backend, profile-folder path
+resolution, doctor's skips and its cmd-shaped hints, the virtual-terminal fallback — is covered by tests
+that *force* the platform (a fake `msvcrt`, an injected platform judgement), and the whole suite also
+runs on a real `windows-latest` runner in CI, where the [standalone executable](#windows-standalone-executable)
+is built and smoke-tested too. What no runner covers is a desktop: double-clicking the `.exe`,
+SmartScreen, roaming profiles, an antivirus holding files open. See
+[Testing and verification status](#testing-and-verification-status) for the details.
 
 ---
 
@@ -2166,7 +2167,10 @@ legs pass. Getting there took three rounds, and what the runner reported was wor
 the failures were tests that had written the POSIX layout into an assertion about something else,
 and three were real product bugs no forced-platform test could have caught — text writes taking the
 ANSI code page instead of UTF-8, stdout doing the same when it is not a console, and `logout`
-unable to delete a file another process held open. The forced-platform tests (an injected fake
+unable to delete a file another process held open. The standalone `eve-skills.exe` is verified the
+same way: `.github/workflows/release-windows.yml` builds it on `windows-latest` and runs it from an
+empty profile outside the checkout (`--version`, every bundled `data.*` document resolving from inside
+the executable, a bare run failing for want of a login rather than hanging). The forced-platform tests (an injected fake
 `msvcrt`, an injected platform judgement) still earn their place: they pin *which* syscall
 sequence, path, verdict and string each branch produces, which a green runner does not tell you.
 What no runner here covers: how a roaming profile moves these files between machines, what an
