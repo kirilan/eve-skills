@@ -104,6 +104,15 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(("ESI down", []), (failed["jobs"]["error"], failed["jobs"]["characters"]))
         self.assertEqual("no consent", failed["orders"]["error"])
 
+    def test_a_freshness_issue_is_one_sentence_however_often_the_report_lists_it(self):
+        issue = {"owner_id": 98000111, "subject": "asset", "delivered_jobs": 13}
+        status = {**STATUS, "warnings": [issue, {**issue, "subject": "blueprint"}],
+                  "owners": [{**STATUS["owners"][0], "warnings": [issue, {**issue, "subject": "blueprint"}]}]}
+        warnings = self.doc(status=status)["jobs"]["warnings"]
+        self.assertEqual(2, len(warnings))
+        self.assertTrue(warnings[0].startswith("13 jobs delivered after ESI's asset snapshot"))
+        self.assertIn("blueprint snapshot", warnings[1])
+
     def test_the_stock_section_is_passed_through_with_names_filled_in(self):
         stock = {"error": None, "goods": [{"type_id": T2_ITEM, "name": None, "status": "slow"}],
                  "materials": [{"type_id": PART, "name": "Part", "status": "low"}]}

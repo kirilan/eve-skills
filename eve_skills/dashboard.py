@@ -148,14 +148,26 @@ def colonies_section(doc: Mapping | None, error: str | None = None,
     return {"error": error, "as_of": doc.get("generated"), "warnings": warnings, "colonies": rows}
 
 
+def _status_warning(issue) -> str:
+    """One `industry status` warning as a sentence. Its freshness issues are data there
+    ({owner_id, subject, delivered_jobs}), and printing that dict would mean nothing to a reader."""
+    if isinstance(issue, Mapping) and issue.get("delivered_jobs"):
+        count, subject = issue["delivered_jobs"], issue.get("subject") or "asset"
+        return (f"{count} job{'' if count == 1 else 's'} delivered after ESI's {subject} snapshot: their output "
+                f"is not in the {subject} figures until ESI refreshes it (within the hour)")
+    return issue if isinstance(issue, str) else str(issue)
+
+
 def jobs_section(status: Mapping | None, error: str | None = None) -> dict:
     """Slots per character and the job groups from `industry status --corp --json`."""
     if status is None:
         return {"error": error or "no industry status", "characters": [], "ready": [], "running": []}
-    characters, ready, running, warnings = [], [], [], list(status.get("warnings") or [])
+    characters, ready, running = [], [], []
+    # The report lists each freshness issue twice - once overall, once under its owner - so keep one.
+    issues = list(status.get("warnings") or [])
     as_of = None
     for owner in status.get("owners") or []:
-        warnings += owner.get("warnings") or []
+        issues += owner.get("warnings") or []
         as_of = ((owner.get("documents") or {}).get("jobs") or {}).get("last_modified") or as_of
         for c in owner.get("characters") or []:
             slots = c.get("slots") or {}
@@ -168,6 +180,7 @@ def jobs_section(status: Mapping | None, error: str | None = None) -> dict:
                                "product": j.get("product"), "runs": j.get("runs"), "count": j.get("count"),
                                "end_start": j.get("end_start"), "end_end": j.get("end_end")})
     running.sort(key=lambda j: j["end_start"] or "")
+    warnings = list(dict.fromkeys(_status_warning(issue) for issue in issues))
     return {"error": error, "as_of": as_of, "warnings": warnings, "characters": characters,
             "ready": ready, "running": running}
 
