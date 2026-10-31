@@ -17,7 +17,8 @@ from unittest import mock
 
 from eve_skills import cmd_dashboard, dashboard, ledger
 
-from .test_ledger import CHAR, MINERAL, PART, T1_BP, T2_BP, T2_ITEM, copy, facts, job, journal, replay, stamp, tx
+from .test_ledger import (CHAR, MINERAL, P2_GOOD, PART, PERSONAL, PLANET, T1_BP, T2_BP, T2_ITEM, copy, facts, job,
+                          journal, pi_replay, poll, replay, stamp, tx)
 
 HEADER = {"cutover": "2026-09-01", "last_sync": stamp(8), "warnings": [], "notes": ["an assumption"]}
 
@@ -110,6 +111,55 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual("Widget II", doc["stockpile"]["goods"][0]["name"])
         self.assertEqual("Part", doc["stockpile"]["materials"][0]["name"])
         self.assertEqual("no stock analysis", self.doc()["stockpile"]["error"])
+
+COLONIES = {"generated": stamp(9), "warnings": [], "hints": [], "characters": [{"colonies": [
+    {"character_name": "Farmer", "system_name": "Enderailen", "planet_id": PLANET, "planet_type_name": "Ice",
+     "upgrade_level": 4, "last_update": stamp(8), "stale": False,
+     "extractors": [{"product_name": "Noble Gas", "heads": 6, "expiry_time": stamp(12), "expired": False},
+                    {"product_name": "Planktic Colonies", "heads": 5, "expiry_time": stamp(12), "expired": False}],
+     "facilities": [
+         {"schematic": {"inputs": [{"type_id": 2310}], "outputs": [{"type_id": 3683, "name": "Oxygen"}]}},
+         {"schematic": {"inputs": [{"type_id": 2286}], "outputs": [{"type_id": 2073, "name": "Biomass"}]}},
+         {"schematic": {"inputs": [{"type_id": 3683}, {"type_id": 2073}],
+                        "outputs": [{"type_id": 2312, "name": "Supertensile Plastics"}]}}]},
+    {"character_name": "Farmer", "system_name": "Rairomon", "planet_id": PLANET + 1, "planet_type_name": "Barren",
+     "upgrade_level": 4, "last_update": stamp(1), "stale": True,
+     "extractors": [{"product_name": "Noble Metals", "heads": 10, "expiry_time": stamp(5), "expired": True}],
+     "facilities": []}]}]}
+
+
+class PlanetaryPanelTests(unittest.TestCase):
+    def book(self):
+        return pi_replay(facts(
+            transactions=[tx(4, P2_GOOD, 10, 12_000.0, buy=False, wallet=PERSONAL)],
+            entries=[journal(3, "planetary_export_tax", -720.0, context=PLANET, context_type="planet_id",
+                             wallet=PERSONAL)],
+            polls=[poll(1, {}), poll(3, {P2_GOOD: 10})]))
+
+    def test_the_panel_has_its_own_profit_and_the_main_figures_leave_it_out(self):
+        book = self.book()
+        planetary = {"all": {**ledger.planetary(book, since="2026-09-01"), "held": [], "held_value": 0.0,
+                             "held_at": stamp(3)}}
+        doc = dashboard.document(book, HEADER, since="2026-09-01", now=stamp(9), today=date(2026, 9, 9),
+                                 names=lambda ids: {}, planetary=planetary, colonies=COLONIES,
+                                 planet_names={PLANET: "Enderailen VIII"})
+        whole = doc["ranges"]["all"]
+        self.assertEqual([], whole["products"])                       # no colony product among the jobs'
+        self.assertAlmostEqual(0.0, whole["summary"]["revenue"])
+        self.assertAlmostEqual(120_000.0 - 720.0, whole["planetary"]["profit"])
+        self.assertEqual([(P2_GOOD, 10.0, 10.0)],
+                         [(r["type_id"], r["output"], r["sold"]) for r in whole["planetary"]["products"]])
+        self.assertEqual(-720.0, whole["planetary"]["planets"][0]["export_tax"])
+        self.assertAlmostEqual(120_000.0 - 720.0, sum(d["planetary_profit"] for d in doc["days"]))
+        self.assertEqual(stamp(1), doc["planetary"]["tracking_since"])
+
+    def test_colonies_list_the_soonest_ending_first_with_what_leaves_each(self):
+        section = dashboard.colonies_section(COLONIES, planet_names={PLANET: "Enderailen VIII"})
+        first, second = section["colonies"]
+        self.assertEqual((PLANET + 1, stamp(5), True), (first["planet_id"], first["next_expiry"], first["stale"]))
+        self.assertEqual(("Enderailen VIII", ["Supertensile Plastics"]), (second["planet"], second["makes"]))
+        self.assertEqual("ESI down", dashboard.colonies_section(None, "ESI down")["error"])
+
 
 class LiveCommandTests(unittest.TestCase):
     """The live sections re-run this tool; the frozen Windows build has no interpreter to pass -m to."""

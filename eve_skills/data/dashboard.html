@@ -168,6 +168,34 @@ footer ul { margin: 4px 0; padding-left: 18px; }
   </div>
 
   <section class="card">
+    <h2>Planetary industry</h2>
+    <p class="sub" id="pi-sub">The colonies as their own operation: what their output sold for, less customs and colony construction. Not part of the net profit above.</p>
+    <div class="hero" id="pi-tiles"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Planetary profit over time</h2>
+      <p class="sub" id="pi-time-sub">Colony sales less tax, fees, customs and construction, per period.</p>
+      <div class="chart" id="chart-pi"></div>
+    </section>
+    <section class="card">
+      <h2>Colony products</h2>
+      <p class="sub">Output measured from the holdings polls, and what of it sold.</p>
+      <div class="scroll" id="table-pi-products"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Colonies</h2>
+    <p class="sub" id="colonies-sub">Extractor programs, the soonest to end first.</p>
+    <div id="colonies-error"></div>
+    <div class="scroll" id="table-colonies"></div>
+    <details><summary>Charges per planet</summary><div class="scroll" id="table-pi-planets"></div></details>
+    <details><summary>Planetary commodities held</summary><div class="scroll" id="table-pi-held"></div></details>
+  </section>
+
+  <section class="card">
     <h2>Stockpile</h2>
     <p class="sub" id="stock-sub">Finished goods against what sells, inputs against what jobs use.</p>
     <div id="stock-error"></div>
@@ -587,6 +615,7 @@ function render() {
   table("table-market", [["Market", 0], ["Units", 1], ["Revenue", 1], ["Share", 1], ["Tax + fees", 1], ["Profit", 1], ["Margin", 1]],
     mk.map(r => [el("span", { title: r.name, text: system(r.name) }), num(r.sold), isk(r.revenue), pct(r.revenue / totalRev * 100), isk(r.taxes_and_fees), signed(r.profit), pct(r.margin_pct)]));
 
+  renderPlanetary(d, rng, series);
   renderStock(d.stockpile || { goods: [], materials: [], error: "this server predates stock tracking" });
   renderJobs(d.jobs);
   renderOrders(d.orders);
@@ -599,6 +628,63 @@ function render() {
     f.append(ul);
   }
   f.append(el("div", { text: `Ledger cutover ${d.cutover || "?"}; "since start" counts from ${d.since}. Disposal of pre-existing stock is left out, as in ledger pnl.` }));
+}
+
+// ---------- planetary industry ----------
+function colonyPill(c) {
+  if (!c.extractors.length) return pill("text-muted", "○", "no extractor");
+  if (c.extractors.some(x => x.expired)) return pill("critical", "✕", "ended");
+  const hours = c.next_expiry ? (new Date(c.next_expiry) - Date.now()) / 36e5 : null;
+  if (hours !== null && hours < 12) return pill("warning", "◆", "ends soon");
+  return pill("good", "✓", "running");
+}
+function renderPlanetary(d, rng, series) {
+  const pd = d.planetary || { colonies: { colonies: [], error: "this server predates planetary tracking" }, held: [] };
+  const pr = rng.planetary || { products: [], planets: [] };
+  document.getElementById("pi-sub").textContent = pd.tracking_since
+    ? `The colonies as their own operation: output sold, less customs and colony construction. Not part of the net profit above. Output measured since ${when(pd.tracking_since)}.`
+    : "The colonies as their own operation. No holdings poll yet: output is measured from the first full ledger sync after a colony exists.";
+  const hero = clear("pi-tiles");
+  hero.append(el("div", {},
+    el("div", { class: "label", text: `Planetary profit · ${rng.label.toLowerCase()} (from ${rng.since})` }),
+    el("div", { class: "hero-num", text: isk(pr.profit) })));
+  const tiles = [
+    ["Revenue", isk(pr.revenue), `${num(pr.sold_units)} units sold`],
+    ["Customs", isk(pr.customs), "export and import tax"],
+    ["Construction", isk(pr.setup), "upgrades, structures, command centres"],
+    ["Tax and broker fees", isk(pr.taxes_and_fees), "on sales"],
+    ["Output", num(pr.output_units), "units the colonies made"],
+    ["Held", isk(pd.held_value), pd.held_at ? `at the CCP average, ${relative(pd.held_at)}` : "no poll yet"],
+  ];
+  for (const [label, value, note] of tiles) {
+    hero.append(el("div", { class: "tile" }, el("div", { class: "label", text: label }),
+      el("div", { class: "value", text: value }), el("div", { class: "note", text: note })));
+  }
+  document.getElementById("pi-time-sub").textContent = `Colony sales less tax, fees, customs and construction, per ${state.grain === "weeks" ? "ISO week" : "day"}.`;
+  columnChart("chart-pi", series, {
+    label: "Planetary profit per period", value: r => r.planetary_profit || 0,
+    title: r => state.grain === "weeks" ? r.period : periodLabel(r.period),
+    tip: r => [["Planetary profit", isk(r.planetary_profit), css("--series-1")], ["Revenue", isk(r.planetary_revenue)], ["Customs and construction", isk(r.planetary_customs)]],
+  });
+  table("table-pi-products", [["Product", 0], ["Output", 1], ["Sold", 1], ["Net/unit", 1], ["Revenue", 1], ["Profit", 1]],
+    pr.products.map(r => [r.name, num(r.output), num(r.sold), isk(r.net_per_unit), isk(r.revenue), signed(r.profit)]));
+
+  const col = pd.colonies || { colonies: [] };
+  const err = clear("colonies-error");
+  if (col.error) err.append(el("div", { class: "error", text: "Live colonies unavailable: " + col.error }));
+  for (const msg of col.warnings || []) err.append(el("div", { class: "error", text: msg }));
+  const ended = col.colonies.filter(c => c.extractors.some(x => x.expired)).length;
+  document.getElementById("colonies-sub").textContent =
+    `${col.colonies.length} colonies, ${ended} with an extraction that has ended; the soonest to end first. ESI only refreshes a colony when it is opened in game.`;
+  table("table-colonies", [["Status", 0], ["Ends", 0], ["Character", 0], ["Planet", 0], ["Type", 0], ["CCU", 1], ["Makes", 0], ["Extractors", 0], ["Opened", 0]],
+    col.colonies.map(c => [colonyPill(c), c.next_expiry ? `${whenShort(c.next_expiry)} (${relative(c.next_expiry)})` : "–",
+      c.character || "–", c.planet || (c.system ? `${c.system} · ${c.planet_id}` : String(c.planet_id)), c.type || "–", num(c.ccu),
+      c.makes.join(", ") || "–", c.extractors.map(x => `${x.product} ×${x.heads ?? "?"}`).join(", ") || "–",
+      relative(c.last_update) + (c.stale ? " (stale)" : "")]));
+  table("table-pi-planets", [["Planet", 0], ["Character", 0], ["Exports", 1], ["Export tax", 1], ["Import tax", 1], ["Construction", 1], ["Last charge", 0]],
+    pr.planets.map(r => [r.name, r.characters.join(", ") || "–", num(r.exports), isk(r.export_tax), isk(r.import_tax), isk(r.construction), when(r.last)]));
+  table("table-pi-held", [["Commodity", 0], ["Units", 1], ["Unit price", 1], ["Value", 1]],
+    (pd.held || []).map(r => [r.name, num(r.units), isk(r.unit_price), isk(r.value)]));
 }
 
 function isoWeek(day) {

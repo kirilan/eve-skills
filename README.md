@@ -890,6 +890,7 @@ eve-skills ledger pnl --since 2026-09-19 --by week
 eve-skills ledger products --scope invention  # unit cost, net price and profit per T2 line
 eve-skills ledger markets                     # revenue, tax and fees, profit per station sold at
 eve-skills ledger invention                   # decryptor, success rate, cost per invented run
+eve-skills ledger planetary --by week         # the colonies: output, sales, customs, per planet and product
 eve-skills ledger inventory                   # stock and work in progress at cost and at Jita
 eve-skills skills --watch --ledger            # keep syncing, at most once an hour
 eve-skills ledger progress                    # the figures every sync recorded, open to-dos, recent notes
@@ -947,6 +948,37 @@ same invention-plus-other figures by the station each sale happened at (its sale
 order's broker fee where the order was placed), so its rows add up to the period's gross profit. Every
 report takes `--json`.
 
+**Planetary industry** is a separate operation with its own scope, `planetary`, reported beside the total
+and never inside it (`ledger pnl` prints it under the statement, with *net profit including planetary*;
+`--by` rows carry a *planetary profit* column). A colony's output never passes a wallet or a job, so the
+ledger measures it from our holdings: when any member has a colony, each full `ledger sync` (no `--char`,
+no `--no-personal`) also polls every member's and the corporation's assets — hangars, ships and customs
+offices — plus our open sell orders for every planetary commodity, and stores the totals
+(`pi_polls`/`pi_holdings`, schema v5; needs `--scopes planets,assets`). The rules:
+
+- **Output is what holdings gained.** Between two polls a type's output is its rise in holdings plus what
+  we sold minus what we bought. A fall (goods destroyed, given away, imported to a planet) is never
+  negative output, and output only counts again once the running figure is back above its previous high,
+  so nothing is counted twice. The first poll is the baseline: what was held then is pre-existing stock.
+- **A poll is dated by its oldest document's `Last-Modified`**, not by the sync: ESI serves assets up to an
+  hour old, and a sale that happened after that moment is compared to the next poll instead.
+- **A poll is all or nothing.** A document nobody may read (no consent, no Director role for the corporation
+  hangars) is left out of every poll alike; one that fails this time cancels the poll, because a hangar
+  missing from one poll would look like stock vanishing and coming back as output. When the set of
+  documents read changes, the next poll starts a new baseline.
+- **Output costs nothing** - extraction consumes no stock - and enters the pool at the first sale in its
+  interval (so that sale draws on it) or at the poll. **Customs** (export and import tax), **colony
+  construction** (command-centre upgrades and structures) and **command centres** bought on the market are
+  the colonies' costs, booked when paid and not spread over the output.
+- A planetary commodity is `planetary` once our colonies have made some of it, for sales from the first poll
+  on; sold earlier, or never made by us (recovered P1, say), it stays disposal.
+
+`ledger planetary` reports the scope: the statement for the period (`--since`, `--until`, `--by` adds a row
+per period), output and sales per product, each planet's charges (export tax, import tax, construction,
+which character paid; ESI ties a charge to a planet, and output to none), and what the newest poll found
+held, valued at CCP's average. Goods imported to a colony are not carried into what it makes, so a factory
+planet's output is costed at 0; the assumptions block says so whenever an import tax was paid.
+
 The same file is the operation's **log**. `ledger note` keeps dated notes — `update` (the default),
 `decision`, `incident`, `analysis` and `todo`, which stays open until `note done` — with a Markdown body
 from `--body`, a file or stdin, and `--at` to backdate one. Every sync also stores a **snapshot** of the
@@ -964,8 +996,9 @@ eve-skills dashboard build --out dashboard.json    # the same data once, as JSON
 
 `serve` runs a small web server (standard library only) and one refresh thread. Every `--refresh` minutes
 (default 60) it runs `ledger sync` when the last sync is that old (`--no-sync` leaves syncing to someone
-else), replays the ledger, and runs `industry status --corp` and `orders --check` for live slots, jobs and
-order standing (`--no-live` skips them; `--orders-char` limits the orders to one character). The page polls
+else), replays the ledger, and runs `industry status --corp`, `orders --check` and `colonies --detail` for
+live slots, jobs, order standing and extractor timers (`--no-live` skips them; `--orders-char` limits the
+orders to one character). The page polls
 for new data every 5 minutes and has a *Refresh now* button, accepted at most once per 5 minutes.
 
 The page shows net profit and its parts for the last 7 days, 30 days or since `--since` (default the
@@ -974,6 +1007,13 @@ and other builds) and per market station, each with a table view; industry slots
 ready to deliver and running jobs by end time; and every open order with its status in the station's book
 (cheapest, undercut, outbid), units ahead and a suggested price. The figures are `ledger pnl`'s: disposal is
 left out and the assumptions block is printed underneath.
+
+The **planetary industry** panel is `ledger planetary` for the same period: the colonies' own profit (never
+part of the net profit above) with revenue, customs, construction, tax and fees, units of output and the
+value of what the newest poll found held; planetary profit per day or week; output and sales per product;
+and every colony from `colonies --detail` with the soonest extraction to end first (*ended*, *ends soon*
+inside 12 hours, *running*), what leaves the planet, the extractors' heads and when ESI last saw it opened.
+Under it, each planet's charges and the planetary commodities held.
 
 The **stockpile** part answers two questions. *Is a line piling up?* Per finished good: units held and listed
 (live, from `ledger inventory`), units built and sold per day over the last 14 days (or since the line's
@@ -2008,7 +2048,7 @@ naming the wrong tree beats naming nothing.
 | `quotes.json` | cache | The reduction of every order book `inventory --value-at` read: `min_sell` / `max_buy` per (region, station/system filter, type) plus that response's own `Last-Modified` and `Expires`. Never the order rows. `version`-tagged, merged under `quotes.lock`; entries past their `Expires` are dropped on the next write | Non-secret (public order-book figures); deleting it only costs a refetch |
 | `{clone_grades,bloodline_races,skill_catalog,blueprint_materials,planet_industry,system_planets,market_types}.json` | data | SDE snapshot from `update-data`; overrides packaged data. `blueprint_materials.json` is the one `build-cost` reads — every blueprint's activity and material list, keyed by the product it makes; `planet_industry.json` is the one `pi` reads — recipes, structure fitting costs, command-center output per upgrade level and customs tax, all keyed by type id; `system_planets.json` is the one `system` reads — every planet in New Eden counted per solar system by planet type (68,407 planets over 8,088 systems in build 3503375), with a name for each type it met; `market_types.json` is the one `market --group` reads — every market-listed type under its group and its category (19,551 types over 814 groups and 32 categories in build 3494416) | Non-secret |
 | `blueprint_invention.json` | data | SDE invention document from `update-data`: per inventable blueprint its data cores per attempt, product and base chance, and the eight generic decryptors' modifiers. The one `ledger` costs invention with | Non-secret |
-| `ledger.sqlite3` (+ `-wal`, `-shm`) | data | The accounting ledger: industry jobs, wallet journal and transactions, market orders, blueprint sightings, reference and opening prices, a sync log, per-sync figure snapshots, the operation's notes and to-dos, and price tracking (Jita daily history, hourly book snapshots, watchlist changes). WAL mode, so reports read while a sync writes | **Private business records** (your trades and balances, no credentials). Not regenerable past ESI's 30-day wallet window — back it up like a document |
+| `ledger.sqlite3` (+ `-wal`, `-shm`) | data | The accounting ledger: industry jobs, wallet journal and transactions, market orders, blueprint sightings, reference and opening prices, a sync log, per-sync figure snapshots, the operation's notes and to-dos, price tracking (Jita daily history, hourly book snapshots, watchlist changes), and planetary holdings polls. WAL mode, so reports read while a sync writes | **Private business records** (your trades and balances, no credentials). Not regenerable past ESI's 30-day wallet window — back it up like a document |
 | Lock sentinels: `tokens.lock`, `config.lock`, `sp-history.lock` (config), `names.lock`, `types.lock`, `quotes.lock` (cache), `watch-state.lock` (state), `update.lock` (data) | beside the file they guard | Zero-length advisory locks, never read or written — `fcntl.flock` on POSIX, a byte-range lock on Windows | inert |
 
 Every durable write goes through one helper: a **unique temporary** file in the destination directory

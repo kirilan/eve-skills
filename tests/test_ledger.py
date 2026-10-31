@@ -7,6 +7,7 @@ tests run the real CLI against the fake ESI in `fake_esi`, in live ESI's own row
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -16,7 +17,7 @@ from unittest import mock
 
 from eve_skills import doctor, industry, ledger, ledger_db, ledger_sync
 
-from .fake_esi import ADA, CORP_SHARED, FakeEsiEnv
+from .fake_esi import ADA, CORP_SHARED, FakeEsiEnv, colony_row, http_date
 
 
 # -- a synthetic industry --------------------------------------------------------------------------
@@ -88,11 +89,12 @@ def copy(item_id, type_id, me, te, *, seen=stamp(20), quantity=-2):
             "te": te, "runs": 10, "first_seen": seen, "last_seen": seen}
 
 
-def facts(*, jobs=(), transactions=(), entries=(), orders=(), blueprints=(), opening=None) -> ledger.Facts:
+def facts(*, jobs=(), transactions=(), entries=(), orders=(), blueprints=(), opening=None,
+          polls=()) -> ledger.Facts:
     return ledger.Facts(jobs=list(jobs), transactions=sorted(transactions, key=lambda t: t["date"]),
                         journal=sorted(entries, key=lambda e: e["date"]), orders=list(orders),
                         blueprints=list(blueprints), opening_prices=dict(opening or {}),
-                        internal_ids={CORP, CHAR})
+                        internal_ids={CORP, CHAR}, pi_polls=list(polls))
 
 
 def replay(f: ledger.Facts, now: str = stamp(28)) -> ledger.Book:
@@ -101,6 +103,27 @@ def replay(f: ledger.Facts, now: str = stamp(28)) -> ledger.Book:
 
 def lines(book: ledger.Book, kind: str) -> list[ledger.Entry]:
     return [e for e in book.entries if e.kind == kind]
+
+
+# -- a synthetic planetary operation ---------------------------------------------------------------
+
+P2_GOOD = 704010          # a refined commodity our colonies make
+P1_OLD = 704020           # a commodity only ever held from before the colonies
+COMMAND_CENTRE = 704030
+PLANET = 40100001
+PLANETARY = ledger.PlanetaryTypes(frozenset({P2_GOOD, P1_OLD}), frozenset({COMMAND_CENTRE}))
+SOURCES = (f"char:{CHAR}:assets", f"char:{CHAR}:orders", f"corp:{CORP}:assets")
+PERSONAL = f"char:{CHAR}"
+
+
+def poll(day, holdings, *, hour=12, sources=SOURCES) -> dict:
+    """One holdings poll describing `day` at `hour` (its `as_of`)."""
+    return {"ts": stamp(day, hour), "as_of": stamp(day, hour), "sources": list(sources),
+            "holdings": dict(holdings)}
+
+
+def pi_replay(f: ledger.Facts) -> ledger.Book:
+    return ledger.replay(f, RECIPES, INVENTION, stamp(28), PLANETARY)
 
 
 # -- engine ----------------------------------------------------------------------------------------
@@ -365,6 +388,95 @@ class PnlTests(unittest.TestCase):
 
 # -- store -------------------------------------------------------------------------------------------
 
+class PlanetaryTests(unittest.TestCase):
+    def test_output_is_the_rise_in_holdings_plus_what_sold_and_that_sale_draws_on_it(self):
+        book = pi_replay(facts(transactions=[tx(3, P2_GOOD, 50, 12_000.0, buy=False, wallet=PERSONAL)],
+                               polls=[poll(1, {P2_GOOD: 100}), poll(5, {P2_GOOD: 250})]))
+        self.assertEqual([(stamp(3), P2_GOOD, 200.0)], book.colony_output)
+        (revenue,) = lines(book, "revenue")
+        self.assertEqual(ledger.SCOPE_PLANETARY, revenue.scope)
+        (cogs,) = lines(book, "cogs")
+        self.assertAlmostEqual(0.0, cogs.amount)              # extraction consumed nothing
+        self.assertAlmostEqual(0.0, cogs.opening)
+        # The 100 held at the baseline are old stock, outside the pool until something draws on them.
+        self.assertAlmostEqual(150.0, book.pools[("item", P2_GOOD)].qty)
+
+    def test_a_fall_is_never_negative_output_and_later_output_first_makes_it_good(self):
+        book = pi_replay(facts(polls=[poll(1, {P2_GOOD: 100}), poll(2, {P2_GOOD: 40}), poll(3, {P2_GOOD: 160})]))
+        self.assertEqual([(stamp(3), P2_GOOD, 60.0)], book.colony_output)
+
+    def test_a_sale_after_the_moment_a_poll_describes_waits_for_the_next_poll(self):
+        # The second poll was taken after the 18:00 sale, but its documents describe 17:00 and still hold
+        # the 100 units: counting the sale against them would invent 100 units of output.
+        book = pi_replay(facts(transactions=[tx(4, P2_GOOD, 100, 12_000.0, buy=False, hour=18)],
+                               polls=[poll(1, {P2_GOOD: 100}), poll(4, {P2_GOOD: 100}, hour=17), poll(5, {})]))
+        self.assertEqual([], book.colony_output)
+
+    def test_stock_held_at_the_first_poll_is_old_and_a_type_never_made_stays_disposal(self):
+        book = pi_replay(facts(transactions=[tx(3, P1_OLD, 400, 700.0, buy=False)], opening={P1_OLD: 650.0},
+                               polls=[poll(1, {P1_OLD: 1000}), poll(4, {P1_OLD: 600})]))
+        self.assertEqual([], book.colony_output)
+        (revenue,) = lines(book, "revenue")
+        self.assertEqual(ledger.SCOPE_DISPOSAL, revenue.scope)
+        (cogs,) = lines(book, "cogs")
+        self.assertAlmostEqual(-400 * 650.0, cogs.amount)
+
+    def test_sales_before_the_first_poll_stay_disposal_even_of_what_the_colonies_make(self):
+        book = pi_replay(facts(transactions=[tx(1, P2_GOOD, 10, 12_000.0, buy=False, hour=8),
+                                             tx(5, P2_GOOD, 10, 12_000.0, buy=False)],
+                               opening={P2_GOOD: 11_000.0}, polls=[poll(2, {}), poll(6, {P2_GOOD: 30})]))
+        self.assertEqual([ledger.SCOPE_DISPOSAL, ledger.SCOPE_PLANETARY], [e.scope for e in lines(book, "revenue")])
+        self.assertEqual([(stamp(5), P2_GOOD, 40.0)], book.colony_output)
+
+    def test_a_poll_that_read_other_documents_starts_a_new_baseline(self):
+        # A character whose hangar comes into view brings its stock with it: that is not output.
+        more = (*SOURCES, "char:91000999:assets")
+        book = pi_replay(facts(polls=[poll(1, {P2_GOOD: 10}), poll(2, {P2_GOOD: 500}, sources=more),
+                                      poll(3, {P2_GOOD: 520}, sources=more)]))
+        self.assertEqual([(stamp(3), P2_GOOD, 20.0)], book.colony_output)
+
+    def test_customs_and_construction_are_the_colonies_costs_and_stay_outside_the_total(self):
+        book = pi_replay(facts(
+            transactions=[tx(2, COMMAND_CENTRE, 1, 100_000.0, buy=True, wallet=PERSONAL),
+                          tx(4, P2_GOOD, 10, 12_000.0, buy=False, wallet=PERSONAL)],
+            entries=[journal(2, "planetary_construction", -1_000_000.0, context=PLANET, context_type="planet_id",
+                             wallet=PERSONAL),
+                     journal(3, "planetary_export_tax", -720.0, context=PLANET, context_type="planet_id",
+                             wallet=PERSONAL)],
+            polls=[poll(1, {}), poll(3, {P2_GOOD: 10})]))
+        self.assertNotIn(("item", COMMAND_CENTRE), book.pools)        # planted, not stock
+        (row,) = ledger.pnl(book)
+        planetary = row[ledger.SCOPE_PLANETARY]
+        self.assertAlmostEqual(120_000.0, planetary["revenue"])
+        self.assertAlmostEqual(-720.0, planetary["customs"])
+        self.assertAlmostEqual(-1_100_000.0, planetary["setup"])
+        self.assertAlmostEqual(120_000.0 - 720.0 - 1_100_000.0, row["planetary_profit"])
+        self.assertAlmostEqual(0.0, row["total"]["revenue"])
+        self.assertAlmostEqual(0.0, row["net_profit"])
+        self.assertAlmostEqual(row["planetary_profit"], row["net_profit_incl_planetary"])
+        report = ledger.planetary(book)
+        (planet,) = report["planets"]
+        self.assertEqual((PLANET, [CHAR], 1), (planet["planet_id"], planet["character_ids"], planet["exports"]))
+        self.assertAlmostEqual(-720.0, planet["export_tax"])
+        self.assertAlmostEqual(-1_000_000.0, planet["construction"])
+        (product,) = report["products"]
+        self.assertEqual((P2_GOOD, 10.0, 10.0, None), (product["type_id"], product["built"], product["sold"],
+                                                       product["unit_cost"]))
+        self.assertEqual(10.0, report["output_units"])
+
+    def test_an_import_is_noted_because_its_goods_are_not_carried_into_the_output(self):
+        book = pi_replay(facts(entries=[journal(2, "planetary_import_tax", -360.0, context=PLANET,
+                                                context_type="planet_id", wallet=PERSONAL)]))
+        self.assertEqual(1, book.notes["planetary_imports"])
+        self.assertAlmostEqual(-360.0, ledger.pnl(book)[0][ledger.SCOPE_PLANETARY]["customs"])
+
+    def test_without_planetary_data_commodities_trade_like_anything_else(self):
+        book = replay(facts(transactions=[tx(3, P2_GOOD, 5, 100.0, buy=False)], opening={P2_GOOD: 90.0},
+                            polls=[poll(1, {}), poll(4, {P2_GOOD: 20})]))
+        self.assertEqual([], book.colony_output)
+        self.assertEqual(ledger.SCOPE_DISPOSAL, lines(book, "revenue")[0].scope)
+
+
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eve-skills-ledger-")
@@ -387,6 +499,30 @@ class StoreTests(unittest.TestCase):
         got = ledger_db.stock_snapshots(conn)
         self.assertEqual([(stamp(1), 5), (stamp(2), 7)], [(r["ts"], r["held"]) for r in got])
         self.assertEqual([stamp(2)], [r["ts"] for r in ledger_db.stock_snapshots(conn, since=stamp(2))])
+
+    def test_a_holdings_poll_reads_back_with_absent_types_at_zero_and_a_repeat_replaces_it(self):
+        conn = self.connect()
+        with conn:
+            ledger_db.insert_pi_poll(conn, stamp(2, 13), stamp(2, 12), ["b", "a"], {P2_GOOD: (5, 3), P1_OLD: (0, 0)})
+            ledger_db.insert_pi_poll(conn, stamp(1, 13), stamp(1, 12), ["a"], {P1_OLD: (7, 0)})
+            ledger_db.insert_pi_poll(conn, stamp(2, 13), stamp(2, 12), ["a", "b"], {P2_GOOD: (6, 3)})
+        first, second = ledger_db.pi_polls(conn)
+        self.assertEqual((stamp(1, 12), {P1_OLD: 7}), (first["as_of"], first["holdings"]))
+        self.assertEqual(({P2_GOOD: 9}, {P2_GOOD: 6}, ["a", "b"]),
+                         (second["holdings"], second["held"], second["sources"]))
+
+    def test_a_version_4_ledger_gains_the_planetary_tables_and_keeps_its_rows(self):
+        conn = sqlite3.connect(self.path)
+        for script in (ledger_db._SCHEMA_V1, ledger_db._SCHEMA_V2, ledger_db._SCHEMA_V3, ledger_db._SCHEMA_V4):
+            conn.executescript(script)
+        conn.execute("PRAGMA user_version = 4")
+        conn.execute("INSERT INTO meta (key, value) VALUES ('cutover', '2026-09-04')")
+        conn.commit()
+        conn.close()
+        conn = self.connect()
+        self.assertEqual(5, conn.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual("2026-09-04", ledger_db.cutover(conn))
+        self.assertEqual([], ledger_db.pi_polls(conn))
 
     def test_writing_the_same_rows_twice_counts_them_once(self):
         conn = self.connect()
@@ -591,6 +727,56 @@ class LedgerCommandTests(unittest.TestCase):
         self.assertEqual({}, snap["jobs_running"])
         code, out, _err = self.env.run(["ledger", "progress"])
         self.assertIn("open to-dos (0)", out)
+
+    def _planetary_fixture(self, *, corp_assets_error=None):
+        """Ada with one colony, 40 units of a colony product in her hangar and 5 more listed for sale."""
+        self.env.install_colonies(ADA, [(colony_row(PLANET, "barren"), [])])
+        server = self.env.server
+        server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token, doc=[
+            {"item_id": 1, "type_id": P2_GOOD, "quantity": 40, "location_id": 1031883940398,
+             "location_flag": "Hangar", "location_type": "item", "is_singleton": False},
+            {"item_id": 2, "type_id": 34, "quantity": 1000, "location_id": 60003760,
+             "location_flag": "Hangar", "location_type": "station", "is_singleton": False}],
+            headers={"Last-Modified": http_date(-1800)})
+        corp = f"/corporations/{CORP_SHARED}/assets"
+        if corp_assets_error:
+            server.get(corp, token=ADA.token, error=corp_assets_error)
+        else:
+            server.get(corp, token=ADA.token, doc=[])
+        server.get(f"/characters/{ADA.character_id}/orders", token=ADA.token, doc=[
+            {"order_id": 77, "type_id": P2_GOOD, "is_buy_order": False, "volume_remain": 5, "volume_total": 10,
+             "price": 12_000.0, "issued": stamp(3), "location_id": 60003760, "region_id": 10000002,
+             "duration": 90, "range": "region", "min_volume": 1, "is_corporation": False}])
+        for target in ("eve_skills.ledger_sync.planetary_types", "eve_skills.cmd_ledger.planetary_reference"):
+            value = {P2_GOOD, P1_OLD} if target.endswith("types") else PLANETARY
+            patcher = mock.patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_sync_with_a_colony_polls_planetary_holdings_dated_by_its_oldest_document(self):
+        self._planetary_fixture()
+        code, out, err = self.env.run(["ledger", "sync", "--json"])
+        self.assertEqual(0, code, err)
+        report = json.loads(out)
+        self.assertEqual(1, report["colonies"])
+        self.assertEqual(45, report["planetary_poll"]["units"])
+        self.assertLess(report["planetary_poll"]["as_of"], report["synced_at"])    # the assets' Last-Modified
+        code, out, err = self.env.run(["ledger", "planetary", "--json"])
+        self.assertEqual(0, code, err)
+        doc = json.loads(out)
+        self.assertEqual(report["planetary_poll"]["as_of"], doc["tracking_since"])
+        self.assertEqual([(P2_GOOD, 45)], [(r["type_id"], r["units"]) for r in doc["held"]])
+        self.assertEqual(0, doc["output_units"])          # the first poll is the baseline
+
+    def test_a_holdings_document_that_fails_cancels_the_poll_rather_than_storing_half_of_it(self):
+        self._planetary_fixture(corp_assets_error=(404, {"error": "not found"}))
+        code, out, err = self.env.run(["ledger", "sync", "--json"])
+        self.assertEqual(0, code, err)
+        report = json.loads(out)
+        self.assertIsNone(report["planetary_poll"])
+        self.assertTrue(any(p["section"] == "planetary holdings" for p in report["problems"]))
+        with contextlib.closing(ledger_db.connect()) as conn:
+            self.assertEqual([], ledger_db.pi_polls(conn))
 
     def test_notes_are_added_listed_shown_and_to_dos_closed(self):
         run = self.env.run

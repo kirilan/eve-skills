@@ -4,7 +4,8 @@ Pure assembly - no ESI, no HTTP. `cmd_dashboard` replays the ledger, runs the li
 (`industry status --corp --json`, `orders --check --json`) and hands everything here; the page in
 `data/dashboard.html` renders whatever this returns. The figures keep the ledger's semantics: total
 profitability is invention lines plus other trade, disposal is left out, overhead belongs to no
-product or market.
+product or market. Planetary industry is its own panel with its own profit (`ledger.planetary`), next
+to the total and never inside it, plus the colonies' live extractor timers from `colonies --detail`.
 """
 
 from __future__ import annotations
@@ -74,14 +75,19 @@ def timeline(book: ledger.Book, since: str, today: date, by: str = "day") -> lis
         overhead = r["overhead_total"] if r else 0.0
         net = r["net_profit"] if r else 0.0
         running += net
+        planetary = r[ledger.SCOPE_PLANETARY] if r else {}
         out.append({"period": key, "revenue": _round(r["total"]["revenue"] if r else 0.0),
                     "gross_profit": _round(gross), "overhead": _round(overhead), "net_profit": _round(net),
-                    "cumulative_net": _round(running)})
+                    "cumulative_net": _round(running),
+                    "planetary_revenue": _round(planetary.get("revenue", 0.0)),
+                    "planetary_customs": _round(planetary.get("customs", 0.0) + planetary.get("setup", 0.0)),
+                    "planetary_profit": _round(planetary.get("gross_profit", 0.0))})
     return out
 
 
 def products(book: ledger.Book, since: str) -> list[dict]:
-    rows = [r for r in ledger.products(book, since=since) if r["scope"] != ledger.SCOPE_DISPOSAL]
+    rows = [r for r in ledger.products(book, since=since)
+            if r["scope"] not in (ledger.SCOPE_DISPOSAL, ledger.SCOPE_PLANETARY)]
     return [{"type_id": r["type_id"], "scope": r["scope"], "built": r["built"], "sold": r["sold"],
              "unit_cost": _round(r["unit_cost"]), "net_per_unit": _round(r["net_per_unit"]),
              "revenue": _round(r["revenue"]), "profit": _round(r["profit"]),
@@ -93,6 +99,53 @@ def markets(book: ledger.Book, since: str) -> list[dict]:
              "revenue": _round(r["revenue"]), "taxes_and_fees": _round(r["sales_tax"] + r["broker_fees"]),
              "profit": _round(r["profit"]), "margin_pct": _round(r["margin_pct"]),
              "last_sale": r["last_sale"]} for r in ledger.markets(book, since=since)]
+
+
+def planetary_range(doc: Mapping | None) -> dict:
+    """One period of the planetary panel, from `cmd_ledger.planetary_document` for that period."""
+    if not doc:
+        return {"revenue": 0.0, "taxes_and_fees": 0.0, "customs": 0.0, "setup": 0.0, "profit": 0.0,
+                "output_units": 0.0, "sold_units": 0.0, "products": [], "planets": []}
+    lines = doc["lines"]
+    prods = [{"type_id": r["type_id"], "name": r.get("type_name") or f"type {r['type_id']}", "output": r["built"],
+              "sold": r["sold"], "net_per_unit": _round(r["net_per_unit"]), "revenue": _round(r["revenue"]),
+              "profit": _round(r["profit"])} for r in doc["products"]]
+    planets = [{"planet_id": r["planet_id"], "name": r.get("planet_name") or f"planet {r['planet_id']}",
+                "system": r.get("system_name"), "characters": r.get("characters") or [],
+                "exports": r["exports"], "export_tax": _round(r["export_tax"]), "import_tax": _round(r["import_tax"]),
+                "construction": _round(r["construction"]), "last": r["last"]} for r in doc["planets"]]
+    return {"revenue": _round(lines["revenue"]), "taxes_and_fees": _round(lines["sales_tax"] + lines["broker_fees"]),
+            "customs": _round(lines["customs"]), "setup": _round(lines["setup"]), "cogs": _round(lines["cogs"]),
+            "profit": _round(lines["gross_profit"]), "output_units": doc["output_units"],
+            "sold_units": sum(r["sold"] for r in doc["products"]), "products": prods, "planets": planets}
+
+
+def colonies_section(doc: Mapping | None, error: str | None = None,
+                     planet_names: Mapping[int, str] | None = None) -> dict:
+    """Every colony with its extractors' end times, from `colonies --detail --json`; soonest first."""
+    if doc is None:
+        return {"error": error or "no colony report", "colonies": []}
+    names = planet_names or {}
+    rows, warnings = [], list(doc.get("warnings") or []) + list(doc.get("hints") or [])
+    for character in doc.get("characters") or []:
+        for c in character.get("colonies") or []:
+            extractors = [{"product": x.get("product_name") or (f"type {x['product_type_id']}"
+                                                                if x.get("product_type_id") else "–"),
+                           "heads": x.get("heads"), "expiry": x.get("expiry_time"), "expired": bool(x.get("expired"))}
+                          for x in c.get("extractors") or []]
+            # What leaves the colony: everything its facilities make that none of them consumes.
+            schematics = [f.get("schematic") or {} for f in c.get("facilities") or []]
+            used = {i.get("type_id") for sc in schematics for i in sc.get("inputs") or []}
+            makes = sorted({o.get("name") or f"type {o.get('type_id')}" for sc in schematics
+                            for o in sc.get("outputs") or [] if o.get("type_id") not in used})
+            ends = sorted(x["expiry"] for x in extractors if x["expiry"])
+            rows.append({"character": c.get("character_name"), "system": c.get("system_name"),
+                         "planet_id": c.get("planet_id"), "planet": names.get(c.get("planet_id")),
+                         "type": c.get("planet_type_name"), "ccu": c.get("upgrade_level"),
+                         "last_update": c.get("last_update"), "stale": bool(c.get("stale")),
+                         "extractors": extractors, "makes": makes, "next_expiry": ends[0] if ends else None})
+    rows.sort(key=lambda r: (r["next_expiry"] is None, r["next_expiry"] or "", r["character"] or ""))
+    return {"error": error, "as_of": doc.get("generated"), "warnings": warnings, "colonies": rows}
 
 
 def jobs_section(status: Mapping | None, error: str | None = None) -> dict:
@@ -144,13 +197,19 @@ def document(book: ledger.Book, header: Mapping, *, since: str, now: str, today:
              names: Callable[[Iterable[int]], Mapping[int, str]],
              status: Mapping | None = None, status_error: str | None = None,
              orders: Mapping | None = None, orders_error: str | None = None,
-             stock: Mapping | None = None, refresh_minutes: int | None = None) -> dict:
+             stock: Mapping | None = None, refresh_minutes: int | None = None,
+             planetary: Mapping[str, Mapping] | None = None, colonies: Mapping | None = None,
+             colonies_error: str | None = None, planet_names: Mapping[int, str] | None = None) -> dict:
+    """`planetary` is `cmd_ledger.planetary_document` per range key (each from that range's start)."""
     starts = range_starts(today, since)
+    planetary = planetary or {}
     ranges = {}
     for key, label, _days in RANGES:
         start = starts[key]
         ranges[key] = {"label": label, "since": start, "summary": summary(book, start),
-                       "products": products(book, start), "markets": markets(book, start)}
+                       "products": products(book, start), "markets": markets(book, start),
+                       "planetary": planetary_range(planetary.get(key))}
+    newest = planetary.get("all") or next(iter(planetary.values()), None) or {}
     wanted = {r["type_id"] for rng in ranges.values() for r in rng["products"]}
     wanted |= {r["location_id"] for rng in ranges.values() for r in rng["markets"] if r["location_id"] is not None}
     stock = dict(stock or {"error": "no stock analysis", "goods": [], "materials": []})
@@ -182,4 +241,12 @@ def document(book: ledger.Book, header: Mapping, *, since: str, now: str, today:
         "weeks": timeline(book, since, today, "week"),
         "jobs": jobs_section(status, status_error),
         "orders": orders_section(orders, orders_error),
+        "planetary": {
+            "tracking_since": book.planetary_since, "held_at": newest.get("held_at"),
+            "held_value": _round(newest.get("held_value")),
+            "held": [{"type_id": r["type_id"], "name": r.get("type_name") or f"type {r['type_id']}",
+                      "units": r["units"], "unit_price": _round(r["unit_price"]), "value": _round(r["value"])}
+                     for r in newest.get("held") or []],
+            "colonies": colonies_section(colonies, colonies_error, planet_names),
+        },
     }

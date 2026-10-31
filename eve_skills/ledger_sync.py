@@ -8,7 +8,9 @@ Sources, per player corporation that at least one stored character belongs to:
 * blueprints (an invented copy's ME/TE is the only record of which decryptor made it)
 
 and, for each stored character in such a corporation, the same four from their personal side - so a
-sale that went through a personal wallet by accident is still booked. Personal transactions that ESI
+sale that went through a personal wallet by accident is still booked. When any member has a planetary
+colony, a full sync also polls what the business holds of every planetary commodity - every member's
+assets, the corporation's, and our open sell orders - which is how the ledger sees colony output at all. Personal transactions that ESI
 flags `is_personal: false` were made on the corporation's behalf and are already in its wallet;
 they are dropped here rather than de-duplicated later.
 
@@ -24,7 +26,7 @@ from __future__ import annotations
 import sqlite3
 import statistics
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import alphadata, esi as esi_mod, exports, industry, ledger, ledger_db, market, orders, sso
 
@@ -51,6 +53,9 @@ SCOPE_CORP_WALLET = "esi-wallet.read_corporation_wallets.v1"
 SCOPE_CHAR_WALLET = "esi-wallet.read_character_wallet.v1"
 SCOPE_CORP_BLUEPRINTS = "esi-corporations.read_blueprints.v1"
 SCOPE_CHAR_BLUEPRINTS = "esi-characters.read_blueprints.v1"
+SCOPE_CHAR_ASSETS = "esi-assets.read_assets.v1"
+SCOPE_CORP_ASSETS = "esi-assets.read_corporation_assets.v1"
+SCOPE_PLANETS = "esi-planets.manage_planets.v1"
 
 
 @dataclass
@@ -73,11 +78,14 @@ class SyncReport:
     prices: int = 0
     opening_prices: int = 0
     cutover: str | None = None
+    colonies: int = 0
+    pi_poll: dict | None = None     # {"as_of", "types", "units"} when a holdings poll was stored
 
     def to_json(self) -> dict:
         return {"synced_at": self.synced_at, "corporations": self.corporations,
                 "characters": self.characters, "prices_stored": self.prices,
                 "opening_prices_stored": self.opening_prices, "cutover": self.cutover,
+                "colonies": self.colonies, "planetary_poll": self.pi_poll,
                 "sources": [vars(s) for s in self.sources], "problems": self.problems}
 
 
@@ -111,25 +119,30 @@ class _Reader:
         self.candidates = candidates
 
     def read(self, section: str, scope: str, path: str, *, paginated: bool):
+        rows, _meta, tok = self.read_meta(section, scope, path, paginated=paginated)
+        return rows, tok
+
+    def read_meta(self, section: str, scope: str, path: str, *, paginated: bool):
+        """`read` plus the document's Meta: (rows, meta, token), all None when nobody could read it."""
         refused = []
         for tok in self.candidates:
             if scope not in set(tok.get("scopes") or []):
                 continue
             try:
                 fetch = self.client.get_all_meta if paginated else self.client.get_meta
-                rows, _meta = fetch(path, token=tok["access_token"])
-                return rows, tok
+                rows, meta = fetch(path, token=tok["access_token"])
+                return rows, meta, tok
             except esi_mod.AuthError:
                 refused.append(int(tok["character_id"]))
             except esi_mod.EsiError as err:
                 self.report.problems.append({"owner": self.owner, "section": section, "code": "esi_error",
                                              "message": str(err)})
-                return None, None
+                return None, None, None
         self.report.problems.append({"owner": self.owner, "section": section,
                                      "code": "esi_refused" if refused else "missing_consent",
                                      "feature": _feature(scope), "scope": scope,
                                      "refused_character_ids": refused})
-        return None, None
+        return None, None, None
 
     def transactions(self, section: str, scope: str, path: str, conn: sqlite3.Connection, wallet: str):
         """Walk `from_id` back until a page is short, empty, or reaches rows the ledger already holds."""
@@ -239,7 +252,117 @@ def relevant_types(conn: sqlite3.Connection) -> set[int]:
         if row is not None:
             types |= {int(t) for t in row["m"]}
     types |= {int(t) for t in invention["decryptors"]}
+    # Planetary commodities we have held: colony output reaches the ledger through these polls only, and
+    # a held type needs a price like any other.
+    types |= {r[0] for r in conn.execute("SELECT DISTINCT type_id FROM pi_holdings")}
     return types
+
+
+def planetary_types() -> set[int]:
+    """Every planetary commodity in the local SDE data (raw materials to tier 4); empty without it."""
+    try:
+        document = alphadata.planet_industry()
+    except (FileNotFoundError, ValueError):
+        return set()
+    return {int(t) for t in document.get("commodities", {})}
+
+
+class _Skip(Exception):
+    """Nobody can read this document - no consent, or ESI refused every candidate: leave it out."""
+
+
+def _read_first(client: esi_mod.Esi, path: str, scope: str, candidates, *, paginated: bool):
+    """(rows, meta) with the first candidate ESI accepts; `_Skip` when none has or keeps the consent.
+    Any other ESI failure propagates: that document exists and could not be read this time."""
+    for tok in candidates:
+        if scope not in set(tok.get("scopes") or []):
+            continue
+        try:
+            fetch = client.get_all_meta if paginated else client.get_meta
+            return fetch(path, token=tok["access_token"])
+        except esi_mod.AuthError:
+            continue
+    raise _Skip(path)
+
+
+def _poll_planetary(conn: sqlite3.Connection, client: esi_mod.Esi, report: SyncReport,
+                    members: dict[int, list[dict]]) -> None:
+    """Store what the business holds of every planetary commodity, when anybody has a colony.
+
+    Colony output never passes a wallet or a job, so a rise in these holdings - net of what was bought
+    and sold in between - is the only record of it (`ledger.colony_output`). What is read: every
+    member's assets and open orders and the corporation's, each by whoever ESI lets read it. A document
+    nobody may read is left out of every poll alike (the poll's `sources` say which were in, and a change
+    there starts a new baseline); one that exists but fails now cancels the poll, because a hangar
+    missing from one poll would read as its stock vanishing and then coming back as new output. The
+    poll is dated by the oldest Last-Modified among its documents: ESI serves assets up to an hour old,
+    and trades are compared to the moment the poll describes, not to when it was taken."""
+    for tok in (t for toks in members.values() for t in toks):
+        if SCOPE_PLANETS not in set(tok.get("scopes") or []):
+            continue
+        try:
+            rows = client.get(f"/characters/{tok['character_id']}/planets", token=tok["access_token"]) or []
+        except esi_mod.EsiError as err:
+            report.problems.append({"owner": f"char:{tok['character_id']}", "section": "colonies",
+                                    "code": "esi_error", "message": str(err)})
+            continue
+        report.colonies += len(rows) if isinstance(rows, list) else 0
+    if not report.colonies:
+        return
+    types = planetary_types()
+    if not types:
+        report.problems.append({"owner": "planetary", "section": "holdings", "code": "esi_error",
+                                "message": "no local planetary data, holdings not polled - run: "
+                                           "eve-skills update-data"})
+        return
+    held: dict[int, int] = {}
+    listed: dict[int, int] = {}
+    stamps: list[float] = []
+    sources: list[str] = []
+    orders_seen: set[int] = set()
+    documents = []
+    for corp_id, toks in members.items():
+        documents.append((f"corp:{corp_id}:assets", f"/corporations/{corp_id}/assets", SCOPE_CORP_ASSETS, toks, True))
+        documents.append((f"corp:{corp_id}:orders", f"/corporations/{corp_id}/orders", orders.CORPORATION_SCOPE,
+                          toks, True))
+        for tok in toks:
+            cid = int(tok["character_id"])
+            documents.append((f"char:{cid}:assets", f"/characters/{cid}/assets", SCOPE_CHAR_ASSETS, [tok], True))
+            documents.append((f"char:{cid}:orders", f"/characters/{cid}/orders", orders.CHARACTER_SCOPE, [tok], False))
+    for source, path, scope, candidates, paginated in documents:
+        try:
+            rows, meta = _read_first(client, path, scope, candidates, paginated=paginated)
+        except _Skip:
+            continue
+        except esi_mod.EsiError as err:
+            report.problems.append({"owner": source.rsplit(":", 1)[0], "section": "planetary holdings",
+                                    "code": "esi_error",
+                                    "message": f"{err}; holdings not polled this sync, since a partial poll "
+                                               f"would miscount colony output"})
+            return
+        for row in rows or []:
+            type_id = int(row.get("type_id") or 0)
+            if type_id not in types:
+                continue
+            if source.endswith(":orders"):
+                if row.get("is_buy_order") or row.get("state", "open") != "open":
+                    continue
+                if int(row.get("order_id") or 0) in orders_seen:
+                    continue
+                orders_seen.add(int(row.get("order_id") or 0))
+                listed[type_id] = listed.get(type_id, 0) + int(row.get("volume_remain") or 0)
+            elif not row.get("is_blueprint_copy"):
+                held[type_id] = held.get(type_id, 0) + int(row.get("quantity") or 0)
+        if meta is not None and meta.last_modified is not None:
+            stamps.append(meta.last_modified)
+        sources.append(source)
+    as_of = iso(datetime.fromtimestamp(min(stamps), timezone.utc)) if stamps else report.synced_at
+    as_of = min(as_of, report.synced_at)
+    rows = {t: (held.get(t, 0), listed.get(t, 0)) for t in set(held) | set(listed)}
+    with conn:
+        stored = ledger_db.insert_pi_poll(conn, report.synced_at, as_of, sources, rows)
+    report.pi_poll = {"as_of": as_of, "types": stored, "units": sum(h + l for h, l in rows.values()),
+                      "sources": len(sources)}
 
 
 def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, character: str | None = None,
@@ -285,6 +408,9 @@ def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, character: str | None
                 report.characters.append(cid)
                 _sync_owner(conn, client, report, owner=f"char:{cid}", base=f"/characters/{cid}",
                             candidates=[tok], corporation=False)
+    if personal and wanted is None:
+        # Only a full sync sees every hangar a colony's output can be in.
+        _poll_planetary(conn, client, report, members)
 
     try:
         table = market.price_table(client)
@@ -327,8 +453,12 @@ def _record_snapshot(conn: sqlite3.Connection, report: SyncReport) -> None:
         invention = alphadata.blueprint_invention()
     except (FileNotFoundError, ValueError):
         invention = {"blueprints": {}, "decryptors": {}}
+    try:
+        planetary = ledger.planetary_types(alphadata.planet_industry())
+    except (FileNotFoundError, ValueError):
+        planetary = ledger.PlanetaryTypes()
     facts = ledger.load(conn)
-    book = ledger.replay(facts, recipes, invention, report.synced_at)
+    book = ledger.replay(facts, recipes, invention, report.synced_at, planetary)
     with conn:
         ledger_db.store_snapshot(conn, report.synced_at,
                                  ledger.snapshot(book, facts, report.synced_at, since=report.cutover))

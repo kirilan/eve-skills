@@ -42,6 +42,10 @@ NOTES = {
     "broker_fees_matched_by_rate": "{n:,} broker fees were matched to a later-modified order by their "
                                    "issuer's fee rate",
     "invention_without_outcome": "{n:,} delivered invention jobs carry no outcome yet",
+    "planetary_imports": "{n:,} planetary import tax charges: goods imported to a colony are not carried into "
+                         "what it makes, so that output is costed at 0 and its profit is overstated",
+    "planetary_goods_consumed": "{n:,} units of planetary commodities were used by our jobs; colony output is "
+                                "read off holdings and may be understated by up to that much",
 }
 
 
@@ -78,6 +82,14 @@ def _reference_data():
     return recipes, invention
 
 
+def planetary_reference() -> ledger.PlanetaryTypes:
+    """The planetary commodity and command-centre types, empty without local SDE data."""
+    try:
+        return ledger.planetary_types(alphadata.planet_industry())
+    except (FileNotFoundError, ValueError):
+        return ledger.PlanetaryTypes()
+
+
 def _names(client: esi_mod.Esi | None, ids) -> dict[int, str]:
     wanted = {int(i) for i in ids if i is not None}
     if not wanted or client is None:
@@ -96,12 +108,19 @@ def _state(conn):
     """Replay everything: (book, header, recipes, invention). The header - cutover, last sync,
     warnings and the assumptions the replay made - is what every report opens with."""
     recipes, invention = _reference_data()
+    planetary = planetary_reference()
     last = ledger_db.last_sync(conn)
     now = last or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    book = ledger.replay(ledger.load(conn), recipes, invention, now)
+    facts = ledger.load(conn)
+    book = ledger.replay(facts, recipes, invention, now, planetary)
     header = {"cutover": ledger_db.cutover(conn), "last_sync": last, "warnings": [],
               "notes": [NOTES.get(key, key + ": {n}").format(n=n) for key, n in sorted(book.notes.items())],
               "note_counts": dict(book.notes)}
+    if facts.pi_polls:
+        header["notes"].append(
+            f"colony output is read off {len(facts.pi_polls):,} planetary holdings polls since "
+            f"{book.planetary_since}: what was held at the first is pre-existing stock, and output carries no "
+            f"cost - customs and colony construction are booked to the planetary line when paid")
     if not recipes:
         header["warnings"].append("blueprint recipes unavailable - run: eve-skills update-data")
     if not invention["blueprints"]:
@@ -157,6 +176,10 @@ def cmd_sync(args) -> int:
             lines.append(f"({quiet} documents were empty)")
         lines.append(f"new rows: {sum(s.new for s in report.sources):,}; reference prices stored: {report.prices:,}; "
                      f"opening prices fixed: {report.opening_prices:,} (cutover {report.cutover or '?'})")
+        if report.pi_poll:
+            lines.append(f"planetary holdings polled across {report.colonies:,} colonies: "
+                         f"{report.pi_poll['units']:,} units of {report.pi_poll['types']:,} commodities, "
+                         f"as of {report.pi_poll['as_of']}")
         lines += [f"warning: {ledger_sync.problem_text(p)}" for p in report.problems]
         print("\n".join(lines))
         return 0
@@ -169,6 +192,10 @@ def cmd_sync(args) -> int:
 _STATEMENT = (("revenue", "revenue"), ("sales tax", "sales_tax"), ("broker fees", "broker_fees"),
               ("cost of goods sold", "cogs"), ("  of which opening stock at market", "cogs_opening_stock"),
               ("gross profit", "gross_profit"))
+_PLANETARY_STATEMENT = (("revenue", "revenue"), ("sales tax", "sales_tax"), ("broker fees", "broker_fees"),
+                        ("cost of goods sold", "cogs"), ("  of which opening stock at market", "cogs_opening_stock"),
+                        ("customs (export and import tax)", "customs"),
+                        ("colony construction and command centres", "setup"), ("planetary profit", "gross_profit"))
 
 
 def cmd_pnl(args) -> int:
@@ -196,6 +223,13 @@ def cmd_pnl(args) -> int:
             lines.append(render.table(["", "invention lines", "other", "total"], table))
             if row["revenue_personal_wallets"]:
                 lines.append(f"revenue booked through personal wallets: {_compact(row['revenue_personal_wallets'])}")
+            planetary = row[ledger.SCOPE_PLANETARY]
+            if any(planetary[key] for key in ("revenue", "customs", "setup")):
+                lines.append("")
+                lines.append("planetary industry (the colonies; a separate operation, outside the total above):")
+                ptable = [[label, _compact(planetary[key])] for label, key in _PLANETARY_STATEMENT]
+                ptable.append(["net profit including planetary", _compact(row["net_profit_incl_planetary"])])
+                lines.append(render.table(["", "planetary"], ptable))
             disposal = row[ledger.SCOPE_DISPOSAL]
             if disposal["revenue"] or disposal["cogs"]:
                 lines.append("")
@@ -207,11 +241,12 @@ def cmd_pnl(args) -> int:
             table = [[r["period"], _compact(r[ledger.SCOPE_INVENTION]["revenue"]),
                       _compact(r[ledger.SCOPE_INVENTION]["gross_profit"]), _compact(r["total"]["revenue"]),
                       _compact(r["total"]["gross_profit"]), _compact(r["overhead_total"]),
-                      _compact(r["net_profit"]), _compact(r[ledger.SCOPE_DISPOSAL]["gross_profit"])]
+                      _compact(r["net_profit"]), _compact(r["planetary_profit"]),
+                      _compact(r[ledger.SCOPE_DISPOSAL]["gross_profit"])]
                      for r in rows]
             lines.append(render.table(["period", "invention revenue", "invention gross", "total revenue",
-                                       "total gross", "overhead", "net profit", "disposal gross (excluded)"],
-                                      table))
+                                       "total gross", "overhead", "net profit", "planetary profit",
+                                       "disposal gross (excluded)"], table))
         _print_notes(lines, header)
         print("\n".join(lines))
         return 0
@@ -236,7 +271,8 @@ def cmd_products(args) -> int:
         lines = _print_header("ledger products", header)
         table = [[_name(names, r["type_id"]),
                   "invention" if r["scope"] == ledger.SCOPE_INVENTION
-                  else "disposal" if r["scope"] == ledger.SCOPE_DISPOSAL else "other",
+                  else "disposal" if r["scope"] == ledger.SCOPE_DISPOSAL
+                  else "planetary" if r["scope"] == ledger.SCOPE_PLANETARY else "other",
                   f"{r['built']:,.0f}", _compact(r["unit_cost"]), f"{r['sold']:,.0f}", _compact(r["net_per_unit"]),
                   _compact(r["revenue"]), _compact(r["profit"]),
                   "-" if r["margin_pct"] is None else f"{r['margin_pct']:.0f}%"]
@@ -275,6 +311,115 @@ def cmd_markets(args) -> int:
                                   table) if table else "nothing sold in that period")
         lines.append("invention lines and other trade, as in the pnl total; a sell order's broker fee is booked "
                      "where the order was placed")
+        _print_notes(lines, header)
+        print("\n".join(lines))
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# planetary
+# ---------------------------------------------------------------------------
+
+def planet_names(client: esi_mod.Esi | None, planet_ids) -> dict[int, dict]:
+    """planet id -> {name, system_id}, from ESI's public planet document; what fails stays unnamed."""
+    out: dict[int, dict] = {}
+    for planet_id in sorted({int(p) for p in planet_ids if p is not None}):
+        if client is None:
+            break
+        try:
+            doc = client.get(f"/universe/planets/{planet_id}") or {}
+        except esi_mod.EsiError:
+            continue
+        out[planet_id] = {"name": doc.get("name"), "system_id": doc.get("system_id"), "type_id": doc.get("type_id")}
+    return out
+
+
+def latest_prices(conn: sqlite3.Connection, type_ids) -> dict[int, float]:
+    """The newest stored CCP average per type - what a held planetary commodity is valued at offline."""
+    out: dict[int, float] = {}
+    for type_id in {int(t) for t in type_ids}:
+        row = conn.execute("SELECT average_price FROM prices WHERE type_id = ? AND average_price IS NOT NULL "
+                           "ORDER BY day DESC LIMIT 1", (type_id,)).fetchone()
+        if row is not None:
+            out[type_id] = float(row[0])
+    return out
+
+
+def planetary_document(conn: sqlite3.Connection, book: ledger.Book, client: esi_mod.Esi | None,
+                       since: str | None, until: str | None = None) -> dict:
+    """`ledger.planetary` with names attached and the newest holdings valued at the CCP average."""
+    doc = ledger.planetary(book, since=since, until=until)
+    places = planet_names(client, [r["planet_id"] for r in doc["planets"]])
+    prices = latest_prices(conn, doc["held"])
+    ids = ({r["type_id"] for r in doc["products"]} | set(doc["held"])
+           | {c for r in doc["planets"] for c in r["character_ids"]}
+           | {p["system_id"] for p in places.values() if p.get("system_id")})
+    names = _names(client, ids)
+    for r in doc["planets"]:
+        place = places.get(r["planet_id"], {})
+        r["planet_name"] = place.get("name")
+        r["system_name"] = names.get(place.get("system_id")) if place.get("system_id") else None
+        r["characters"] = [names.get(c, str(c)) for c in r["character_ids"]]
+    for r in doc["products"]:
+        r["type_name"] = names.get(r["type_id"])
+    doc["held"] = sorted(({"type_id": t, "type_name": names.get(t), "units": q, "unit_price": prices.get(t),
+                           "value": prices[t] * q if t in prices else None}
+                          for t, q in doc["held"].items() if q), key=lambda r: -(r["value"] or 0))
+    doc["held_value"] = sum(r["value"] or 0 for r in doc["held"])
+    return doc
+
+
+def cmd_planetary(args) -> int:
+    with contextlib.closing(_open()) as conn:
+        book, header, _recipes, _inv = _state(conn)
+        client = _client()
+        doc = planetary_document(conn, book, client, args.since, args.until)
+        periods = [{"period": r["period"], "from": r["from"], "to": r["to"],
+                    **r[ledger.SCOPE_PLANETARY]} for r in ledger.pnl(book, since=args.since, until=args.until,
+                                                                         by=args.by)] if args.by != "total" else []
+        if args.json:
+            print(json.dumps({**header, "since": args.since, "until": args.until, "by": args.by, **doc,
+                              "periods": periods}, indent=2))
+            return 0
+        lines = _print_header("ledger planetary", header)
+        if doc["tracking_since"] is None:
+            lines.append("no planetary holdings poll yet: colony output is measured from the first full "
+                         "`ledger sync` after a colony exists (needs login --scopes planets,assets)")
+        else:
+            lines.append(f"colony output measured since {doc['tracking_since']}; newest poll {doc['held_at']}")
+        lines.append("")
+        lines.append(render.table(["", "planetary"], [[label, _compact(doc["lines"][key])]
+                                                       for label, key in _PLANETARY_STATEMENT]))
+        if periods:
+            lines.append("")
+            lines.append(render.table(["period", "revenue", "tax + fees", "customs", "construction", "profit"], [
+                [r["period"], _compact(r["revenue"]), _compact(r["sales_tax"] + r["broker_fees"]),
+                 _compact(r["customs"]), _compact(r["setup"]), _compact(r["gross_profit"])] for r in periods]))
+        if doc["products"]:
+            lines.append("")
+            lines.append("products (colony output and its sales):")
+            lines.append(render.table(["product", "output", "sold", "net/unit", "revenue", "profit"], [
+                [r["type_name"] or f"type {r['type_id']}", f"{r['built']:,.0f}", f"{r['sold']:,.0f}",
+                 _compact(r["net_per_unit"]), _compact(r["revenue"]), _compact(r["profit"])]
+                for r in doc["products"]]))
+        if doc["planets"]:
+            lines.append("")
+            lines.append("planets (what each one's charges were):")
+            lines.append(render.table(["planet", "character", "exports", "export tax", "import tax",
+                                       "construction", "last charge"], [
+                [r["planet_name"] or f"planet {r['planet_id']}", ", ".join(r["characters"]) or "-",
+                 str(r["exports"]), _compact(r["export_tax"]), _compact(r["import_tax"]),
+                 _compact(r["construction"]), r["last"][:16].replace("T", " ")] for r in doc["planets"]]))
+        if doc["held"]:
+            lines.append("")
+            lines.append(f"held at the newest poll (hangars, customs offices, sell orders): "
+                         f"{_compact(doc['held_value'])} at the CCP average")
+            shown = doc["held"] if args.all else doc["held"][:args.limit]
+            lines.append(render.table(["commodity", "units", "unit price", "value"], [
+                [r["type_name"] or f"type {r['type_id']}", f"{r['units']:,}", _compact(r["unit_price"]),
+                 _compact(r["value"])] for r in shown]))
+            if len(shown) < len(doc["held"]):
+                lines.append(f"  ... {len(doc['held']) - len(shown)} more (--all shows every row)")
         _print_notes(lines, header)
         print("\n".join(lines))
         return 0
@@ -585,10 +730,11 @@ def cmd_progress(args) -> int:
 
 def cmd_ledger(args) -> int:
     handler = {"sync": cmd_sync, "pnl": cmd_pnl, "products": cmd_products, "markets": cmd_markets,
-               "invention": cmd_invention,
+               "invention": cmd_invention, "planetary": cmd_planetary,
                "inventory": cmd_inventory, "note": cmd_note, "progress": cmd_progress}.get(args.ledger_action)
     if handler is None:
-        print("usage: eve-skills ledger {sync,pnl,products,markets,invention,inventory,note,progress} [--help]",
+        print("usage: eve-skills ledger {sync,pnl,products,markets,invention,planetary,inventory,note,progress} "
+              "[--help]",
               file=sys.stderr)
         return 2
     return handler(args)

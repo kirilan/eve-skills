@@ -2,7 +2,8 @@
 
 `serve` runs a small HTTP server (standard library only) that rebuilds its document every
 `--refresh` minutes: a ledger sync when the last one is that old, a replay of the ledger, and the
-live `industry status --corp` and `orders --check` reports. The page polls the document and redraws.
+live `industry status --corp`, `orders --check` and `colonies --detail` reports. The page polls the
+document and redraws.
 `build` writes one document as JSON and exits - the same data, for a script or a cron job.
 
 The server is read-only: it answers GET for the page and the document, and POST /api/refresh only
@@ -95,20 +96,28 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
     client = cmd_ledger._client()
     with contextlib.closing(cmd_ledger._open()) as conn:
         book, header, _recipes, _invention = cmd_ledger._state(conn)
-    start = since or header["cutover"] or now.date().isoformat()
-    status = orders = inventory = None
-    status_error = orders_error = inventory_error = None
+        start = since or header["cutover"] or now.date().isoformat()
+        # The planetary panel counts from the first planetary charge or poll, never from before `start`.
+        planetary = {key: cmd_ledger.planetary_document(conn, book, client if live else None, day)
+                     for key, day in dashboard.range_starts(now.date(), start).items()}
+    status = orders = inventory = colonies = None
+    status_error = orders_error = inventory_error = colonies_error = None
     if live:
         orders_args = ["orders", "--check"] + (["--char", orders_char] if orders_char else [])
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             jobs = {key: pool.submit(_live, *cmd) for key, cmd in (
                 ("status", ("industry", "status", "--corp")), ("orders", orders_args),
-                ("inventory", ("ledger", "inventory")))}
+                ("inventory", ("ledger", "inventory")), ("colonies", ("colonies", "--detail")))}
         status, status_error = jobs["status"].result()
         orders, orders_error = jobs["orders"].result()
         inventory, inventory_error = jobs["inventory"].result()
+        colonies, colonies_error = jobs["colonies"].result()
     else:
-        status_error = orders_error = inventory_error = "live reports off (--no-live)"
+        status_error = orders_error = inventory_error = colonies_error = "live reports off (--no-live)"
+    colony_planets = [c.get("planet_id") for ch in (colonies or {}).get("characters") or []
+                      for c in ch.get("colonies") or []]
+    planet_names = {pid: place.get("name") for pid, place in
+                    cmd_ledger.planet_names(client if live else None, colony_planets).items() if place.get("name")}
     items = (inventory or {}).get("items") or []
     with contextlib.closing(ledger_db.connect()) as conn:
         if record and items:
@@ -125,7 +134,8 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
     return dashboard.document(book, header, since=start, now=_iso(now), today=now.date(),
                               names=lambda ids: cmd_ledger._names(client, ids),
                               status=status, status_error=status_error, orders=orders, orders_error=orders_error,
-                              stock=stock, refresh_minutes=refresh_minutes)
+                              stock=stock, refresh_minutes=refresh_minutes, planetary=planetary,
+                              colonies=colonies, colonies_error=colonies_error, planet_names=planet_names)
 
 
 def _page() -> bytes:
@@ -182,6 +192,8 @@ class _State:
             for part in ("jobs", "orders", "stock"):
                 if doc[part].get("error"):
                     _log(f"{part}: {doc[part]['error']}")
+            if doc["planetary"]["colonies"].get("error"):
+                _log(f"colonies: {doc['planetary']['colonies']['error']}")
             _log(f"document rebuilt in {time.monotonic() - started:.0f} s")
         except (RuntimeError, OSError, ValueError, sqlite3.Error, esi_mod.EsiError) as err:
             error = str(err)

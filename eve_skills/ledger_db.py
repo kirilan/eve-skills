@@ -30,7 +30,7 @@ from . import paths
 FILE_NAME = "ledger.sqlite3"
 
 # Bumped with every schema change; `_migrate` walks an older file forward one step at a time.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ESI serves this many days of wallet journal and transactions; a row older than that which no sync
 # stored is gone for good. Reports and `doctor` warn once the last sync is STALE_SYNC_DAYS old, which
@@ -265,6 +265,29 @@ CREATE TABLE stock_snapshots (
 CREATE INDEX stock_snapshots_type ON stock_snapshots (type_id, ts);
 """
 
+# Version 5: planetary industry. A colony's output never passes through a wallet or a job, so the only
+# record of it is our holdings of planetary commodities rising: each sync that finds a colony reads every
+# member's and the corporation's assets plus our open sell orders and stores one poll - only when every
+# one of those documents answered, since a poll missing a character would read as that character's stock
+# vanishing and coming back. `as_of` is the oldest Last-Modified among the documents read: the moment
+# the poll actually describes, which is what trades are compared against (ESI caches assets for an hour).
+# A type absent from a poll was held at zero.
+_SCHEMA_V5 = """
+CREATE TABLE pi_polls (
+    ts      TEXT PRIMARY KEY,
+    as_of   TEXT NOT NULL,
+    sources TEXT NOT NULL
+);
+
+CREATE TABLE pi_holdings (
+    ts      TEXT NOT NULL,
+    type_id INTEGER NOT NULL,
+    held    INTEGER NOT NULL,
+    listed  INTEGER NOT NULL,
+    PRIMARY KEY (ts, type_id)
+);
+"""
+
 # What a note can be. A to-do is the only kind with a status: open until `done` closes it.
 NOTE_KINDS = ("update", "decision", "todo", "incident", "analysis")
 
@@ -324,6 +347,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(_SCHEMA_V4)
             conn.execute("PRAGMA user_version = 4")
+    if version < 5:
+        with conn:
+            conn.executescript(_SCHEMA_V5)
+            conn.execute("PRAGMA user_version = 5")
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -650,3 +677,30 @@ def set_watchlist(conn: sqlite3.Connection, type_id: int, mode: str | None, chan
     conn.execute("INSERT INTO watchlist (type_id, mode, changed) VALUES (?, ?, ?) "
                  "ON CONFLICT (type_id) DO UPDATE SET mode = excluded.mode, changed = excluded.changed",
                  (type_id, mode, changed))
+
+
+def insert_pi_poll(conn: sqlite3.Connection, ts: str, as_of: str, sources: Iterable[str],
+                   rows: Mapping[int, tuple[int, int]]) -> int:
+    """Store one complete holdings poll: type -> (held, listed). A repeated stamp replaces its rows."""
+    conn.execute("DELETE FROM pi_holdings WHERE ts = ?", (ts,))
+    conn.execute("INSERT OR REPLACE INTO pi_polls (ts, as_of, sources) VALUES (?, ?, ?)",
+                 (ts, as_of, json.dumps(sorted(sources))))
+    values = [(ts, int(t), int(h), int(l)) for t, (h, l) in sorted(rows.items()) if h or l]
+    conn.executemany("INSERT INTO pi_holdings (ts, type_id, held, listed) VALUES (?, ?, ?, ?)", values)
+    return len(values)
+
+
+def pi_polls(conn: sqlite3.Connection) -> list[dict]:
+    """Every stored holdings poll, oldest `as_of` first: {ts, as_of, sources, holdings: {type: held +
+    listed}, held: {type: held}, listed: {type: listed}}."""
+    polls = {r["ts"]: {"ts": r["ts"], "as_of": r["as_of"], "sources": json.loads(r["sources"]),
+                       "holdings": {}, "held": {}, "listed": {}}
+             for r in conn.execute("SELECT ts, as_of, sources FROM pi_polls")}
+    for r in conn.execute("SELECT ts, type_id, held, listed FROM pi_holdings"):
+        poll = polls.get(r["ts"])
+        if poll is None:
+            continue
+        poll["held"][r["type_id"]] = r["held"]
+        poll["listed"][r["type_id"]] = r["listed"]
+        poll["holdings"][r["type_id"]] = r["held"] + r["listed"]
+    return sorted(polls.values(), key=lambda p: (p["as_of"], p["ts"]))

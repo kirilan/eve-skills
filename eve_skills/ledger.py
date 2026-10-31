@@ -40,6 +40,21 @@ ever having made it - pre-existing stock (recovered loot, surplus minerals, old 
 as-is. Total profitability is invention plus other; disposal is reported apart and never counted
 toward it, since no operational work produced it. Overhead (office rent, contract fees, research
 jobs, fees nothing could be matched to, GM reimbursements) is reported apart from all three.
+
+*Planetary* is the colonies' own scope, reported beside the total rather than inside it:
+
+* **Colony output is what our holdings gained.** ESI never says what a colony exported, so each full sync
+  polls every hangar, customs office and open sell order for planetary commodities (`ledger_sync`).
+  Between two polls, a type's output is its rise in holdings plus what we sold of it minus what we
+  bought; a fall is never negative output, and output only counts once the running figure passes its
+  previous high, so goods lost or given away are made good by later output before any of it counts.
+  The first poll is the baseline: what was held then is pre-existing stock, not output. Output enters
+  stock at no cost - extraction consumes nothing - at the first sale in its interval, or at the poll.
+* **Customs and colony construction are the colonies' costs**, booked when the journal pays them:
+  export and import tax, the construction charges for upgrades and structures, and command centres
+  bought on the market. They are not spread over the output; a planet's own figures say what it cost.
+* A planetary commodity is in this scope once our colonies have made some of it, for sales from the
+  first poll on; sold before that, or never made, it stays disposal.
 """
 
 from __future__ import annotations
@@ -50,7 +65,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
 
-from . import industry
+from . import industry, ledger_db
 
 # ESI industry activity ids.
 MANUFACTURING = 1
@@ -85,6 +100,14 @@ SCOPE_INVENTION = "invention"
 SCOPE_OTHER = "other"
 SCOPE_DISPOSAL = "disposal"
 SCOPE_OVERHEAD = "overhead"
+SCOPE_PLANETARY = "planetary"
+
+# Journal entries that are the colonies' costs, from any wallet: (P&L line, label).
+PLANETARY_REF_TYPES = {
+    "planetary_export_tax": ("customs", "export tax"),
+    "planetary_import_tax": ("customs", "import tax"),
+    "planetary_construction": ("setup", "colony construction"),
+}
 
 # How far a fee may stray from its issuer's measured rate and still be matched to a modified order.
 # Modifying an order moves its price by a few percent at most; a fee 30 % off the rate is some other
@@ -93,6 +116,23 @@ FEE_RATE_TOLERANCE = 0.30
 
 JOB_DONE = {"delivered", "ready"}
 JOB_LOST = {"cancelled", "reverted"}
+
+
+@dataclass(frozen=True)
+class PlanetaryTypes:
+    """The planetary reference data the replay needs: every commodity (raw to tier 4) and the market
+    types that are command centres, which are bought to be planted and so cost the colonies."""
+    commodities: frozenset = frozenset()
+    command_centres: frozenset = frozenset()
+
+
+def planetary_types(document: Mapping | None) -> PlanetaryTypes:
+    """`PlanetaryTypes` from the `planet_industry.json` document; empty for no document."""
+    if not document:
+        return PlanetaryTypes()
+    centres = {int(level["type_id"]) for per_planet in (document.get("command_centers") or {}).values()
+               for key, level in per_planet.items() if str(key) == "0" and level.get("type_id")}
+    return PlanetaryTypes(frozenset(int(t) for t in document.get("commodities") or {}), frozenset(centres))
 
 
 @dataclass
@@ -137,6 +177,7 @@ class Entry:
     label: str | None = None
     opening: float = 0.0  # the part of a cogs amount valued at opening-stock prices
     location_id: int | None = None  # the station a sale, its tax or its order's broker fee happened at
+    planet_id: int | None = None    # the planet a customs or construction charge was for
 
 
 @dataclass
@@ -176,6 +217,8 @@ class Facts:
     blueprints: list[dict]
     opening_prices: dict[int, float]
     internal_ids: set[int]
+    # Planetary holdings polls, oldest first (`ledger_db.pi_polls`).
+    pi_polls: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -195,6 +238,13 @@ class Book:
     daily_stock: dict[str, dict[int, tuple[float, float]]] = field(default_factory=dict)  # day -> type -> (qty, cost)
     first_date: str | None = None
     last_date: str | None = None
+    # Planetary: the types our colonies made, every (date, type, units) of output, the first poll's
+    # moment (the baseline), and the newest poll's holdings per type with its moment.
+    planetary_products: set[int] = field(default_factory=set)
+    colony_output: list[tuple[str, int, float]] = field(default_factory=list)
+    planetary_since: str | None = None
+    planetary_holdings: dict[int, int] = field(default_factory=dict)
+    planetary_held_at: str | None = None
 
     def pool(self, kind: str, type_id: int) -> Pool:
         return self.pools.setdefault((kind, type_id), Pool())
@@ -212,6 +262,10 @@ def load(conn: sqlite3.Connection) -> Facts:
         parts = owner.split(":")
         if len(parts) >= 2 and parts[1].isdigit():
             internal.add(int(parts[1]))
+    try:
+        polls = ledger_db.pi_polls(conn)
+    except sqlite3.OperationalError:     # a read-only ledger from before schema 5
+        polls = []
     return Facts(
         jobs=rows("SELECT * FROM jobs ORDER BY start_date, job_id"),
         transactions=rows("SELECT * FROM transactions ORDER BY date, transaction_id"),
@@ -220,7 +274,56 @@ def load(conn: sqlite3.Connection) -> Facts:
         blueprints=rows("SELECT * FROM blueprints"),
         opening_prices=opening,
         internal_ids=internal,
+        pi_polls=polls,
     )
+
+
+def colony_output(facts: Facts, commodities: frozenset) -> tuple[list[tuple[str, int, float]], str | None]:
+    """What our colonies made, read off the holdings polls: ([(date, type, units)], baseline moment).
+
+    Per type, the running figure since the first poll is holdings now less holdings then, plus what we
+    sold, less what we bought, in between (trades between our own wallets move nothing). Each time it
+    passes its previous high, the excess is output. A drop - goods destroyed, given away, imported to a
+    planet, or a sale whose document ESI had not refreshed yet - is not negative output, and output
+    only counts again once the figure is back above that high, so neither can be counted twice. Output
+    is dated at the first sale of the type in its interval, so that sale draws on it, else at the poll.
+    A poll that read other documents than the one before it (a character's consent or a corporation
+    role changed) starts a new baseline: holdings that merely came into view are not output."""
+    polls = facts.pi_polls
+    if not polls or not commodities:
+        return [], None
+    base = polls[0]
+    trades = [t for t in facts.transactions
+              if t["type_id"] in commodities and t["client_id"] not in facts.internal_ids
+              and t["date"] > base["as_of"]]
+    trades.sort(key=lambda t: (t["date"], t["transaction_id"]))
+    net: dict[int, float] = defaultdict(float)     # sold less bought since the baseline
+    high: dict[int, float] = defaultdict(float)
+    out: list[tuple[str, int, float]] = []
+    k = 0
+    for prev, cur in zip(polls, polls[1:]):
+        if sorted(cur.get("sources") or []) != sorted(prev.get("sources") or []):
+            base, net, high = cur, defaultdict(float), defaultdict(float)
+            while k < len(trades) and trades[k]["date"] <= cur["as_of"]:
+                k += 1
+            continue
+        first_sale: dict[int, str] = {}
+        while k < len(trades) and trades[k]["date"] <= cur["as_of"]:
+            t = trades[k]
+            k += 1
+            if t["is_buy"]:
+                net[t["type_id"]] -= t["quantity"]
+            else:
+                net[t["type_id"]] += t["quantity"]
+                first_sale.setdefault(t["type_id"], t["date"])
+        for type_id in sorted(set(cur["holdings"]) | set(base["holdings"]) | set(net)):
+            if type_id not in commodities:
+                continue
+            figure = cur["holdings"].get(type_id, 0) - base["holdings"].get(type_id, 0) + net[type_id]
+            if figure > high[type_id] + 1e-9:
+                out.append((first_sale.get(type_id, cur["as_of"]), type_id, figure - high[type_id]))
+                high[type_id] = figure
+    return out, base["as_of"]
 
 
 def _scope_owner_wallet(wallet: str) -> tuple[str, int]:
@@ -231,8 +334,9 @@ def _scope_owner_wallet(wallet: str) -> tuple[str, int]:
 
 class _Replay:
     def __init__(self, facts: Facts, recipes: Mapping[int, industry.Recipe], invention: Mapping,
-                 now: str):
+                 now: str, planetary: PlanetaryTypes | None = None):
         self.facts = facts
+        self.planetary = planetary or PlanetaryTypes()
         self.recipes = recipes
         self.inv_rows = invention.get("blueprints", {})
         self.dec_rows = {int(k): v for k, v in invention.get("decryptors", {}).items()}
@@ -361,6 +465,13 @@ class _Replay:
                                   if j["activity_id"] in (MANUFACTURING, *REACTIONS)
                                   and j["product_type_id"] is not None and j["status"] not in JOB_LOST}
 
+        output, book.planetary_since = colony_output(facts, self.planetary.commodities)
+        book.planetary_products = {type_id for _date, type_id, qty in output if qty > 0}
+        if facts.pi_polls:
+            newest = facts.pi_polls[-1]
+            book.planetary_holdings = dict(newest["holdings"])
+            book.planetary_held_at = newest["as_of"]
+
         fees_by_job: dict[int, float] = defaultdict(float)
         job_ids = {j["job_id"] for j in jobs}
         events: list[tuple[str, int, int, object]] = []
@@ -407,6 +518,13 @@ class _Replay:
                 push(e["date"], 5, ("sales_tax", e))
             elif e["ref_type"] == "brokers_fee":
                 push(e["date"], 1, ("broker_fee", e))
+            elif e["ref_type"] in PLANETARY_REF_TYPES:
+                line, label = PLANETARY_REF_TYPES[e["ref_type"]]
+                planet = e["context_id"] if e["context_id_type"] == "planet_id" else None
+                book.entries.append(Entry(e["date"], line, SCOPE_PLANETARY, amount, wallet=e["wallet"],
+                                          label=label, planet_id=planet))
+                if e["ref_type"] == "planetary_import_tax" and amount:
+                    self.note("planetary_imports")
             elif kind == "corp" and e["ref_type"] in OVERHEAD_REF_TYPES:
                 book.entries.append(Entry(e["date"], "overhead", SCOPE_OVERHEAD, amount, wallet=e["wallet"],
                                           label=OVERHEAD_REF_TYPES[e["ref_type"]]))
@@ -416,6 +534,8 @@ class _Replay:
                 self.note("internal_transfers")
                 continue
             push(t["date"], 0 if t["is_buy"] else 4, ("trade", t))
+        for date, type_id, qty in output:
+            push(date, 0, ("output", (type_id, qty)))
 
         for j in jobs:
             cost = JobCost(job_id=j["job_id"], activity_id=j["activity_id"], status=j["status"],
@@ -460,22 +580,37 @@ class _Replay:
         if qty > 0:
             per_day = self.book.consumed.setdefault(type_id, {})
             per_day[date[:10]] = per_day.get(date[:10], 0.0) + qty
+            since = self.book.planetary_since
+            if type_id in self.planetary.commodities and since is not None and date >= since:
+                self.note("planetary_goods_consumed", int(round(qty)))
         return self._draw(type_id, qty)
 
-    def _scope(self, type_id: int | None) -> str:
+    def _scope(self, type_id: int | None, date: str | None = None) -> str:
         if type_id in self.book.invention_products:
             return SCOPE_INVENTION
         if type_id in self.book.produced_products:
             return SCOPE_OTHER
+        if type_id in self.book.planetary_products and (date is None or date >= self.book.planetary_since):
+            return SCOPE_PLANETARY
         return SCOPE_DISPOSAL
 
+    def _on_output(self, date, payload, *_):
+        type_id, qty = payload
+        self.book.pool("item", type_id).add(qty, 0.0)
+        self.book.colony_output.append((date, type_id, qty))
+
     def _on_trade(self, date, t, *_):
-        pool = self.book.pool("item", t["type_id"])
         value = t["quantity"] * t["unit_price"]
+        if t["is_buy"] and t["type_id"] in self.planetary.command_centres:
+            # Bought to be planted on a planet, where no ESI document follows it: a colony cost.
+            self.book.entries.append(Entry(date, "setup", SCOPE_PLANETARY, -value, t["type_id"], t["quantity"],
+                                           t["wallet"], label="command centres", location_id=t.get("location_id")))
+            return
+        pool = self.book.pool("item", t["type_id"])
         if t["is_buy"]:
             pool.add(t["quantity"], value)
             return
-        scope = self._scope(t["type_id"])
+        scope = self._scope(t["type_id"], date)
         cost, opening = self._draw(t["type_id"], t["quantity"])
         where = t.get("location_id")
         self.book.entries.append(Entry(date, "revenue", scope, value, t["type_id"], t["quantity"], t["wallet"],
@@ -493,7 +628,7 @@ class _Replay:
             return
         for s in sells:
             share = amount * s["quantity"] * s["unit_price"] / total
-            self.book.entries.append(Entry(date, "sales_tax", self._scope(s["type_id"]), share, s["type_id"],
+            self.book.entries.append(Entry(date, "sales_tax", self._scope(s["type_id"], date), share, s["type_id"],
                                            wallet=e["wallet"], location_id=s.get("location_id")))
 
     def _on_broker_fee(self, date, e, _sells, orders_by_stamp, *_):
@@ -515,7 +650,7 @@ class _Replay:
             if o["is_buy"]:
                 self.book.pool("item", o["type_id"]).add(0.0, -share)   # part of what the stock cost
             else:
-                self.book.entries.append(Entry(date, "broker_fee", self._scope(o["type_id"]), share,
+                self.book.entries.append(Entry(date, "broker_fee", self._scope(o["type_id"], date), share,
                                                o["type_id"], wallet=e["wallet"], location_id=o.get("location_id")))
 
     def _modified_order(self, date: str, issuer: int | None, fee: float) -> dict | None:
@@ -618,9 +753,11 @@ class _Replay:
                                        j["product_type_id"], label=f"{j['status']} jobs"))
 
 
-def replay(facts: Facts, recipes: Mapping[int, industry.Recipe], invention: Mapping, now: str) -> Book:
-    """Replay every stored fact in time order. `now` is ESI's clock, as an ISO stamp."""
-    return _Replay(facts, recipes, invention, now).run()
+def replay(facts: Facts, recipes: Mapping[int, industry.Recipe], invention: Mapping, now: str,
+           planetary: PlanetaryTypes | None = None) -> Book:
+    """Replay every stored fact in time order. `now` is ESI's clock, as an ISO stamp; without
+    `planetary` no colony output is read and planetary commodities are traded like anything else."""
+    return _Replay(facts, recipes, invention, now, planetary).run()
 
 
 # ---------------------------------------------------------------------------
@@ -642,15 +779,19 @@ def period_key(date: str, by: str) -> str:
     return "total"
 
 
-_PNL_LINES = ("revenue", "sales_tax", "broker_fees", "cogs", "cogs_opening_stock")
-_ENTRY_LINE = {"revenue": "revenue", "sales_tax": "sales_tax", "broker_fee": "broker_fees", "cogs": "cogs"}
+_PNL_LINES = ("revenue", "sales_tax", "broker_fees", "cogs", "cogs_opening_stock", "customs", "setup")
+_ENTRY_LINE = {"revenue": "revenue", "sales_tax": "sales_tax", "broker_fee": "broker_fees", "cogs": "cogs",
+               "customs": "customs", "setup": "setup"}
+_SCOPES = (SCOPE_INVENTION, SCOPE_OTHER, SCOPE_DISPOSAL, SCOPE_PLANETARY)
 
 
 def pnl(book: Book, since: str | None = None, until: str | None = None, by: str = "total") -> list[dict]:
     """Profit and loss per period: each line split into invention lines, other trade and their total,
     then overhead (which belongs to the business, not to any scope) and net profit. Disposal (stock
     sold that no job of ours ever produced) is reported alongside but excluded from the total and
-    from net profit - it is cashing out what was already there, not something the operation earned."""
+    from net profit - it is cashing out what was already there, not something the operation earned.
+    Planetary (the colonies: their sales less customs and construction) is a separate operation with
+    its own profit, also outside the total; `net_profit_incl_planetary` adds the two together."""
     periods: dict[str, dict] = {}
     for e in book.entries:
         if not _in(e.date, since, until):
@@ -658,7 +799,7 @@ def pnl(book: Book, since: str | None = None, until: str | None = None, by: str 
         key = period_key(e.date, by)
         row = periods.setdefault(key, {
             "period": key, "from": e.date, "to": e.date,
-            **{scope: dict.fromkeys(_PNL_LINES, 0.0) for scope in (SCOPE_INVENTION, SCOPE_OTHER, SCOPE_DISPOSAL)},
+            **{scope: dict.fromkeys(_PNL_LINES, 0.0) for scope in _SCOPES},
             "overhead": defaultdict(float), "revenue_personal_wallets": 0.0})
         row["from"], row["to"] = min(row["from"], e.date), max(row["to"], e.date)
         if e.scope == SCOPE_OVERHEAD:
@@ -673,9 +814,10 @@ def pnl(book: Book, since: str | None = None, until: str | None = None, by: str 
     out = []
     for key in sorted(periods):
         row = periods[key]
-        for scope in (SCOPE_INVENTION, SCOPE_OTHER, SCOPE_DISPOSAL):
+        for scope in _SCOPES:
             lines = row[scope]
-            lines["gross_profit"] = lines["revenue"] + lines["sales_tax"] + lines["broker_fees"] + lines["cogs"]
+            lines["gross_profit"] = (lines["revenue"] + lines["sales_tax"] + lines["broker_fees"] + lines["cogs"]
+                                     + lines["customs"] + lines["setup"])
         # Total profitability is invention plus other; disposal (pre-existing stock no job of ours
         # ever made) is reported in its own scope above but never folded in here.
         row["total"] = {line: row[SCOPE_INVENTION][line] + row[SCOPE_OTHER][line]
@@ -683,18 +825,23 @@ def pnl(book: Book, since: str | None = None, until: str | None = None, by: str 
         row["overhead"] = dict(sorted(row["overhead"].items()))
         row["overhead_total"] = sum(row["overhead"].values())
         row["net_profit"] = row["total"]["gross_profit"] + row["overhead_total"]
+        row["planetary_profit"] = row[SCOPE_PLANETARY]["gross_profit"]
+        row["net_profit_incl_planetary"] = row["net_profit"] + row["planetary_profit"]
         out.append(row)
     return out
 
 
 def products(book: Book, since: str | None = None, until: str | None = None, scope: str = "all") -> list[dict]:
-    """Per product: what was built and at what unit cost, what was sold and what it made."""
-    rows: dict[int, dict] = {}
+    """Per product: what was built and at what unit cost, what was sold and what it made. A planetary
+    commodity's `built` is its colony output, which carries no unit cost (customs are the planet's);
+    sold before our colonies made any, it has a separate disposal row."""
+    rows: dict[tuple[int, str], dict] = {}
 
-    def row(type_id: int) -> dict:
-        scope = (SCOPE_INVENTION if type_id in book.invention_products
-                else SCOPE_OTHER if type_id in book.produced_products else SCOPE_DISPOSAL)
-        return rows.setdefault(type_id, {
+    def row(type_id: int, scope: str | None = None) -> dict:
+        scope = scope or (SCOPE_INVENTION if type_id in book.invention_products
+                          else SCOPE_OTHER if type_id in book.produced_products
+                          else SCOPE_PLANETARY if type_id in book.planetary_products else SCOPE_DISPOSAL)
+        return rows.setdefault((type_id, scope), {
             "type_id": type_id, "scope": scope,
             "built": 0.0, "build_cost": 0.0, "materials": 0.0, "blueprint": 0.0, "fees": 0.0,
             "opening_stock": 0.0, "sold": 0.0, "revenue": 0.0, "sales_tax": 0.0, "broker_fees": 0.0,
@@ -712,10 +859,14 @@ def products(book: Book, since: str | None = None, until: str | None = None, sco
         r["blueprint"] += job.blueprint
         r["fees"] += job.fees
         r["opening_stock"] += job.opening
+    for date, type_id, qty in book.colony_output:
+        if _in(date, since, until):
+            row(type_id, SCOPE_PLANETARY)["built"] += qty
     for e in book.entries:
-        if e.type_id is None or e.scope == SCOPE_OVERHEAD or not _in(e.date, since, until):
+        if (e.type_id is None or e.scope == SCOPE_OVERHEAD or e.kind not in _ENTRY_LINE
+                or e.kind in ("customs", "setup") or not _in(e.date, since, until)):
             continue
-        r = row(e.type_id)
+        r = row(e.type_id, e.scope)
         if e.kind == "revenue":
             r["sold"] += e.qty
             r["revenue"] += e.amount
@@ -731,7 +882,8 @@ def products(book: Book, since: str | None = None, until: str | None = None, sco
             continue
         if not r["built"] and not r["sold"]:
             continue
-        r["unit_cost"] = r["build_cost"] / r["built"] if r["built"] else None
+        r["unit_cost"] = (r["build_cost"] / r["built"] if r["built"] and r["scope"] != SCOPE_PLANETARY
+                          else None)
         r["profit"] = r["revenue"] + r["sales_tax"] + r["broker_fees"] + r["cogs"]
         r["net_per_unit"] = ((r["revenue"] + r["sales_tax"] + r["broker_fees"]) / r["sold"]
                              if r["sold"] else None)
@@ -772,6 +924,60 @@ def markets(book: Book, since: str | None = None, until: str | None = None) -> l
         out.append(r)
     out.sort(key=lambda r: (-r["revenue"], -r["profit"]))
     return out
+
+
+def _wallet_character(wallet: str | None) -> int | None:
+    kind, _sep, rest = (wallet or "").partition(":")
+    return int(rest.split(":")[0]) if kind == "char" and rest.split(":")[0].isdigit() else None
+
+
+def planetary(book: Book, since: str | None = None, until: str | None = None) -> dict:
+    """The colonies as an operation: their P&L lines, each planet's customs and construction, each
+    product's output and sales, and what the newest poll found held.
+
+    A planet's row is what its charges say - which character paid, how much export and import tax, how
+    much construction - because ESI ties a charge to a planet and output to no planet at all. Output is
+    per product, from the holdings polls."""
+    (row,) = pnl(book, since=since, until=until) or [None]
+    lines = row[SCOPE_PLANETARY] if row else {**dict.fromkeys(_PNL_LINES, 0.0), "gross_profit": 0.0}
+    planets: dict[int, dict] = {}
+    for e in book.entries:
+        if e.scope != SCOPE_PLANETARY or e.kind not in ("customs", "setup") or not _in(e.date, since, until):
+            continue
+        if e.planet_id is None:
+            continue
+        r = planets.setdefault(e.planet_id, {
+            "planet_id": e.planet_id, "character_ids": set(), "export_tax": 0.0, "import_tax": 0.0,
+            "construction": 0.0, "exports": 0, "first": e.date, "last": e.date})
+        who = _wallet_character(e.wallet)
+        if who is not None:
+            r["character_ids"].add(who)
+        if e.label == "export tax":
+            r["export_tax"] += e.amount
+            r["exports"] += 1
+        elif e.label == "import tax":
+            r["import_tax"] += e.amount
+        else:
+            r["construction"] += e.amount
+        r["first"], r["last"] = min(r["first"], e.date), max(r["last"], e.date)
+    planet_rows = []
+    for r in planets.values():
+        r["character_ids"] = sorted(r["character_ids"])
+        r["total"] = r["export_tax"] + r["import_tax"] + r["construction"]
+        planet_rows.append(r)
+    planet_rows.sort(key=lambda r: (r["total"], r["planet_id"]))
+    output = [(d, t, q) for d, t, q in book.colony_output if _in(d, since, until)]
+    return {
+        "tracking_since": book.planetary_since,
+        "lines": dict(lines),
+        "profit": lines["gross_profit"],
+        "output_units": sum(q for _d, _t, q in output),
+        "output_days": sorted({d[:10] for d, _t, _q in output}),
+        "planets": planet_rows,
+        "products": products(book, since=since, until=until, scope=SCOPE_PLANETARY),
+        "held": dict(book.planetary_holdings),
+        "held_at": book.planetary_held_at,
+    }
 
 
 def invention(book: Book, invention_doc: Mapping, recipes: Mapping[int, industry.Recipe]) -> list[dict]:
@@ -851,6 +1057,7 @@ def snapshot(book: Book, facts: Facts, now: str, since: str | None = None) -> di
     (row,) = pnl(book, since=since) or [None]
     total = row["total"] if row else {}
     invention_lines = row[SCOPE_INVENTION] if row else {}
+    planetary_lines = row[SCOPE_PLANETARY] if row else {}
     built = sold = 0.0
     for p in products(book, since=since, scope=SCOPE_INVENTION):
         built += p["built"]
@@ -869,6 +1076,8 @@ def snapshot(book: Book, facts: Facts, now: str, since: str | None = None) -> di
         "overhead": round(row["overhead_total"], 2) if row else 0.0,
         "net_profit": round(row["net_profit"], 2) if row else 0.0,
         "invention_units_built": built, "invention_units_sold": sold,
+        "planetary_revenue": round(planetary_lines.get("revenue", 0.0), 2),
+        "planetary_profit": round(planetary_lines.get("gross_profit", 0.0), 2),
         "stock_at_cost": round(sum(p.cost for (kind, _t), p in book.pools.items() if kind == "item" and p.qty > 0), 2),
         "work_in_progress_cost": round(sum(j["cost"] for j in work_in_progress(book)), 2),
     }

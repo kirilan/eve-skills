@@ -582,15 +582,25 @@ def build_parser() -> argparse.ArgumentParser:
                                                      "sold, net price and profit")
     p_lprod.add_argument("--since", metavar="YYYY-MM-DD", help="first day included")
     p_lprod.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded")
-    p_lprod.add_argument("--scope", choices=["all", "invention", "other", "disposal"], default="all",
+    p_lprod.add_argument("--scope", choices=["all", "invention", "other", "disposal", "planetary"], default="all",
                          help="invention lines (built from blueprints the business invented), other jobs, "
-                              "disposal (pre-existing stock sold as-is, no job of ours ever made it), or all")
+                              "disposal (pre-existing stock sold as-is, no job of ours ever made it), planetary "
+                              "(colony output), or all")
     p_lprod.add_argument("--limit", type=int, metavar="N", help="only the N most profitable rows")
     p_lprod.add_argument("--json", action="store_true", help="machine-readable output")
     p_lmkt = ledger_sub.add_parser("markets", help="per station sold at: units, revenue, tax and fees, profit")
     p_lmkt.add_argument("--since", metavar="YYYY-MM-DD", help="first day included (default: the cutover)")
     p_lmkt.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded (default: no end)")
     p_lmkt.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lpi = ledger_sub.add_parser("planetary", help="the colonies as an operation: output, sales, customs and "
+                                                    "construction, per product and per planet, and what is held")
+    p_lpi.add_argument("--since", metavar="YYYY-MM-DD", help="first day included (default: everything stored)")
+    p_lpi.add_argument("--until", metavar="YYYY-MM-DD", help="first day excluded (default: no end)")
+    p_lpi.add_argument("--by", choices=["total", "day", "week", "month"], default="total",
+                       help="add a row per day/week/month to the totals")
+    p_lpi.add_argument("--limit", type=int, default=15, metavar="N", help="held commodities shown (default 15)")
+    p_lpi.add_argument("--all", action="store_true", help="every held commodity")
+    p_lpi.add_argument("--json", action="store_true", help="machine-readable output")
     p_linv = ledger_sub.add_parser("invention", help="per invented blueprint: decryptor, attempts, success "
                                                      "rate and cost per invented run")
     p_linv.add_argument("--json", action="store_true", help="machine-readable output")
