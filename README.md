@@ -353,6 +353,7 @@ first login:
    | `orders` | `esi-markets.read_character_orders.v1` |
    | `corp-orders` | `esi-markets.read_corporation_orders.v1`, `esi-characters.read_corporation_roles.v1` |
    | `structures` | `esi-universe.read_structures.v1` |
+   | `structure-markets` | `esi-markets.structure_markets.v1`, `esi-universe.read_structures.v1` (a structure's market also needs docking access there) |
    | `planets` | `esi-planets.manage_planets.v1` (ESI exposes only GET for the colony routes) |
    | `blueprints` | `esi-characters.read_blueprints.v1`, `esi-corporations.read_blueprints.v1`, `esi-characters.read_corporation_roles.v1` |
    | `divisions` | `esi-corporations.read_divisions.v1` |
@@ -450,7 +451,7 @@ the SSO session between them: characters on the same account cost a pick, not a 
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `structures`, `planets`, `blueprints`, `divisions`, `wallet`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `structure-markets`, `planets`, `blueprints`, `divisions`, `wallet`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
@@ -851,8 +852,10 @@ eve-skills restock --at "Kulelen V - Moon 16 - Lai Dai Corporation Factory" --ch
   --invent "Small Core Defense Field Extender II=140:Augmentation" --extra "Augmentation Decryptor=500"
 ```
 
-Demand comes from the local SDE recipes: a build line `PRODUCT=UNITS[:ME]` is costed as the jobs it
-would really be installed as (the blueprint's maximum runs each, ME rounding per job); `--invent
+Demand comes from the local SDE recipes: a build line `PRODUCT=UNITS[:ME[:RUNS]][@CHAR]` is costed as
+the jobs it would really be installed as (RUNS per job, by default the blueprint's maximum or, for an
+invented T2 copy, the most runs invention can give it; ME rounding per job). On a personal site (`--site`,
+see `operation`) `@CHAR` names the installer and the plan lists the trades that supply them; `--invent
 T2PRODUCT=ATTEMPTS[:DECRYPTOR]` adds the invention datacores per attempt and, when named, one decryptor
 per attempt; `--extra TYPE=QTY` is a buffer bought in full on top of stock. Materials are direct inputs
 only - a component you build yourself is its own line.
@@ -879,6 +882,52 @@ cheapest ones. A **high** input (two spreads over) is flagged and its `--extra` 
 cheaper day; **falling** buys nothing ahead. The text adds a price-check table and, when anything
 changes, a second Multibuy with the check applied; `--json` has a `price_check` object. Dip extras are
 not fitted to `--cargo`; a note says when they do not fit what is left.
+
+### `operation` — sites, facilities, structure markets and freight
+
+An optional file, `operation.json` in the config directory, describes where the operation works. Without
+it every command keeps its built-in behaviour (NPC station rates, the five trade hubs, corporation reads
+where a command asks for them). Print a starting point and check what is filled in:
+
+```bash
+eve-skills operation template > ~/.config/eve-skills/operation.json   # then edit it
+eve-skills operation show                                             # flags values still unknown
+```
+
+- **Sites** name a facility plus the characters working it. `owner: corp` keeps stock in the
+  corporation's hangars, read through `readers` (characters with the Director role). `owner: personal` is
+  for building in someone else's structure without corporation roles: every character in `characters`
+  installs from their own hangar, and materials move between them by trade. One operation can have both,
+  for example a high-sec corporation and a null-sec structure during a move. `default_site` is what
+  commands use when no `--site` is given.
+- **Facilities** carry the system, the structure's `location_id`, the owner's `tax_pct`, and the material
+  and time bonuses. Either state them (`material` and `time` per activity, as multipliers) or derive them
+  from what you know about the structure: `"structure": "raitaru"`, `"security": "null"`,
+  `"rigs": {"manufacturing": {"me": "t1", "te": "t1"}}`. A derived bonus is
+  (1 - hull bonus) x (1 - rig bonus x security multiplier). The security multiplier is 1.0 in high-sec, 1.9 in
+  low-sec and 2.1 in null-sec. A Raitaru with T1 manufacturing rigs in null-sec comes to a material
+  multiplier of 0.9484 and a time multiplier of 0.493. Engineering complexes' job-cost reduction is not
+  modelled, and rig bonuses are assumed to cover every product built there.
+- **Hubs** add markets beyond the five built-in ones: `location_id`, `region_id`, optional `system_id`,
+  `label` and `reader`. A player structure's id (above the int32 range) is priced from its own market,
+  `/markets/structures/{id}`. The regional feed carries none of a structure's sell orders. Reading the
+  structure market needs a character with docking access there who granted
+  `eve-skills login --scopes structure-markets`. `reader` is tried first. A refusal is an error that
+  names the fix, never an empty book.
+- **Freight** routes (`"jita->4-hwwf"`) price a courier contract: `per_m3`, `collateral_pct` and `min`.
+  A site's `freight_in` and `freight_out` name the routes its supplies and products travel.
+
+Commands that use the file:
+
+| Command | What it does with the file |
+|---|---|
+| `build-cost --facility NAME` / `--site NAME` | Cost the job there: the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
+| `market --hub KEY`, `build-cost --hub/--sell-at KEY` | Price at a configured hub, including a structure. |
+| `restock --site NAME` | Build at the site's facility. On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
+| `can-build --site NAME` | Applies the facility's material bonus. On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
+| `jobs --times [--facility NAME]` | Median hours per run are always kept per facility, so a structure's rigged times never mix with NPC-station history. |
+| `dashboard` | Reads industry status for every site: a corp site through its reader, a personal site from its characters' own snapshots. |
+| `ledger sync` | Reports a corporation that refuses every section on roles (building in someone else's corporation) as one expected line. The members' personal jobs, orders and wallets are booked as before. |
 
 ### `ledger` — what the business cost, earned and holds
 
