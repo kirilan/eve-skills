@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import io
 import json
 import sys
@@ -10,7 +11,7 @@ import time
 from dataclasses import dataclass
 
 
-from . import alphadata, esi as esi_mod, exports, industry, market, orders, pricing, render, sso
+from . import alphadata, esi as esi_mod, exports, industry, market, operation, orders, pricing, render, sso
 
 
 BUILD_COST_COLUMNS = ["material", "qty", "buy/u", "build/u", "source", "cost", "surplus"]
@@ -34,6 +35,30 @@ def _percent(spec: float, flag: str) -> float:
                            f"{industry.NPC_STATION_TAX * 100:g} means a quarter of one percent, "
                            f"got {spec:g}")
     return spec / 100.0
+
+
+def _facility_profile(args) -> operation.Facility | None:
+    """The configured facility named by `--facility`, or the one `--site` works in; None without either."""
+    facility = getattr(args, "facility", None)
+    site_name = getattr(args, "site", None)
+    if not facility and not site_name:
+        return None
+    if facility and site_name:
+        raise RuntimeError("--facility and --site both name where the job runs; give one of them")
+    op = operation.load()
+    if not op.configured:
+        raise RuntimeError(f"--facility/--site read the operation file, and there is none at "
+                           f"{operation.file_path()} - start from: eve-skills operation template")
+    if site_name:
+        facility = op.site(site_name).facility
+    return op.facility(facility)
+
+
+def _material_multiplier(args, profile, activity: str) -> float:
+    """`--material-multiplier` when given, else the facility's for this activity, else none."""
+    if args.material_multiplier is not None:
+        return args.material_multiplier
+    return profile.material_multiplier(activity) if profile is not None else 1.0
 
 
 def build_scope(client: esi_mod.Esi, args) -> tuple[market.Scope, int]:
@@ -181,6 +206,9 @@ class BuildRun:
     # `--sell-at`: per product id, what listing the output at a hub would net against its cost.
     sales: dict | None = None
     sale_notes: tuple[str, ...] = ()
+    # `--facility`/`--site`: the configured facility the job was costed in, and its time bonus.
+    facility_name: str | None = None
+    time_multiplier: float = 1.0
 
 
 SALE_HISTORY_DAYS = 30
@@ -234,8 +262,10 @@ def _sale_figures(client: esi_mod.Esi, args, targets) -> tuple[dict, list[str]]:
                  f"sliver is ignored), net of {seller.name}'s {seller.sales_tax_pct:.2f}% sales tax and "
                  + ("an unknown broker fee" if fee is None else f"{fee:.2f}% broker fee")
                  + "; ISK/job-h on " + ("--hours-per-run" if args.hours_per_run is not None
-                                        else "the blueprint's base time - skills and facilities make it "
-                                             "shorter; pass --hours-per-run from `jobs --times`"))
+                                        else "the blueprint's base time"
+                                        + (" times the facility's time bonus"
+                                           if any(t.facility.time_multiplier != 1.0 for t in targets) else "")
+                                        + " - skills make it shorter; pass --hours-per-run from `jobs --times`"))
     return out, notes
 
 
@@ -442,6 +472,11 @@ def _build_run_notes(run: BuildRun) -> list[str]:
     lines = [f"scope: {run.scope.label} - every material priced off one order book: {region}",
              "price basis: the cheapest standing ask there, falling back to ESI's published industry "
              "reference where no order exists; a published figure is not something you can buy at"]
+    if run.facility_name:
+        lines.append(f"facility: {run.facility_name} from the operation file (see: eve-skills operation show)")
+    if run.time_multiplier != 1.0:
+        lines.append(f"time multiplier {run.time_multiplier:g} applied to the job time - the structure's "
+                     f"and rigs' time bonus; character skills still shorten it further")
     if run.material_multiplier != 1.0:
         lines.append(f"material multiplier {run.material_multiplier:g} applied to every requirement - "
                      f"an aggregate rig or structure bonus, so the quantities above are below the "
@@ -537,7 +572,8 @@ def build_cost_json(run: BuildRun) -> dict:
         "job": {"system_id": run.system_id, "system": run.names.get(run.system_id),
                 "activity_indices_used": dict(sorted(run.indices_used.items())),
                 "facility_tax": run.facility_tax, "scc_surcharge": run.scc_surcharge,
-                "material_multiplier": run.material_multiplier},
+                "material_multiplier": run.material_multiplier,
+                "time_multiplier": run.time_multiplier, "facility": run.facility_name},
         "products": [{
             "product_id": target.type_id, "name": target.name,
             "blueprint_id": target.recipe.blueprint_id, "activity": target.recipe.activity,
@@ -610,7 +646,13 @@ def cmd_build_cost(args):
         market.hub_scope(args.sell_at)   # an unknown hub fails before any book is read
         if args.hours_per_run is not None and args.hours_per_run <= 0:
             raise RuntimeError("--hours-per-run must be positive")
-    facility_tax = _percent(args.facility_tax, "--facility-tax")
+    profile = _facility_profile(args)
+    if args.facility_tax is not None:
+        facility_tax = _percent(args.facility_tax, "--facility-tax")
+    elif profile is not None and profile.tax is not None:
+        facility_tax = profile.tax
+    else:
+        facility_tax = industry.NPC_STATION_TAX
     # The caps `plan_build` enforces anyway, checked against its own constants before a single order
     # book is read: refusing ME 11 after twenty-six books have already cost their time is a bad
     # afternoon, and these limits belong to the flags rather than to whichever blueprint turns out to
@@ -627,6 +669,8 @@ def cmd_build_cost(args):
     if not 0 <= args.te <= industry.MAX_TE:
         raise RuntimeError(f"--te must be 0..{industry.MAX_TE} - that is as far as a blueprint can be "
                            f"researched, got {args.te}")
+    if profile is not None and not args.system and profile.system:
+        args.system = profile.system
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
     scope, system_id = build_scope(client, args)
     # Explicit forces are resolved before any book is read: being told a component's name was wrong
@@ -639,7 +683,18 @@ def cmd_build_cost(args):
     # The per-blueprint install limit is checked here rather than left to `plan_build`, which only
     # sees it after the prices it was handed: `--runs 2` on a one-run BPC is refusable knowledge the
     # moment the recipe is known, and paying for a fan-out first would buy nothing but the same error.
-    for recipe in recipes:
+    invention = None
+    for i, recipe in enumerate(recipes):
+        if 0 < recipe.max_runs < args.runs:
+            # An invented copy may carry more runs than the T2 blueprint's own limit says.
+            if invention is None:
+                try:
+                    invention = alphadata.blueprint_invention()
+                except (FileNotFoundError, ValueError):
+                    invention = {}
+            limit = industry.invented_run_limit(recipe.blueprint_id, invention)
+            if limit > recipe.max_runs:
+                recipe = recipes[i] = dataclasses.replace(recipe, max_runs=limit)
         if 0 < recipe.max_runs < args.runs:
             raise RuntimeError(f"blueprint {recipe.blueprint_id} allows at most {recipe.max_runs} "
                                f"runs per install, asked for {args.runs} - install it as "
@@ -689,13 +744,18 @@ def cmd_build_cost(args):
                 f"tax and surcharge, which is not a cost. Name a system that has one with --system.")
         indices_used[recipe.activity] = cost_index
         facility = industry.Facility(cost_index=cost_index, facility_tax=facility_tax,
-                                     material_multiplier=args.material_multiplier)
+                                     material_multiplier=_material_multiplier(args, profile, recipe.activity),
+                                     time_multiplier=(profile.time_multiplier(recipe.activity)
+                                                      if profile is not None else 1.0))
         plan = industry.plan_build(recipe, index, prices, facility, runs=args.runs, me=args.me,
                                    te=args.te, component_me=args.component_me, force=force)
         targets.append(BuildTarget(type_id=recipe.product_id, name=by_id[recipe.product_id],
                                    recipe=recipe, plan=plan, facility=facility))
 
     warnings = [_build_requests_note(figures)]
+    if profile is not None and profile.unknown:
+        warnings.append(f"facility {profile.name}: {', '.join(profile.unknown)} not set in the operation "
+                        f"file, so those parts of the cost use defaults (no bonus, NPC station tax)")
     rules = industry.rules_warning()
     if rules:
         warnings.append(rules)
@@ -709,10 +769,13 @@ def cmd_build_cost(args):
     sales, sale_notes = _sale_figures(client, args, targets) if args.sell_at else (None, [])
     run = BuildRun(now=client.now().timestamp(), scope=scope, system_id=system_id,
                    facility_tax=facility_tax, scc_surcharge=industry.SCC_SURCHARGE,
-                   material_multiplier=args.material_multiplier, indices_used=indices_used,
+                   material_multiplier=(targets[0].facility.material_multiplier if targets else 1.0),
+                   indices_used=indices_used,
                    index_meta=indices.meta, figures=figures, reference=price_doc, names=names,
                    targets=tuple(targets), rules=rules, warnings=tuple(warnings),
-                   sales=sales, sale_notes=tuple(sale_notes))
+                   sales=sales, sale_notes=tuple(sale_notes),
+                   facility_name=profile.name if profile is not None else None,
+                   time_multiplier=(targets[0].facility.time_multiplier if targets else 1.0))
     if args.json:
         print(json.dumps(build_cost_json(run), indent=2))
     elif args.csv:

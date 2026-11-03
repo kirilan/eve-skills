@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -392,12 +392,18 @@ def build_parser() -> argparse.ArgumentParser:
                                    "leads - including surplus you did not ask for")
     p_build_cost.add_argument("--buy-all", action="store_true",
                               help="buy every quoted material instead of building it: no component jobs at all")
+    p_build_cost.add_argument("--facility", metavar="NAME",
+                              help="cost the job in a facility from the operation file (system, tax, "
+                                   "material and time bonuses); explicit --system/--facility-tax/"
+                                   "--material-multiplier still win (see: eve-skills operation show)")
+    p_build_cost.add_argument("--site", metavar="NAME",
+                              help="like --facility, naming a site of the operation file instead")
     p_build_cost.add_argument("--facility-tax", dest="facility_tax", type=float,
-                              default=industry.NPC_STATION_TAX * 100.0, metavar="PCT",
+                              default=None, metavar="PCT",
                               help=f"installation tax as a percent of EIV (default "
                                    f"{industry.NPC_STATION_TAX * 100:g} = an NPC station; a player "
                                    f"structure bills differently and only you know its rate)")
-    p_build_cost.add_argument("--material-multiplier", dest="material_multiplier", type=float, default=1.0,
+    p_build_cost.add_argument("--material-multiplier", dest="material_multiplier", type=float, default=None,
                               metavar="F",
                               help="aggregate material bonus as a fraction of the blueprint's requirements "
                                    "(default 1.0 = none; 0.95 is a 5%% reduction, so quantities and cost fall)")
@@ -516,6 +522,13 @@ def build_parser() -> argparse.ArgumentParser:
                              help="machine-readable output: raw materials and every reachable product")
     p_pi_planet.add_argument("--csv", action="store_true",
                              help="CSV rows - one per commodity, tier 0 to tier 3 - on stdout")
+
+    p_operation = sub.add_parser("operation",
+                                 help="sites, facilities, extra hubs and freight from the operation file "
+                                      "(operation.json in the config directory)")
+    p_operation.add_argument("action", nargs="?", choices=["show", "template"], default="show",
+                             help="show what is configured (default), or print a template to start from")
+    p_operation.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_system = sub.add_parser("system",
                               help="true security status, region and planets of one or more solar "
@@ -731,7 +744,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "operation": cmd_operation.cmd_operation, "colonies": cmd_colonies.cmd_colonies}
 
 
 def _use_utf8_streams() -> None:

@@ -274,6 +274,24 @@ def job_time(recipe: Recipe, runs: int, te: int = 0) -> int:
     return round(recipe.time * runs * (1 - (te if recipe.researchable else 0) / 100.0))
 
 
+def invented_run_limit(blueprint_id: int, invention: Mapping | None) -> int:
+    """The most runs an invented copy of `blueprint_id` can carry; 0 when nothing invents it.
+
+    A T2 blueprint's own maxProductionLimit says nothing about its invented copies: a rig blueprint
+    is listed at 1 run while invention hands out 1 run plus the decryptor's modifier (10 with an
+    Augmentation). The ceiling is the largest base output over every source plus the largest run
+    modifier any decryptor gives."""
+    if not invention:
+        return 0
+    key = str(blueprint_id)
+    base = max((int(p[1]) for row in (invention.get("blueprints") or {}).values()
+                for p in row.get("p") or [] if str(p[0]) == key), default=0)
+    if not base:
+        return 0
+    bonus = max((int(d.get("runs") or 0) for d in (invention.get("decryptors") or {}).values()), default=0)
+    return base + max(bonus, 0)
+
+
 def estimated_item_value(recipe: Recipe, runs: int,
                          adjusted: Mapping[int, float]) -> tuple[float, tuple[int, ...]]:
     """(EIV, type ids with no published price) for one job of `runs` installs.
@@ -310,12 +328,15 @@ class Facility:
     the NPC-station and SCC policy numbers; a player-owned structure bills differently, so its
     caller overrides whichever of them actually changes rather than the whole model.
     `material_multiplier` is the aggregate rig/structure material bonus (1.0 for none) - it is a
-    facility property, not a research level, which is why it lives here and applies to reactions too."""
+    facility property, not a research level, which is why it lives here and applies to reactions too.
+    `time_multiplier` is the structure's and rigs' job-time bonus the same way (1.0 for none); it moves
+    `BuildPlan.time` and never an ISK figure."""
 
     cost_index: float
     facility_tax: float = NPC_STATION_TAX
     material_multiplier: float = 1.0
     scc_surcharge: float = SCC_SURCHARGE
+    time_multiplier: float = 1.0
 
 
 def job_cost(eiv: float, facility: Facility) -> float:
@@ -493,7 +514,8 @@ def _component_build(material_id: int, required: int, recipe: Recipe, index: Map
     total = material_cost + fee
     return BuildQuote(recipe=candidate, runs=job_runs, units=units, surplus=units - required,
                       material_cost=material_cost, eiv=eiv, job_cost=fee, total=total,
-                      unit=total / units, time=job_time(candidate, job_runs, te_job),
+                      unit=total / units,
+                      time=round(job_time(candidate, job_runs, te_job) * facility.time_multiplier),
                       unpriced=tuple(sorted(missing)), eiv_missing=eiv_missing)
 
 
@@ -650,7 +672,7 @@ def plan_build(recipe: Recipe, index: Mapping[int, Recipe], prices: Prices, faci
         job_cost=fee,
         total=total,
         cost_per_unit=None if unpriced else total / units,
-        time=job_time(recipe, runs, te_job),
+        time=round(job_time(recipe, runs, te_job) * facility.time_multiplier),
         unpriced=unpriced,
         eiv_missing=tuple(sorted(eiv_gaps)),
     )
