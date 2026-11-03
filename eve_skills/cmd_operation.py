@@ -52,7 +52,7 @@ def operation_text(op: operation.Operation) -> str:
         lines.append(f"  material multiplier: {_multipliers(f.material)}")
         lines.append(f"  time multiplier:     {_multipliers(f.time)}")
         if f.unknown:
-            lines.append(f"  NOT SET: {', '.join(f.unknown)} - costs use defaults (no bonus, NPC tax) until filled in")
+            lines.append(f"  NOT SET: {', '.join(f.unknown)} - until filled in, a missing tax is the NPC rate and missing rigs add no bonus")
     if op.hubs:
         lines.append("")
         lines.append(render.table(["hub", "label", "location", "region", "reader"],

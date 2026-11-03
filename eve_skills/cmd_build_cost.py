@@ -755,7 +755,7 @@ def cmd_build_cost(args):
     warnings = [_build_requests_note(figures)]
     if profile is not None and profile.unknown:
         warnings.append(f"facility {profile.name}: {', '.join(profile.unknown)} not set in the operation "
-                        f"file, so those parts of the cost use defaults (no bonus, NPC station tax)")
+                        f"file: a missing tax is costed at the NPC rate and missing rigs add no bonus")
     rules = industry.rules_warning()
     if rules:
         warnings.append(rules)
