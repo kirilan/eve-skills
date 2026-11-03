@@ -2,11 +2,18 @@
 
 Demand comes from the local SDE recipes (manufacturing materials with ME rounding per job, invention
 datacores per attempt plus one decryptor each) and from fixed extras. It is netted, in this order,
-against the corporation's hangars at the build station (usable as they are), what the corporation and
-the hauler already own at the buying hub (pick up, no ISK), and the hauler's personal hangars in the
-build station's solar system (move into the corporation hangar). The rest is bought at the hub's
-lowest sell, then fitted to `--cargo` in priority order: inventions and extras first, then lines as
-given, the last line cut to the units that fit.
+against the stock at the build facility (usable as they are), what we already own at the buying hub
+(pick up, no ISK), and the hauler's personal hangars in the build station's solar system (move into
+the corporation hangar). The rest is bought at the hub's lowest sell, then fitted to `--cargo` in
+priority order: inventions and extras first, then lines as given, the last line cut to the units that
+fit.
+
+Two kinds of build facility. A corporation site keeps its stock in the corporation's hangars, read
+through one character with the Director role. A personal site (`--site` naming one in the operation
+file) has no shared hangar: every character listed for it holds their own stock in the facility, so
+stock is read per character, and a line or invention assigned to a character (`...@NAME`) is supplied
+from that character's own hangar first and then by **transfers** from the others - the trades to make
+before installing. With a freight route configured, the haul is priced as a courier contract.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 
-from . import alphadata, esi as esi_mod, exports, freshness, industry, market, price_watch as pw, render, sso, universe
+from . import alphadata, esi as esi_mod, exports, freshness, industry, market, operation, price_watch as pw, render, sso, universe
 
 
 @dataclass
@@ -29,6 +36,17 @@ class Demand:
     fit: int = 0
     status: str = "full"
     need: dict[int, dict] = field(default_factory=dict)
+    builder: str | None = None     # the character installing it (personal sites): `...@NAME`
+
+
+def _assignee(spec: str, flag: str) -> tuple[str, str | None]:
+    """`NAME=QTY[:...][@CHAR]` -> (the spec without its assignee, the character or None)."""
+    body, at, who = spec.rpartition("@")
+    if not at or "=" not in body:
+        return spec, None
+    if not who.strip():
+        raise RuntimeError(f"{flag}: '{spec}' ends in '@' without a character name")
+    return body, who.strip()
 
 
 def _split(spec: str, flag: str) -> tuple[str, list[str]]:
@@ -48,13 +66,15 @@ def _int(text: str, flag: str, spec: str, minimum: int = 0) -> int:
     return value
 
 
-def build_requirements(recipe: industry.Recipe, units: int, me: int, material_multiplier: float = 1.0) -> Counter:
-    """Direct materials for `units` of the product, installed as jobs of the blueprint's maximum runs.
+def build_requirements(recipe: industry.Recipe, units: int, me: int, material_multiplier: float = 1.0,
+                       job_runs: int | None = None) -> Counter:
+    """Direct materials for `units` of the product, installed as jobs of `job_runs` runs (default: the
+    blueprint's maximum runs).
 
     ME rounding is per job (`industry.required_quantity`), so a line is costed as the jobs it would
     really be installed as, not as one imaginary job of every run."""
     runs = math.ceil(units / max(recipe.product_qty, 1))
-    size = recipe.max_runs if recipe.max_runs > 0 else runs
+    size = job_runs or (recipe.max_runs if recipe.max_runs > 0 else runs)
     need: Counter = Counter()
     while runs > 0:
         job = min(size, runs)
@@ -112,6 +132,98 @@ def _roots(assets: list[dict]) -> dict[int, int]:
             loc = parent[loc]
         roots[start] = loc
     return roots
+
+
+PERSONAL_ASSETS_SCOPE = "esi-assets.read_assets.v1"
+
+
+def personal_stock(client, characters, wanted: set[int], at_id: int,
+                   hub_id: int | None) -> tuple[dict[str, Counter], Counter, list[str]]:
+    """Each site character's own stock in the facility, plus what any of them holds at the hub.
+
+    Returns ({character: Counter}, pickup Counter, notes). A character that is not stored, did not
+    grant the assets consent, or is refused by ESI is named in the notes and counted as holding
+    nothing - never silently, because their stock is then bought again."""
+    holdings: dict[str, Counter] = {}
+    pickup: Counter = Counter()
+    notes: list[str] = []
+    missing: list[str] = []
+    at_hub: list[str] = []
+    for spec in characters:
+        try:
+            cid = sso.resolve_character(spec)
+            tok = sso.get_access_token(cid)
+        except (RuntimeError, KeyError, OSError) as err:
+            missing.append(f"{spec} ({err})")
+            continue
+        name = tok.get("character_name") or spec
+        if PERSONAL_ASSETS_SCOPE not in (tok.get("scopes") or []):
+            missing.append(f"{name} (no assets consent - run: eve-skills login --scopes assets)")
+            continue
+        try:
+            assets, meta = client.get_all_meta(f"/characters/{cid}/assets", token=tok["access_token"])
+        except esi_mod.EsiError as err:
+            missing.append(f"{name} (ESI refused personal assets: {err})")
+            continue
+        stock: Counter = Counter()
+        roots = _roots(assets)
+        for asset in assets:
+            type_id = int(asset["type_id"])
+            if type_id not in wanted or int(asset.get("quantity", 0)) <= 0:
+                continue
+            root = roots.get(int(asset["location_id"]), int(asset["location_id"]))
+            if root == at_id:
+                stock[type_id] += int(asset["quantity"])
+            elif hub_id is not None and root == hub_id:
+                pickup[type_id] += int(asset["quantity"])
+                if name not in at_hub:
+                    at_hub.append(name)
+        holdings[name] = stock
+        notes.append(freshness.line(f"{name}'s assets", meta))
+    if missing:
+        notes.append("not read, so their stock is not counted: " + "; ".join(missing))
+    if at_hub:
+        notes.append(f"pick-ups at the hub are held by {', '.join(at_hub)}")
+    return holdings, pickup, notes
+
+
+def plan_transfers(demands: list[Demand], holdings: dict[str, Counter]) -> tuple[list[dict], dict[str, Counter]]:
+    """Who gives whom what, so every assigned line is supplied from its installer's own hangar.
+
+    Each demand's on-site share is taken from its builder's stock first, then from the character
+    holding the most of that material (a transfer); an unassigned demand draws from whoever holds
+    the most, and no transfer is listed for it because nobody said who installs it. What the haul
+    brings (pick-ups and purchases) is listed per builder as a delivery."""
+    left = {who: Counter(stock) for who, stock in holdings.items()}
+    by_lower = {who.lower(): who for who in left}
+    moves: Counter = Counter()
+    deliveries: dict[str, Counter] = {}
+    for d in demands:
+        builder = by_lower.get(d.builder.lower()) if d.builder else None
+        for type_id, r in d.need.items():
+            want = r.get("usable", 0)
+            if builder is not None:
+                own = min(left[builder][type_id], want)
+                left[builder][type_id] -= own
+                want -= own
+            for giver in sorted(left, key=lambda w: (-left[w][type_id], w)):
+                if want <= 0:
+                    break
+                if giver == builder:
+                    continue
+                take = min(left[giver][type_id], want)
+                if take <= 0:
+                    break
+                left[giver][type_id] -= take
+                want -= take
+                if builder is not None:
+                    moves[(giver, builder, type_id)] += take
+            brought = r.get("pickup", 0) + r.get("buy", 0)
+            if builder is not None and brought:
+                deliveries.setdefault(builder, Counter())[type_id] += brought
+    transfers = [{"from": giver, "to": taker, "type_id": type_id, "quantity": qty}
+                 for (giver, taker, type_id), qty in sorted(moves.items()) if qty]
+    return transfers, deliveries
 
 
 def price_check(client, hub: market.Scope, demands: list[Demand], rows: list[dict], held: Counter,
@@ -199,17 +311,41 @@ def cmd_restock(args):
         index = industry.recipe_index(alphadata.blueprint_materials())
     except FileNotFoundError:
         raise RuntimeError("no local blueprint data - run: eve-skills update-data") from None
-    client, chars, hints = exports.targets(args, [("assets", "esi-assets.read_corporation_assets.v1")])
-    if not chars:
-        raise RuntimeError("no stored character with the assets consent to read corporation hangars"
-                           + (f" ({hints[0]})" if hints else ""))
+    op = operation.load()
+    site = op.site(args.site) if (args.site or (op.configured and not args.at)) else None
+    facility = op.facility(site.facility) if site else None
+    personal = site is not None and site.owner == "personal"
+    material_multiplier = facility.material_multiplier("manufacturing") if facility else 1.0
+    notes_pre: list[str] = []
+    if personal:
+        client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
+        chars, hints = [], []
+    else:
+        if site is not None and not args.char and site.readers:
+            args.char = site.readers[0]
+        client, chars, hints = exports.targets(args, [("assets", "esi-assets.read_corporation_assets.v1")])
+        if not chars:
+            raise RuntimeError("no stored character with the assets consent to read corporation hangars"
+                               + (f" ({hints[0]})" if hints else ""))
     hub = market.hub_scope(args.hub)
-    at_id, at_name = market._resolve(client, args.at, "stations", "station")
+    if args.at:
+        if str(args.at).strip().isdigit() and int(args.at) > universe.INT32_MAX:
+            at_id, at_name = int(args.at), f"structure {args.at}"
+        else:
+            at_id, at_name = market._resolve(client, args.at, "stations", "station")
+    elif facility is not None:
+        if facility.location_id is None:
+            raise RuntimeError(f"facility {facility.name} has no location_id in the operation file, so its "
+                               f"hangars cannot be found - fill it in, or pass --at")
+        at_id, at_name = facility.location_id, f"{facility.name} ({facility.system or facility.location_id})"
+    else:
+        raise RuntimeError("name the build station with --at, or a site of the operation file with --site")
 
     # ---- demand
     demands: list[Demand] = []
     invention = None
     for spec in args.invent or []:
+        spec, builder = _assignee(spec, "--invent")
         name, parts = _split(spec, "--invent")
         attempts = _int(parts[0], "--invent", spec, 1)
         product_id, product = market.resolve_type(client, name)
@@ -219,53 +355,82 @@ def cmd_restock(args):
         invention = invention or alphadata.blueprint_invention()
         need, dname = invention_requirements(invention, recipe.blueprint_id, attempts,
                                              parts[1] if len(parts) > 1 else None)
-        demands.append(Demand("invent", f"invent {product} x{attempts}" + (f" ({dname})" if dname else ""),
-                              attempts, {t: q / attempts for t, q in need.items()}))
+        demands.append(Demand("invent", f"invent {product} x{attempts}" + (f" ({dname})" if dname else "")
+                              + (f" @{builder}" if builder else ""),
+                              attempts, {t: q / attempts for t, q in need.items()}, builder=builder))
     for spec in args.extra or []:
         name, parts = _split(spec, "--extra")
         qty = _int(parts[0], "--extra", spec, 1)
         type_id, tname = market.resolve_type(client, name)
         demands.append(Demand("extra", f"extra {tname}", qty, {type_id: 1.0}))
     for spec in args.line or []:
+        spec, builder = _assignee(spec, "line")
         name, parts = _split(spec, "line")
         units = _int(parts[0], "line", spec, 1)
-        me = _int(parts[1], "line", spec) if len(parts) > 1 else 0
+        me = _int(parts[1], "line", spec) if len(parts) > 1 and parts[1] else 0
         if me > industry.MAX_ME:
             raise RuntimeError(f"ME {me} in '{spec}' is past the cap of {industry.MAX_ME}")
+        job_runs = _int(parts[2], "line", spec, 1) if len(parts) > 2 else None
         product_id, product = market.resolve_type(client, name)
         recipe = index.get(product_id)
         if recipe is None:
             raise RuntimeError(f"no blueprint in the local SDE data makes {product}")
-        need = build_requirements(recipe, units, me)
-        demands.append(Demand("build", f"{product}" + (f" ME{me}" if me else ""), units,
-                              {t: q / units for t, q in need.items()}))
+        if job_runs is None:
+            # An invented copy carries more runs than the T2 blueprint's own limit; without :RUNS the
+            # line is costed at the most an invented copy can hold, which is what ME rounding needs.
+            try:
+                invented = industry.invented_run_limit(recipe.blueprint_id, invention or alphadata.blueprint_invention())
+            except (FileNotFoundError, ValueError):
+                invented = 0
+            if invented > recipe.max_runs > 0:
+                job_runs = invented
+                notes_pre.append(f"{product}: jobs of {invented} runs (an invented copy's most); "
+                                 f"add :RUNS to the line for other copies, e.g. {product}={units}:{me}:4")
+        need = build_requirements(recipe, units, me, material_multiplier, job_runs)
+        demands.append(Demand("build", f"{product}" + (f" ME{me}" if me else "")
+                              + (f" x{job_runs}r" if job_runs else "") + (f" @{builder}" if builder else ""),
+                              units, {t: q / units for t, q in need.items()}, builder=builder))
 
     wanted = {t for d in demands for t in d.per_unit}
 
     # ---- stock
     usable, pickup, move = Counter(), Counter(), Counter()
+    holdings: dict[str, Counter] = {}       # personal site: character -> stock in the facility
     systems: dict[int, int | None] = {}
     at_system = _station_system(client, at_id, systems)
-    tok, public = chars[0]
-    corp_id = exports.corp_of(public)
-    reader = public.get("name") or str(tok["character_id"])
-    try:
-        assets, meta = client.get_all_meta(f"/corporations/{corp_id}/assets", token=tok["access_token"])
-    except esi_mod.AuthError as err:
-        raise RuntimeError(f"{reader}: ESI refused corporation assets ({err}) - that needs the "
-                           f"Director role in the corporation") from None
-    roots = _roots(assets)
-    for asset in assets:
-        type_id = int(asset["type_id"])
-        if type_id not in wanted or int(asset.get("quantity", 0)) <= 0:
-            continue
-        root = roots.get(int(asset["location_id"]), int(asset["location_id"]))
-        qty = int(asset["quantity"])
-        if root == at_id and asset.get("location_flag") != "CorpDeliveries":
-            usable[type_id] += qty
-        elif root == hub.location_id:
-            pickup[type_id] += qty
-    notes = [freshness.line("corp assets", meta) + f" (read by {reader})"]
+    notes = list(notes_pre)
+    if personal:
+        holdings, picked, read_notes = personal_stock(client, site.characters, wanted, at_id, hub.location_id)
+        for stock in holdings.values():
+            usable.update(stock)
+        pickup.update(picked)
+        notes += read_notes
+        known = {name.lower() for name in holdings}
+        for d in demands:
+            if d.builder and d.builder.lower() not in known:
+                raise RuntimeError(f"{d.label}: {d.builder} is not a readable character of site {site.name} "
+                                   f"({', '.join(holdings) or 'none'})")
+    else:
+        tok, public = chars[0]
+        corp_id = exports.corp_of(public)
+        reader = public.get("name") or str(tok["character_id"])
+        try:
+            assets, meta = client.get_all_meta(f"/corporations/{corp_id}/assets", token=tok["access_token"])
+        except esi_mod.AuthError as err:
+            raise RuntimeError(f"{reader}: ESI refused corporation assets ({err}) - that needs the "
+                               f"Director role in the corporation") from None
+        roots = _roots(assets)
+        for asset in assets:
+            type_id = int(asset["type_id"])
+            if type_id not in wanted or int(asset.get("quantity", 0)) <= 0:
+                continue
+            root = roots.get(int(asset["location_id"]), int(asset["location_id"]))
+            qty = int(asset["quantity"])
+            if root == at_id and asset.get("location_flag") != "CorpDeliveries":
+                usable[type_id] += qty
+            elif root == hub.location_id:
+                pickup[type_id] += qty
+        notes.append(freshness.line("corp assets", meta) + f" (read by {reader})")
     if args.hauler:
         hauler_id = sso.resolve_character(args.hauler)
         htok = sso.get_access_token(hauler_id)
@@ -360,6 +525,23 @@ def cmd_restock(args):
         notes.append(f"no sell order at {hub.label} for: {', '.join(unpriced)} - their cost is left out")
     total_m3 = sum(r["haul_m3"] for r in rows)
     total_isk = sum(r["buy_isk"] or 0 for r in rows)
+    transfers, deliveries = (plan_transfers(ordered, holdings) if personal else ([], {}))
+    for item in transfers:
+        item["name"] = names.get(item["type_id"]) or f"type {item['type_id']}"
+    for who, items in deliveries.items():
+        deliveries[who] = {names.get(t) or f"type {t}": q for t, q in items.items()}
+    freight = None
+    route_name = args.freight or (site.freight_in if site is not None else None)
+    if route_name:
+        route = op.freight.get(route_name.lower())
+        if route is None:
+            raise RuntimeError(f"no freight route '{route_name}' in the operation file - routes: "
+                               f"{', '.join(sorted(op.freight)) or 'none'}")
+        pickup_isk = sum((figures.min_sell.get(r["type_id"]) or 0) * r["pickup"] for r in rows)
+        collateral = total_isk + pickup_isk
+        freight = {"route": route.route, "m3": total_m3, "collateral": collateral,
+                   "cost": route.contract_cost(total_m3, collateral),
+                   "minimum_binds": route.contract_cost(total_m3, collateral) == route.minimum > 0}
     check = None
     if args.price_check and args.days > 0:
         check = price_check(client, hub, ordered, rows, held, args.days)
@@ -373,7 +555,10 @@ def cmd_restock(args):
            "hub": hub.label, "cargo_m3": args.cargo, "haul_m3": total_m3, "buy_isk": total_isk,
            "lines": [{"kind": d.kind, "label": d.label, "units": d.units, "fit": d.fit, "status": d.status,
                       "haul_m3": haul(d.need)} for d in ordered],
-           "materials": rows, "price_check": check, "hints": hints, "notes": notes}
+           "materials": rows, "price_check": check, "hints": hints, "notes": notes,
+           "site": site.name if site else None, "owner": site.owner if site else "corp",
+           "holdings": {k: {str(t): q for t, q in v.items()} for k, v in holdings.items()},
+           "transfers": transfers, "deliveries": deliveries, "freight": freight}
     if args.json:
         for line in hints:
             print(line, file=sys.stderr)
@@ -401,6 +586,17 @@ def cmd_restock(args):
     if moves:
         lines += ["", "in personal hangars nearby - move into the corporation hangar:"] + \
                  [f"  {r['name']} {r['move']:,}" for r in moves]
+    if transfers:
+        lines += ["", "transfers before installing (trade window, in the facility):"] + \
+                 [f"  {t['from']} -> {t['to']}: {t['name']} {t['quantity']:,}" for t in transfers]
+    if deliveries:
+        lines += ["", "hand the haul to the installers:"] + \
+                 [f"  {who}: " + ", ".join(f"{n} {q:,}" for n, q in sorted(items.items()))
+                  for who, items in sorted(deliveries.items())]
+    if freight is not None:
+        lines += ["", f"courier {freight['route']}: {render.isk(freight['cost'])} ISK for "
+                      f"{freight['m3']:,.0f} m3 and {render.isk(freight['collateral'])} ISK collateral"
+                      + (" (the contract minimum)" if freight["minimum_binds"] else "")]
     short = [d for d in ordered if d.status != "full"]
     if short:
         lines += ["", "not covered this trip: " + "; ".join(f"{d.label} ({d.units - d.fit:,})" for d in short)]
@@ -409,5 +605,8 @@ def cmd_restock(args):
         blocks.append(price_check_text(check, rows))
     blocks.append("\n".join(f"* {n}" for n in notes + [
         "materials are direct inputs only: a component you build yourself is its own line",
-        "on site = the corporation's hangars at the build station; extras are bought in full"]))
+        ("on site = every site character's own hangars in the facility; transfers move it to the "
+         "character installing each line" if personal else
+         "on site = the corporation's hangars at the build station")
+        + "; extras are bought in full"]))
     print("\n\n".join(blocks))

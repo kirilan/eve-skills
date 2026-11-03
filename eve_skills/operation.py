@@ -23,8 +23,9 @@ The file format (percentages are percent, multipliers are fractions)::
       "default_site": "null",
       "sites": {
         "kulelen": {"owner": "corp", "facility": "kulelen", "readers": ["General Fail"]},
-        "null": {"owner": "personal", "facility": "4gyv-raitaru",
-                 "characters": ["Santraginus XI", "Santraginus XII"]}
+        "null": {"owner": "personal", "facility": "4gyv-raitaru", "hub": "4-hwwf",
+                 "characters": ["Santraginus XI", "Santraginus XII"],
+                 "freight_in": "jita->4-hwwf", "freight_out": "4-hwwf->jita"}
       },
       "facilities": {
         "kulelen": {"location_id": 60002329, "system": "Kulelen"},
@@ -124,6 +125,9 @@ class Site:
     facility: str
     characters: tuple[str, ...] = ()
     readers: tuple[str, ...] = ()
+    freight_in: str | None = None      # route that brings supplies from the buying hub
+    freight_out: str | None = None     # route that takes finished goods to the selling hub
+    hub: str | None = None             # the market next to the facility, if any
 
 
 @dataclass(frozen=True)
@@ -306,7 +310,9 @@ def parse(document: dict, path: str | None = None) -> Operation:
         if owner == "personal" and not characters:
             raise OperationError(f"{where}: a personal site lists its characters")
         sites[key.lower()] = Site(name=key.lower(), owner=owner, facility=facility,
-                                  characters=characters, readers=readers)
+                                  characters=characters, readers=readers,
+                                  freight_in=(raw.get("freight_in") or None), freight_out=(raw.get("freight_out") or None),
+                                  hub=(str(raw["hub"]).lower() if raw.get("hub") else None))
     hubs: dict[str, Hub] = {}
     for key, raw in (document.get("hubs") or {}).items():
         where = f"hubs.{key}"
@@ -328,6 +334,10 @@ def parse(document: dict, path: str | None = None) -> Operation:
             route=key.lower(), per_m3=_number(raw.get("per_m3", 0), f"{where}.per_m3", low=0),
             collateral_pct=_number(raw.get("collateral_pct", 0), f"{where}.collateral_pct", low=0, high=100),
             minimum=_number(raw.get("min", 0), f"{where}.min", low=0))
+    for site in sites.values():
+        for route in (site.freight_in, site.freight_out):
+            if route and route.lower() not in freight:
+                raise OperationError(f"sites.{site.name}: freight route '{route}' is not in freight")
     default = document.get("default_site")
     if default is not None and str(default).lower() not in sites:
         raise OperationError(f"default_site '{default}' is not in sites")
@@ -356,7 +366,8 @@ TEMPLATE = {
     "sites": {
         "kulelen": {"owner": "corp", "facility": "kulelen", "readers": ["General Fail", "Santraginus IX"]},
         "null": {"owner": "personal", "facility": "4gyv-raitaru",
-                 "characters": ["Santraginus XI", "Santraginus XII", "General Practitioner"]},
+                 "characters": ["Santraginus XI", "Santraginus XII", "General Practitioner"],
+                 "hub": "4-hwwf", "freight_in": "jita->4-hwwf", "freight_out": "4-hwwf->jita"},
     },
     "facilities": {
         "kulelen": {"location_id": 60002329, "system": "Kulelen"},

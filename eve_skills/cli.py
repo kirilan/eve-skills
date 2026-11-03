@@ -429,16 +429,27 @@ def build_parser() -> argparse.ArgumentParser:
                                help="what planned builds and inventions still need after corp stock, what "
                                     "to pick up or buy at a hub, fitted to a cargo hold (needs login "
                                     "--scopes assets and the Director role for corp hangars)")
-    p_restock.add_argument("line", nargs="*", metavar="PRODUCT=UNITS[:ME]",
-                           help="a build line: product units to make, optional blueprint ME (default 0)")
-    p_restock.add_argument("--invent", action="append", metavar="T2PRODUCT=ATTEMPTS[:DECRYPTOR]",
+    p_restock.add_argument("line", nargs="*", metavar="PRODUCT=UNITS[:ME[:RUNS]][@CHAR]",
+                           help="a build line: product units to make, optional blueprint ME (default 0) and "
+                                "runs per job (default: the blueprint's limit, or the most an invented copy "
+                                "holds); @CHAR names the installer on a personal site")
+    p_restock.add_argument("--invent", action="append", metavar="T2PRODUCT=ATTEMPTS[:DECRYPTOR][@CHAR]",
                            help="invention attempts for this T2 product: datacores from the SDE recipe, "
-                                "plus one decryptor per attempt when named (e.g. Augmentation); repeatable")
+                                "plus one decryptor per attempt when named (e.g. Augmentation); @CHAR names "
+                                "the inventor on a personal site; repeatable")
     p_restock.add_argument("--extra", action="append", metavar="TYPE=QTY",
                            help="buy this quantity in full, on top of stock (a buffer); repeatable")
-    p_restock.add_argument("--at", required=True, metavar="STATION",
-                           help="build station (exact name or id): the corporation's hangars there are "
-                                "the stock already on site")
+    p_restock.add_argument("--at", metavar="STATION",
+                           help="build station (exact name or id, or a structure id): the stock there is "
+                                "already on site; optional with --site")
+    p_restock.add_argument("--site", metavar="NAME",
+                           help="a site of the operation file: its facility is the build location, a corp "
+                                "site reads the corporation's hangars, a personal site every listed "
+                                "character's own hangars (with transfers between them); default: the "
+                                "file's default site when --at is not given")
+    p_restock.add_argument("--freight", metavar="ROUTE",
+                           help="price the haul as a courier contract on this operation-file route "
+                                "(e.g. jita->4-hwwf); default: the site's freight_in")
     p_restock.add_argument("--hub", default="jita", metavar="HUB",
                            help=f"where to buy and pick up (default jita): {', '.join(market.HUBS)}")
     p_restock.add_argument("--char", help="stored character that reads the corporation's assets")

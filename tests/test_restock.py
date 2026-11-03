@@ -157,3 +157,70 @@ class RestockCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PersonalSiteTests(unittest.TestCase):
+    """A personal site: no corporation hangar, every character's own stock, transfers between them."""
+
+    def setUp(self):
+        from tests.fake_esi import VELA
+        self.vela = VELA
+        self.env = FakeEsiEnv()
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.env.install_core()
+        self.env.install_build_cost()
+        everything = sso.SCOPES + sso.scopes_for(["all"])
+        self.env.write_tokens([self.env.token_for(ADA, everything), self.env.token_for(VELA, everything)])
+        server = self.env.server
+        ada = [{"item_id": 11, "type_id": BUILD_PLATE, "quantity": 100, "location_id": BUILD_STATION,
+                "location_flag": "Hangar", "location_type": "station", "is_singleton": False}]
+        vela = [{"item_id": 12, "type_id": BUILD_HOUSING, "quantity": 50, "location_id": BUILD_STATION,
+                 "location_flag": "Hangar", "location_type": "station", "is_singleton": False},
+                {"item_id": 13, "type_id": BUILD_CELL, "quantity": 30, "location_id": STATION_JITA,
+                 "location_flag": "Hangar", "location_type": "station", "is_singleton": False}]
+        server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token, doc=ada)
+        server.get(f"/characters/{VELA.character_id}/assets", token=VELA.token, doc=vela)
+        server.get(f"/universe/stations/{BUILD_STATION}", doc={"station_id": BUILD_STATION, "system_id": 30000142})
+        for type_id, volume in ((BUILD_PLATE, 1.0), (BUILD_HOUSING, 1.0), (BUILD_CELL, 2.0), (BUILD_PASTE, 0.5)):
+            server.get(f"/universe/types/{type_id}",
+                       doc={"type_id": type_id, "name": f"type {type_id}", "group_id": 1,
+                            "volume": volume, "packaged_volume": volume})
+        with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+            json.dump({"default_site": "home",
+                       "sites": {"home": {"owner": "personal", "facility": "lab", "freight_in": "jita->home",
+                                          "characters": [ADA.name, VELA.name]}},
+                       "facilities": {"lab": {"location_id": BUILD_STATION, "system": "Jita"}},
+                       "freight": {"jita->home": {"per_m3": 100, "collateral_pct": 1, "min": 1000}}}, fh)
+
+    def run_json(self, *argv):
+        code, out, err = self.env.run(["restock", *argv, "--no-price-check", "--json"])
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_stock_is_read_per_character_and_moved_to_the_installer(self):
+        doc = self.run_json(f"{BUILD_ARTICLE}=20@{ADA.name}")
+        self.assertEqual((doc["site"], doc["owner"]), ("home", "personal"))
+        m = {r["type_id"]: r for r in doc["materials"]}
+        # 20 runs: plate 80 is Ada's own; housing 200 takes Vela's 50 on site and buys 150; Vela's
+        # 30 cells at the hub are picked up.
+        self.assertEqual((80, 0), (m[BUILD_PLATE]["on_site"], m[BUILD_PLATE]["buy"]))
+        self.assertEqual((50, 150), (m[BUILD_HOUSING]["on_site"], m[BUILD_HOUSING]["buy"]))
+        self.assertEqual(30, m[BUILD_CELL]["pickup"])
+        self.assertEqual([{"from": self.vela.name, "to": ADA.name, "type_id": BUILD_HOUSING,
+                           "quantity": 50, "name": "Bulk Casing"}], doc["transfers"])
+        self.assertIn("Bulk Casing", doc["deliveries"][ADA.name])
+        freight = doc["freight"]
+        self.assertEqual(freight["route"], "jita->home")
+        self.assertAlmostEqual(freight["cost"], 100 * doc["haul_m3"] + 0.01 * freight["collateral"])
+
+    def test_an_unknown_installer_is_refused(self):
+        code, _out, err = self.env.run(["restock", f"{BUILD_ARTICLE}=20@Nobody", "--no-price-check"])
+        self.assertEqual(code, 1)
+        self.assertIn("Nobody", err)
+
+    def test_text_lists_transfers_and_the_courier(self):
+        code, out, err = self.env.run(["restock", f"{BUILD_ARTICLE}=20@{ADA.name}", "--no-price-check"])
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"{self.vela.name} -> {ADA.name}: Bulk Casing 50", out)
+        self.assertIn("courier jita->home", out)
