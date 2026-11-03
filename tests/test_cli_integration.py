@@ -1162,3 +1162,41 @@ class ConsoleEncodingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanBuildPersonalSiteTests(CommandTestCase):
+    """A personal site: stock another site character holds in the facility counts as a trade."""
+
+    def test_jobs_with_trades_from_another_character(self):
+        from eve_skills import sso as sso_mod
+        from tests.fake_esi import BUILD_CELL, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE, STATION_JITA
+        self.env.install_can_build()
+        everything = sso_mod.SCOPES + sso_mod.scopes_for(["all"])
+        self.env.write_tokens([self.env.token_for(ADA, everything), self.env.token_for(VELA, everything)])
+        copies = [{"item_id": 930201, "type_id": 930001, "location_id": STATION_JITA, "location_flag": "Hangar",
+                   "quantity": -2, "runs": 10, "material_efficiency": 7, "time_efficiency": 14},
+                  {"item_id": 930202, "type_id": 930001, "location_id": STATION_JITA, "location_flag": "Hangar",
+                   "quantity": -2, "runs": 10, "material_efficiency": 7, "time_efficiency": 14}]
+        def stock(items):
+            return [{"item_id": 950000 + i, "type_id": t, "quantity": q, "is_singleton": False,
+                     "location_id": STATION_JITA, "location_flag": "Hangar", "location_type": "station"}
+                    for i, (t, q) in enumerate(items)]
+        server = self.env.server
+        server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=copies)
+        server.get(f"/characters/{VELA.character_id}/blueprints", token=VELA.token, doc=[])
+        server.get(f"/characters/{ADA.character_id}/assets", token=ADA.token,
+                   doc=stock([(BUILD_PLATE, 38), (BUILD_HOUSING, 500), (BUILD_CELL, 100), (BUILD_PASTE, 100)]))
+        server.get(f"/characters/{VELA.character_id}/assets", token=VELA.token, doc=stock([(BUILD_PLATE, 60)]))
+        for who in (ADA, VELA):
+            server.get(f"/characters/{who.character_id}/industry/jobs", token=who.token, doc=[])
+        with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+            json.dump({"sites": {"home": {"owner": "personal", "facility": "jita",
+                                          "characters": [ADA.name, VELA.name]}},
+                       "facilities": {"jita": {"location_id": STATION_JITA}}}, fh)
+        code, out, err = self.env.run(["can-build", "--site", "home", "--json"])
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        row = next(d for d in doc["documents"] if d["owner"] == ADA.name)["rows"][0]
+        self.assertEqual((1, 2), (row["jobs"], row["jobs_with_trades"]))
+        self.assertEqual([("Widget Plate", 38, VELA.name)],
+                         [(t["material"], t["quantity"], t["from"]) for t in row["trades"]])

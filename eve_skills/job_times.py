@@ -1,6 +1,6 @@
 """Measured industry job times and run counts that finish inside chosen local-time windows.
 
-`jobs --times` groups past and running jobs by activity, product and installer and reports the median
+`jobs --times` groups past and running jobs by activity, product, installer and facility and reports the median
 hours per run (per attempt for invention, per copy for copying) - the real figure after skills,
 implants, facility and blueprint TE, which the blueprint's base time is not. With `--finish-window`
 it also says how many runs, installed at `--start`, end inside a window such as 08:00-10:00.
@@ -128,23 +128,34 @@ def window_fits(start: datetime, hours: float, windows: Sequence[tuple[int, int]
     return sorted(fits.values(), key=lambda fit: -fit["runs"])
 
 
-def median_times(rows: Iterable[dict], since: datetime) -> list[dict]:
-    """Median hours per run by (activity, product, installer) over timed jobs started since `since`.
+def median_times(rows: Iterable[dict], since: datetime, facility_names: dict[int, str] | None = None,
+                 facility: int | None = None) -> list[dict]:
+    """Median hours per run by (activity, product, installer, facility) over timed jobs started since `since`.
 
     Rows are `jobs` rows (`_job_rows` output). Invention products are the invented blueprint; the
-    ' Blueprint' suffix is kept so an invention row never reads as the manufactured item."""
+    ' Blueprint' suffix is kept so an invention row never reads as the manufactured item. The facility
+    is part of the key because a structure's rigs change the time per run: a Kulelen median applied to
+    a job in a rigged null-sec structure would size it for the wrong finish window. `facility_names`
+    labels known facility ids (the operation file's names); `facility` keeps only that one."""
+    names = facility_names or {}
     groups: dict[tuple, list[float]] = {}
     for row in rows:
         start = row.get("start")
         if (row.get("status") not in TIMED_STATUSES or not row.get("hours_per_run") or start is None
                 or start < since):
             continue
+        facility_id = row.get("facility_id")
+        if facility is not None and facility_id != facility:
+            continue
+        label = names.get(facility_id) or row.get("installed_in") or (
+            f"facility {facility_id}" if facility_id is not None else "-")
         key = (row["activity"], row.get("product") or f"type {row.get('product_id')}",
-               row.get("installer") or f"character {row.get('installer_id')}")
+               row.get("installer") or f"character {row.get('installer_id')}", facility_id, label)
         groups.setdefault(key, []).append(float(row["hours_per_run"]))
     out = [{"activity": activity, "product": product, "installer": installer,
+            "facility_id": facility_id, "facility": label,
             "hours_per_run": statistics.median(values), "min_hours": min(values),
             "max_hours": max(values), "jobs": len(values)}
-           for (activity, product, installer), values in groups.items()]
+           for (activity, product, installer, facility_id, label), values in groups.items()]
     out.sort(key=lambda r: (r["activity"], r["product"].casefold(), r["hours_per_run"]))
     return out

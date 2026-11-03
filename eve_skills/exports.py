@@ -432,9 +432,18 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
     windows = job_times.parse_windows(args.finish_window) if args.finish_window else None
     start = job_times.parse_start(args.start, tz, now) if windows else None
     since = now - timedelta(days=args.days)
+    from . import operation
+    op = operation.load()
+    facility_names = {f.location_id: name for name, f in op.facilities.items() if f.location_id}
+    only = None
+    if getattr(args, "facility", None):
+        chosen = op.facility(args.facility)
+        if chosen.location_id is None:
+            raise RuntimeError(f"facility {chosen.name} has no location_id in the operation file")
+        only = chosen.location_id
     documents = []
     for owner, rows, meta, corp_id in all_rows:
-        times = job_times.median_times(rows, since)
+        times = job_times.median_times(rows, since, facility_names, only)
         if windows:
             for row in times:
                 row["fits"] = job_times.window_fits(start, row["hours_per_run"], windows, tz,
@@ -456,12 +465,12 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
 
     blocks = list(hints)
     for owner, meta, corp_id, times in documents:
-        headers = ["activity", "product", "installer", "h/run", "range", "jobs"]
+        headers = ["activity", "product", "installer", "facility", "h/run", "range", "jobs"]
         if windows:
             headers.append("runs -> end")
         table_rows = []
         for row in times:
-            cells = [row["activity"], row["product"], row["installer"], f"{row['hours_per_run']:.2f}",
+            cells = [row["activity"], row["product"], row["installer"], row["facility"], f"{row['hours_per_run']:.2f}",
                      f"{row['min_hours']:.2f}-{row['max_hours']:.2f}", str(row["jobs"])]
             if windows:
                 fits = row["fits"][:2]
@@ -484,8 +493,8 @@ def cmd_jobs(args):
     times = getattr(args, "times", False)
     if times and (args.group or args.csv):
         raise RuntimeError("--times has its own table and --json; it cannot be combined with --group or --csv")
-    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz")):
-        raise RuntimeError("--finish-window, --start and --tz only apply with --times")
+    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz", "facility")):
+        raise RuntimeError("--finish-window, --start, --tz and --facility only apply with --times")
     completed = args.completed or times
     scope = ("esi-industry.read_corporation_jobs.v1" if args.corp
              else "esi-industry.read_character_jobs.v1")

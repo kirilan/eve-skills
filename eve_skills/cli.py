@@ -190,10 +190,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--slots", action="store_true",
                         help="show manufacturing, science and reaction slots used / maximum / free per character")
     p_jobs.add_argument("--times", action="store_true",
-                        help="median measured hours per run by activity, product and installer "
-                             "(reads finished jobs too)")
+                        help="median measured hours per run by activity, product, installer and "
+                             "facility (reads finished jobs too)")
     p_jobs.add_argument("--days", type=int, default=14, metavar="N",
                         help="with --times: only jobs started in the last N days (default 14)")
+    p_jobs.add_argument("--facility", metavar="NAME",
+                        help="with --times: only jobs installed in this facility of the operation file "
+                             "(times are always reported per facility)")
     p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
                         help="with --times: run counts that end inside these local-time windows, "
                              "e.g. 08-10,20-22")
@@ -221,6 +224,10 @@ def build_parser() -> argparse.ArgumentParser:
                              help="use corporation blueprints and assets")
     p_can_build.add_argument("--division", metavar="N|NAME",
                              help="only blueprints in one corporation hangar division")
+    p_can_build.add_argument("--site", metavar="NAME",
+                             help="a site of the operation file: applies its facility's material bonus; a "
+                                  "corp site reads the corporation, a personal site each listed character, "
+                                  "and counts jobs possible after trades from the others ('with trades')")
     p_can_build.add_argument("--type", metavar="TEXT",
                              help="case-insensitive blueprint or product name substring")
     p_can_build.add_argument("--builders", metavar="A,B",

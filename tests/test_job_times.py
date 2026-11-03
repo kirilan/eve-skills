@@ -90,3 +90,18 @@ class MedianTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FacilityTests(unittest.TestCase):
+    def row(self, hours, facility):
+        return {"activity": "manufacturing", "product": "Tritanium", "installer": "Ada", "status": "delivered",
+                "hours_per_run": hours, "start": NOW - timedelta(days=1), "facility_id": facility,
+                "installed_in": f"place {facility}"}
+
+    def test_each_facility_gets_its_own_median(self):
+        rows = [self.row(4.0, 60002329), self.row(4.2, 60002329), self.row(2.0, 1040000000000)]
+        out = job_times.median_times(rows, NOW - timedelta(days=14), {1040000000000: "4gyv-raitaru"})
+        self.assertEqual([("4gyv-raitaru", 2.0), ("place 60002329", 4.1)],
+                         [(r["facility"], r["hours_per_run"]) for r in out])
+        only = job_times.median_times(rows, NOW - timedelta(days=14), facility=60002329)
+        self.assertEqual([4.1], [r["hours_per_run"] for r in only])

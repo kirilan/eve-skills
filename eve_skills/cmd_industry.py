@@ -313,6 +313,17 @@ def _builder_checks(builders, recipe, skill_names):
 
 def cmd_can_build(args):
     """Count installable blueprint jobs from stock in each blueprint's own input location."""
+    site = facility = None
+    if getattr(args, "site", None):
+        from . import operation
+        op = operation.load()
+        site = op.site(args.site)
+        facility = op.facility(site.facility)
+        if site.owner == "corp":
+            args.corp = True
+            if not args.char and site.readers:
+                args.char = site.readers[0]
+    personal_site = site is not None and site.owner == "personal"
     if args.division is not None and not args.corp:
         raise RuntimeError("--division is only meaningful with can-build --corp")
     bp_scope = ("esi-corporations.read_blueprints.v1" if args.corp
@@ -322,6 +333,30 @@ def cmd_can_build(args):
     client, chars, hints = exports.targets(
         args, [("blueprints", bp_scope), ("assets", asset_scope)]
     )
+    pool: dict[str, dict[int, int]] = {}     # personal site: character -> stock in the facility
+    if personal_site:
+        members = {name.casefold() for name in site.characters}
+        chars = [(tok, public) for tok, public in chars
+                 if str(public.get("name") or tok.get("character_name") or "").casefold() in members
+                 or str(tok["character_id"]) in members]
+        if facility.location_id is None:
+            hints.append(f"facility {facility.name} has no location_id in the operation file: stock held "
+                         f"by other site characters cannot be offered as transfers")
+        else:
+            from .cmd_restock import _roots
+            for tok, public in chars:
+                cname = public.get("name") or tok.get("character_name") or str(tok["character_id"])
+                try:
+                    owned, _meta = client.get_all_meta(f"/characters/{tok['character_id']}/assets",
+                                                       token=tok["access_token"])
+                except esi_mod.EsiError:
+                    continue
+                roots = _roots(owned)
+                stock: dict[int, int] = {}
+                for asset in owned:
+                    if roots.get(int(asset["location_id"]), int(asset["location_id"])) == facility.location_id:
+                        stock[int(asset["type_id"])] = stock.get(int(asset["type_id"]), 0) + int(asset.get("quantity", 0))
+                pool[cname] = stock
     try:
         recipes = industry.recipes_by_blueprint(alphadata.blueprint_materials())
     except FileNotFoundError:
@@ -399,6 +434,9 @@ def cmd_can_build(args):
             corporation_id=corp_id, character_id=None if corp_id is not None else cid,
         )
         rows = []
+        if pool:
+            from .cmd_restock import _roots as _asset_roots
+            own_roots = _asset_roots(assets)    # a blueprint in a container still sits in the facility
         for group in groups.values():
             bp, recipe = group["blueprint"], group["recipe"]
             runs = int(bp.get("runs", -1))
@@ -424,8 +462,9 @@ def cmd_can_build(args):
                               if places.get(int(asset["location_id"])) else
                               f"location {asset['location_id']}"))
                     elsewhere[(type_id, other)] = elsewhere.get((type_id, other), 0) + qty
+            multiplier = facility.material_multiplier(recipe.activity) if facility is not None else 1.0
             requirements = {material: industry.required_quantity(base, runs, int(bp.get(
-                "material_efficiency", 0))) for material, base in recipe.materials.items()} if runs > 0 else {}
+                "material_efficiency", 0)), multiplier) for material, base in recipe.materials.items()} if runs > 0 else {}
             ratios = [(local.get(material, 0) // per_job, material, per_job)
                       for material, per_job in requirements.items()]
             possible, binding, per_job = min(ratios) if ratios else (0, 0, 0)
@@ -441,6 +480,28 @@ def cmd_can_build(args):
                         f"{label}, {qty:,} in {where} — the job's Input Material Location must "
                         "point at the hangar holding it"
                     )
+            with_trades, trades = None, []
+            if (pool and requirements and
+                    own_roots.get(int(bp["location_id"]), int(bp["location_id"])) == facility.location_id):
+                others = {}
+                for who, stock in pool.items():
+                    if who.casefold() == cname.casefold():
+                        continue
+                    for material in requirements:
+                        if stock.get(material):
+                            others.setdefault(material, []).append((stock[material], who))
+                with_trades = min(group["count"], min(
+                    (local.get(m, 0) + sum(q for q, _ in others.get(m, []))) // per
+                    for m, per in requirements.items()))
+                for material, per in sorted(requirements.items()):
+                    short = per * with_trades - local.get(material, 0)
+                    for qty, who in sorted(others.get(material, []), reverse=True):
+                        if short <= 0:
+                            break
+                        take = min(qty, short)
+                        trades.append({"from": who, "type_id": material,
+                                       "material": names.get(material) or f"type {material}", "quantity": take})
+                        short -= take
             checks = _builder_checks(builders, recipe, skill_names)
             rows.append({
                 "blueprint_type_id": int(bp["type_id"]),
@@ -459,6 +520,8 @@ def cmd_can_build(args):
                 "per_job": per_job or None,
                 "builders": checks,
                 "notes": notes,
+                "jobs_with_trades": with_trades,
+                "trades": trades,
             })
         warnings = []
         if corp_id is not None:
@@ -522,10 +585,16 @@ def cmd_can_build(args):
             table_rows.append([row["product"], row["stock_scope"], str(row["blueprints"]),
                                str(row["runs_per_job"] or "?"), str(row["me"]), str(row["jobs"]),
                                (f"{row['limiting_material']} {row['have']}/{row['per_job']}"
-                                if row["limiting_material"] else "-"), builders_cell or "-"])
+                                if row["limiting_material"] else "-"),
+                               "-" if row["jobs_with_trades"] is None else str(row["jobs_with_trades"]),
+                               builders_cell or "-"])
             lines.extend(row["notes"])
+            if row["trades"]:
+                lines.append(f"{row['product']}: for {row['jobs_with_trades']} jobs, trade to "
+                             f"{document['owner']}: " + ", ".join(
+                                 f"{t['material']} {t['quantity']:,} from {t['from']}" for t in row["trades"]))
         lines.append(render.table(
-            ["product", "stock scope", "BPs", "runs/job", "ME", "jobs", "limiting", "builders"],
+            ["product", "stock scope", "BPs", "runs/job", "ME", "jobs", "limiting", "with trades", "builders"],
             table_rows) if table_rows else "(no buildable idle blueprints)")
         lines += document["warnings"]
         if document["division_note"]:
