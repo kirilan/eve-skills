@@ -220,3 +220,29 @@ class StructureMarketTest(unittest.TestCase):
         code, _out, err = self.env.run(["market", "34", "--hub", "nowhere"])
         self.assertEqual(code, 1)
         self.assertIn("keep", err)
+
+
+class DashboardSitesTest(unittest.TestCase):
+    def test_plan_and_merge_cover_a_split_operation(self):
+        from unittest import mock
+        from eve_skills import cmd_dashboard
+        op = operation.parse({"sites": {
+            "kulelen": {"owner": "corp", "facility": "k", "readers": ["Santraginus IX"]},
+            "null": {"owner": "personal", "facility": "n", "characters": ["Santraginus XI"]}},
+            "facilities": {"k": {"location_id": 60002329}, "n": {"system": "4GYV-Q"}}})
+        with mock.patch.object(operation, "load", return_value=op):
+            plan = cmd_dashboard._status_plan()
+        self.assertEqual([("industry", "status", "--corp", "--char", "Santraginus IX"), ("industry", "status")],
+                         [args for args, _keep in plan])
+        corp = {"owners": [{"owner_name": "Corp", "blueprints": [1]}]}
+        personal = {"owners": [{"owner_name": "Santraginus XI", "blueprints": [2]},
+                               {"owner_name": "General Fail", "blueprints": [3]}]}
+        status, error = cmd_dashboard._merged_status([((corp, None), plan[0][1]), ((personal, None), plan[1][1])])
+        self.assertIsNone(error)
+        self.assertEqual(["Corp", "Santraginus XI"], [o["owner_name"] for o in status["owners"]])
+
+    def test_without_a_file_it_is_the_corporation_snapshot(self):
+        from unittest import mock
+        from eve_skills import cmd_dashboard
+        with mock.patch.object(operation, "load", return_value=operation.EMPTY):
+            self.assertEqual([(("industry", "status", "--corp"), None)], cmd_dashboard._status_plan())

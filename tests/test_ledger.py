@@ -834,3 +834,22 @@ class DoctorLedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnreadableCorporationTests(unittest.TestCase):
+    def test_role_refusals_on_every_section_collapse_to_one_line(self):
+        report = ledger_sync.SyncReport(synced_at="2026-11-03T00:00:00Z")
+        report.problems.append({"owner": "char:1", "section": "jobs", "code": "esi_error", "message": "x"})
+        for section in ("jobs", "orders", "order_history", "blueprints", "journal corp:9:1"):
+            report.problems.append({"owner": "corp:9", "section": section, "code": "esi_refused",
+                                    "refused_character_ids": [1]})
+        ledger_sync._collapse_unreadable_corporation(report, 1, 9, True)
+        self.assertEqual(["esi_error", "no_roles"], [p["code"] for p in report.problems])
+        self.assertIn("personal jobs", ledger_sync.problem_text(report.problems[-1]))
+
+    def test_a_partial_refusal_stays_detailed(self):
+        report = ledger_sync.SyncReport(synced_at="2026-11-03T00:00:00Z")
+        report.problems.append({"owner": "corp:9", "section": "journal corp:9:1", "code": "esi_refused",
+                                "refused_character_ids": [1]})
+        ledger_sync._collapse_unreadable_corporation(report, 0, 9, True)
+        self.assertEqual(["esi_refused"], [p["code"] for p in report.problems])

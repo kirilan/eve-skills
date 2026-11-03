@@ -77,6 +77,45 @@ def _live(*args: str) -> tuple[dict | None, str | None]:
         return None, f"eve-skills {' '.join(args)}: unreadable JSON ({err})"
 
 
+def _status_plan() -> list[tuple[tuple[str, ...], set[str] | None]]:
+    """The `industry status` reads that cover every site: (arguments, characters kept or None for all).
+
+    Without an operation file this is the corporation snapshot it always was. With one, a corp site is
+    read through its first reader and a personal site from the characters' own snapshots, so an
+    operation split across a high-sec corporation and a null-sec structure shows on one page."""
+    from . import operation
+    op = operation.load()
+    if not op.sites:
+        return [(("industry", "status", "--corp"), None)]
+    plan, personal = [], set()
+    for site in op.sites.values():
+        if site.owner == "corp":
+            args = ("industry", "status", "--corp") + (("--char", site.readers[0]) if site.readers else ())
+            if (args, None) not in plan:
+                plan.append((args, None))
+        else:
+            personal.update(name.casefold() for name in site.characters)
+    if personal:
+        plan.append((("industry", "status"), personal))
+    return plan
+
+
+def _merged_status(results) -> tuple[dict | None, str | None]:
+    """One status document out of several reads; owners outside a personal site are dropped."""
+    owners, warnings, errors = [], [], []
+    for (doc, error), keep in results:
+        if doc is None:
+            errors.append(error)
+            continue
+        warnings += doc.get("warnings") or []
+        for owner in doc.get("owners") or []:
+            if keep is None or str(owner.get("owner_name") or "").casefold() in keep:
+                owners.append(owner)
+    if not owners:
+        return None, "; ".join(e for e in errors if e) or "no industry status"
+    return {"owners": owners, "warnings": warnings}, ("; ".join(e for e in errors if e) or None)
+
+
 def _market_volume(conn, type_ids) -> dict[int, float]:
     """Median daily units traded in Jita's region over the last 30 stored days, per type that has history."""
     out = {}
@@ -104,11 +143,13 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
     status_error = orders_error = inventory_error = colonies_error = None
     if live:
         orders_args = ["orders", "--check"] + (["--char", orders_char] if orders_char else [])
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        plan = _status_plan()
+        with ThreadPoolExecutor(max_workers=3 + len(plan)) as pool:
             jobs = {key: pool.submit(_live, *cmd) for key, cmd in (
-                ("status", ("industry", "status", "--corp")), ("orders", orders_args),
+                ("orders", orders_args),
                 ("inventory", ("ledger", "inventory")), ("colonies", ("colonies", "--detail")))}
-        status, status_error = jobs["status"].result()
+            reads = [(pool.submit(_live, *args), keep) for args, keep in plan]
+            status, status_error = _merged_status([(future.result(), keep) for future, keep in reads])
         orders, orders_error = jobs["orders"].result()
         inventory, inventory_error = jobs["inventory"].result()
         colonies, colonies_error = jobs["colonies"].result()
@@ -127,7 +168,8 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
             conn, since=(now.date() - timedelta(days=stockpile.HISTORY_DAYS - 1)).isoformat())
         volume = _market_volume(conn, book.produced_products)
     stock = stockpile.analyse(book, items, today=now.date(), market_volume=volume,
-                              blueprints=((status or {}).get("owners") or [{}])[0].get("blueprints") or [],
+                              blueprints=[bp for owner in (status or {}).get("owners") or []
+                                          for bp in owner.get("blueprints") or []],
                               snapshots=snapshots)
     stock["error"] = inventory_error
     stock["as_of"] = (inventory or {}).get("prices_as_of")

@@ -99,6 +99,11 @@ def problem_text(problem: dict) -> str:
     where = f"{problem.get('owner')} {problem.get('section')}"
     if problem["code"] == "missing_consent":
         return f"{where}: no {problem['feature']} consent; run: eve-skills login --scopes {problem['feature']}"
+    if problem["code"] == "no_roles":
+        tail = ("its members' personal jobs, orders and wallets are booked instead" if problem.get("personal_booked")
+                else "only the corporation's documents were asked for")
+        return (f"{problem.get('owner')}: no stored member has roles to read this corporation (expected when "
+                f"building in someone else's corporation); {tail}")
     if problem["code"] == "esi_refused":
         return (f"{where}: ESI refused {problem['refused_character_ids']} "
                 f"(corporation wallets need the Accountant or Junior Accountant role)")
@@ -227,6 +232,26 @@ def _sync_owner(conn, client, report, *, owner: str, base: str, candidates, corp
             tx = [r for r in tx if r.get("is_personal", True)]
         _store(conn, report, f"{wallet}:transactions", tx,
                lambda rows, w=wallet: ledger_db.insert_transactions(conn, w, rows), "date")
+
+
+def _collapse_unreadable_corporation(report: SyncReport, before: int, corp_id: int, personal: bool) -> None:
+    """One line instead of one per section for a corporation none of our characters may read.
+
+    Characters building out of their own hangars in somebody else's corporation (a null-sec alliance
+    member corp) hold no roles there: its jobs, orders, blueprints and wallets are all refused on every
+    sync. That is the expected state, not a list of faults to fix, and the members' personal documents
+    are what the ledger books for them. A corporation that refuses only some sections keeps the
+    detailed problems, because there a role is genuinely missing."""
+    new = report.problems[before:]
+    sections = {p.get("section") or "" for p in new}
+    # A missing consent is fixable with a login and stays listed; only role refusals collapse.
+    if not new or not all(p.get("code") == "esi_refused" for p in new):
+        return
+    if "jobs" not in sections or not any(s.startswith("journal") for s in sections):
+        return
+    del report.problems[before:]
+    report.problems.append({"owner": f"corp:{corp_id}", "section": "corporation", "code": "no_roles",
+                            "personal_booked": personal})
 
 
 def relevant_types(conn: sqlite3.Connection) -> set[int]:
@@ -400,8 +425,10 @@ def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, character: str | None
 
     for corp_id, toks in members.items():
         report.corporations.append(corp_id)
+        before = len(report.problems)
         _sync_owner(conn, client, report, owner=f"corp:{corp_id}", base=f"/corporations/{corp_id}",
                     candidates=toks, corporation=True)
+        _collapse_unreadable_corporation(report, before, corp_id, personal)
         if personal:
             for tok in toks:
                 cid = int(tok["character_id"])
