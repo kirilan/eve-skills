@@ -67,7 +67,11 @@ class Hub:
     label: str
     station_id: int
     region_id: int
-    system_id: int
+    system_id: int | None
+    # A player structure from the operation file: its book is `/markets/structures/{id}`, readable only
+    # with a docked character's token, and `reader` names the stored character to ask first.
+    structure: bool = False
+    reader: str | None = None
 
 
 HUBS: dict[str, Hub] = {hub.key: hub for hub in (
@@ -92,6 +96,9 @@ class Scope:
     label: str
     system_id: int | None = None
     location_id: int | None = None
+    # The location is a player structure: its orders come from the structure's own market endpoint,
+    # because the regional feed carries none of a structure's sell orders.
+    structure: bool = False
 
 
 @dataclass(frozen=True)
@@ -446,7 +453,7 @@ def quote(client: esi_mod.Esi, type_id: int, scope: Scope,
     buy order filed elsewhere is not pulled into a station scope. These are orders
     physically at the station, not a simulation of their matching radius.
     """
-    rows, meta = client.get_meta(book_path(scope.region_id, type_id))
+    rows, meta = _book_rows(client, type_id, scope)
     picked = _scope_rows(rows, scope)
     result = _reduce(scope.label, [(scope.region_id, o) for o in picked], meta)
     if depth is None:
@@ -619,12 +626,96 @@ def resolve_system(client: esi_mod.Esi, spec) -> tuple[int, str]:
     return _resolve(client, spec, "systems", "system")
 
 
-def hub_scope(spec: str) -> Scope:
-    """A named trade hub, narrowed to its station rather than its whole region."""
-    hub = HUBS.get(spec.strip().lower())
+def configured_hubs() -> dict[str, Hub]:
+    """Hubs from the operation file, as `Hub` rows; empty without one."""
+    from . import operation   # local: keeps `market` importable where no config directory exists
+    out: dict[str, Hub] = {}
+    for key, hub in operation.load().hubs.items():
+        if key in HUBS:
+            continue    # the five built-in hubs are not redefinable
+        out[key] = Hub(key, hub.label, hub.location_id, hub.region_id, hub.system_id,
+                       structure=hub.location_id > STRUCTURE_ID_FLOOR, reader=hub.reader)
+    return out
+
+
+def all_hubs() -> dict[str, Hub]:
+    """The built-in trade hubs plus the operation file's own."""
+    return {**HUBS, **configured_hubs()}
+
+
+def get_hub(spec: str) -> Hub:
+    key = str(spec).strip().lower()
+    hub = HUBS.get(key) or configured_hubs().get(key)
     if hub is None:
-        raise RuntimeError(f"unknown hub '{spec}' - choices: {', '.join(HUBS)}")
-    return Scope(hub.region_id, f"{hub.label} (station)", hub.system_id, hub.station_id)
+        raise RuntimeError(f"unknown hub '{spec}' - choices: {', '.join(all_hubs())}")
+    return hub
+
+
+def hub_scope(spec: str) -> Scope:
+    """A named trade hub, narrowed to its station (or structure) rather than its whole region."""
+    hub = get_hub(spec)
+    kind = "structure" if hub.structure else "station"
+    return Scope(hub.region_id, f"{hub.label} ({kind})", hub.system_id, hub.station_id, structure=hub.structure)
+
+
+# Item-derived ids (structures, ships, containers) sit above the int32 range NPC stations use.
+STRUCTURE_ID_FLOOR = 2_147_483_647
+STRUCTURE_MARKET_SCOPE = "esi-markets.structure_markets.v1"
+
+
+def _structure_readers(preferred: str | None) -> list[dict]:
+    """Stored tokens that carry the structure-market scope, `preferred` (a name) first."""
+    from . import sso
+    records = []
+    for rec in sso.list_characters():
+        try:
+            tok = sso.get_access_token(int(rec["character_id"]))
+        except (RuntimeError, KeyError, OSError):
+            continue
+        if STRUCTURE_MARKET_SCOPE in (tok.get("scopes") or []):
+            records.append(tok)
+    if preferred:
+        records.sort(key=lambda t: str(t.get("character_name") or "").lower() != preferred.lower())
+    return records
+
+
+def structure_book(client: esi_mod.Esi, structure_id: int, reader: str | None = None) -> tuple[list, esi_mod.Meta]:
+    """Every order in one player structure: `/markets/structures/{id}`, all pages, all types.
+
+    The endpoint has no type filter, so it is read once per process and split per type by the
+    caller. ESI answers only a character with docking access who granted the structure-market scope;
+    each stored reader is tried in turn, and refusal by all of them is an error that says what to fix
+    rather than an empty book, which would read as "nobody sells anything here"."""
+    books = client.__dict__.setdefault("_structure_books", {})   # once per client, i.e. per run
+    if structure_id in books:
+        return books[structure_id]
+    readers = _structure_readers(reader)
+    if not readers:
+        raise RuntimeError(f"no stored character can read the market of structure {structure_id}: "
+                           f"log one with docking access in with: eve-skills login --scopes structure-markets")
+    refused = []
+    for tok in readers:
+        try:
+            rows, meta = client.get_all_meta(f"/markets/structures/{structure_id}",
+                                              token=tok["access_token"])
+        except esi_mod.EsiError as err:
+            if "HTTP 403" in str(err) or "HTTP 401" in str(err):
+                refused.append(str(tok.get("character_name") or tok.get("character_id")))
+                continue
+            raise
+        books[structure_id] = (rows, meta)
+        return rows, meta
+    raise RuntimeError(f"ESI refused the market of structure {structure_id} to {', '.join(refused)} - "
+                       f"each needs docking access there (the structure's access list), not just the scope")
+
+
+def _book_rows(client: esi_mod.Esi, type_id: int, scope: Scope) -> tuple[list, esi_mod.Meta]:
+    """One type's rows for a scope: the regional book, or the structure's own filtered to the type."""
+    if scope.structure and scope.location_id is not None:
+        hub = next((h for h in configured_hubs().values() if h.station_id == scope.location_id), None)
+        rows, meta = structure_book(client, scope.location_id, hub.reader if hub else None)
+        return [r for r in rows if _id(r.get("type_id")) == type_id], meta
+    return client.get_meta(book_path(scope.region_id, type_id))
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +821,11 @@ def _read_books(client: esi_mod.Esi, type_ids: Sequence[int], scope: Scope) -> d
     allowed to be cached."""
     if not type_ids:
         return {}
+    if scope.structure:
+        try:
+            return {type_id: _book_rows(client, type_id, scope) for type_id in type_ids}
+        except RuntimeError as err:
+            return {type_id: err for type_id in type_ids}
     path_of = {type_id: book_path(scope.region_id, type_id) for type_id in type_ids}
     answers = client.get_many_meta(list(path_of.values()))
     return {type_id: answers.get(path_of[type_id]) for type_id in type_ids}

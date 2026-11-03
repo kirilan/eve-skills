@@ -53,7 +53,7 @@ class ParseTest(unittest.TestCase):
                          "null": {"owner": "personal", "facility": "4gyv",
                                   "characters": ["Santraginus XI", "Santraginus XII"]}},
                "facilities": {"kulelen": {"location_id": 60002329, "system": "Kulelen"}, "4gyv": dict(NULL)},
-               "hubs": {"4-hwwf": {"location_id": 1053970513596, "region": "Vale of the Silent"}},
+               "hubs": {"4-hwwf": {"location_id": 1053970513596, "region_id": 10000003}},
                "freight": {"4-HWWF->Jita": {"per_m3": 350, "collateral_pct": 1, "min": 10_000_000}}}
         doc.update(extra)
         return doc
@@ -96,6 +96,7 @@ class ParseTest(unittest.TestCase):
             self.doc(sites={"x": {"owner": "corp", "facility": "nowhere"}}),
             self.doc(freight={"jita": {"per_m3": 1}}),
             self.doc(hubs={"h": {"location_id": "x"}}),
+            self.doc(hubs={"h": {"location_id": 1053970513596, "region": "Vale of the Silent"}}),
         ]
         for doc in bad:
             with self.subTest(doc=doc), self.assertRaises(operation.OperationError):
@@ -166,3 +167,56 @@ class BuildCostFacilityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructureMarketTest(unittest.TestCase):
+    """A configured hub that is a player structure reads `/markets/structures/{id}` with a token."""
+
+    STRUCTURE = 1_053_970_513_596
+
+    def setUp(self):
+        from tests.fake_esi import ADA, MARKET_FORGE
+        self.env = FakeEsiEnv()
+        self.env.start()
+        self.env.install_core()
+        self.env.install_market()
+        self.addCleanup(self.env.stop)
+        with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+            json.dump({"hubs": {"keep": {"location_id": self.STRUCTURE, "region_id": MARKET_FORGE,
+                                         "label": "The Keepstar", "reader": "Ada Vane"}}}, fh)
+        self.ada = ADA
+
+    def orders(self, rows=None, error=None):
+        path = f"/markets/structures/{self.STRUCTURE}"
+        if error:
+            self.env.server.get(path, error=error)
+        else:
+            self.env.server.get(path, token=self.ada.token, doc=rows, headers={"X-Pages": "1"})
+
+    def test_structure_book_is_read_and_split_per_type(self):
+        self.orders([
+            {"order_id": 1, "type_id": 34, "price": 6.0, "volume_remain": 100, "is_buy_order": False,
+             "location_id": self.STRUCTURE},
+            {"order_id": 2, "type_id": 34, "price": 5.5, "volume_remain": 50, "is_buy_order": False,
+             "location_id": self.STRUCTURE},
+            {"order_id": 3, "type_id": 34, "price": 4.0, "volume_remain": 10, "is_buy_order": True,
+             "location_id": self.STRUCTURE},
+            {"order_id": 4, "type_id": 35, "price": 1.0, "volume_remain": 10, "is_buy_order": False,
+             "location_id": self.STRUCTURE},
+        ])
+        code, out, err = self.env.run(["market", "34", "--hub", "keep", "--json"])
+        self.assertEqual(code, 0, err)
+        scope = json.loads(out)["types"][0]["scopes"][0]
+        self.assertEqual(scope["scope"], "The Keepstar (structure)")
+        self.assertEqual((scope["min_sell"], scope["max_buy"]), (5.5, 4.0))
+
+    def test_refusal_names_the_fix(self):
+        self.orders(error=(403, {"error": "Forbidden"}))
+        code, _out, err = self.env.run(["market", "34", "--hub", "keep"])
+        self.assertEqual(code, 1)
+        self.assertIn("docking access", err)
+
+    def test_unknown_hub_lists_configured_ones(self):
+        code, _out, err = self.env.run(["market", "34", "--hub", "nowhere"])
+        self.assertEqual(code, 1)
+        self.assertIn("keep", err)

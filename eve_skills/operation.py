@@ -32,8 +32,8 @@ The file format (percentages are percent, multipliers are fractions)::
                          "structure": "raitaru", "security": "null",
                          "rigs": {"manufacturing": {"me": "t1", "te": "t1"}, "invention": {"te": "t1"}}}
       },
-      "hubs": {"4-hwwf": {"location_id": 1053970513596, "system": "4-HWWF",
-                          "region": "Vale of the Silent", "reader": "Santraginus XI"}},
+      "hubs": {"4-hwwf": {"location_id": 1053970513596, "region_id": 10000003,
+                          "system_id": 30000240, "reader": "Santraginus XI"}},
       "freight": {"jita->4-hwwf": {"per_m3": 445, "collateral_pct": 0, "min": 5000000},
                   "4-hwwf->jita": {"per_m3": 350, "collateral_pct": 1, "min": 10000000}}
     }
@@ -100,11 +100,15 @@ class Facility:
 
 @dataclass(frozen=True)
 class Hub:
+    """A market the five built-in hubs do not cover - usually a player structure.
+
+    `region_id` is required because every price history and every regional fallback is per region;
+    `reader` is the stored character whose token reads the structure's market first."""
     key: str
     label: str
     location_id: int
-    system: str | None
-    region: str | int | None
+    region_id: int
+    system_id: int | None
     reader: str | None
 
 
@@ -308,8 +312,13 @@ def parse(document: dict, path: str | None = None) -> Operation:
         where = f"hubs.{key}"
         if not isinstance(raw, dict) or not isinstance(raw.get("location_id"), int):
             raise OperationError(f"{where} needs an integer location_id")
+        if not isinstance(raw.get("region_id"), int):
+            raise OperationError(f"{where} needs an integer region_id (Vale of the Silent is 10000003)")
+        system_id = raw.get("system_id")
+        if system_id is not None and not isinstance(system_id, int):
+            raise OperationError(f"{where}.system_id must be an integer id")
         hubs[key.lower()] = Hub(key=key.lower(), label=raw.get("label") or key, location_id=raw["location_id"],
-                                system=raw.get("system"), region=raw.get("region"), reader=raw.get("reader"))
+                                region_id=raw["region_id"], system_id=system_id, reader=raw.get("reader"))
     freight: dict[str, Freight] = {}
     for key, raw in (document.get("freight") or {}).items():
         where = f"freight.{key}"
@@ -355,7 +364,7 @@ TEMPLATE = {
                          "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}},
     },
     "hubs": {"4-hwwf": {"location_id": 1053970513596, "label": "4-HWWF WinterCo. Central Station",
-                        "system": "4-HWWF", "region": "Vale of the Silent"}},
+                        "region_id": 10000003, "system_id": 30000240}},
     "freight": {"jita->4-hwwf": {"per_m3": 445, "collateral_pct": 0, "min": 5000000},
                 "4-hwwf->jita": {"per_m3": 350, "collateral_pct": 1, "min": 10000000}},
 }

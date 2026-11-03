@@ -47,6 +47,9 @@ OPTIONAL_SCOPES = {
     # Not an asset scope, but inventory needs it: /universe/structures is the only way to name a
     # citadel or engineering site, and without it a player's holdings sit in `structure <id>`.
     "structures": ["esi-universe.read_structures.v1"],
+    # A player structure's market (`/markets/structures/{id}`): the regional feed carries none of its
+    # sell orders. ESI also demands docking access there, which no scope can grant.
+    "structure-markets": ["esi-markets.structure_markets.v1", "esi-universe.read_structures.v1"],
     # `pi` reads every recipe out of the shipped SDE and needs no consent at all; this scope is what
     # lets `colonies` answer the question nothing local can - "do I still have colonies, and did an
     # extraction run out". ESI only offers GET on the two colony endpoints, so this grants read access.

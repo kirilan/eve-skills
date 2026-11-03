@@ -26,8 +26,8 @@ def operation_json(op: operation.Operation) -> dict:
                            "material_multiplier": f.material, "time_multiplier": f.time,
                            "derived_from": f.derived_from, "unknown": list(f.unknown)}
                        for k, f in op.facilities.items()},
-        "hubs": {k: {"label": h.label, "location_id": h.location_id, "system": h.system,
-                     "region": h.region, "reader": h.reader} for k, h in op.hubs.items()},
+        "hubs": {k: {"label": h.label, "location_id": h.location_id, "system_id": h.system_id,
+                     "region_id": h.region_id, "reader": h.reader} for k, h in op.hubs.items()},
         "freight": {k: {"per_m3": f.per_m3, "collateral_pct": f.collateral_pct, "min": f.minimum}
                     for k, f in op.freight.items()},
     }
@@ -56,7 +56,7 @@ def operation_text(op: operation.Operation) -> str:
     if op.hubs:
         lines.append("")
         lines.append(render.table(["hub", "label", "location", "region", "reader"],
-                                  [[k, h.label, str(h.location_id), str(h.region or "-"), h.reader or "-"]
+                                  [[k, h.label, str(h.location_id), str(h.region_id), h.reader or "-"]
                                    for k, h in sorted(op.hubs.items())]))
     if op.freight:
         lines.append("")

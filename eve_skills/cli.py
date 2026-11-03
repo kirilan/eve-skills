@@ -300,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_market.add_argument("--region", action="append", metavar="NAME",
                           help='quote this region (exact name or id); repeatable: --region "The Forge"')
     p_market.add_argument("--hub", action="append", metavar="HUB",
-                          help=f"quote a trade hub at station level; repeatable: {', '.join(market.HUBS)}")
+                          help=f"quote a trade hub at station level; repeatable: {', '.join(market.HUBS)}, or a hub from the operation file (a player structure needs login --scopes structure-markets and docking access)")
     # dest is mandatory here: a bare --global would hand the handler an attribute called `global`.
     p_market.add_argument("--global", dest="global_scopes", action="store_true",
                           help="scan every region with a market and add the best prices across the cluster")
