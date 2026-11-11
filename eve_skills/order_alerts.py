@@ -29,9 +29,8 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import paths, storage
+from . import job_times, paths, storage
 
 BEHIND = ("undercut", "outbid")
 ON_TOP = ("cheapest", "top", "alone")
@@ -74,10 +73,7 @@ class Settings:
     def quiet(self, now: datetime) -> bool:
         if self.quiet_start is None or self.quiet_end is None:
             return False
-        try:
-            local = now.astimezone(ZoneInfo(self.timezone)).time()
-        except (ZoneInfoNotFoundError, ValueError):
-            local = now.astimezone(timezone.utc).time()
+        local = now.astimezone(job_times.zone(self.timezone)).time()
         if self.quiet_start <= self.quiet_end:
             return self.quiet_start <= local < self.quiet_end
         return local >= self.quiet_start or local < self.quiet_end     # wraps midnight
@@ -107,9 +103,14 @@ def parse_settings(doc: dict) -> Settings:
         notice = float(merged.get("job_notice_minutes") or 0)
     except (TypeError, ValueError):
         raise RuntimeError("alerts.json: job_notice_minutes must be a number") from None
+    zone_name = str(merged.get("timezone") or "UTC")
+    try:
+        job_times.zone(zone_name)       # an IANA name, or a fixed offset such as +02:00
+    except RuntimeError as err:
+        raise RuntimeError(f"alerts.json: timezone: {err}") from None
     return Settings(tuple(str(x) for x in merged.get("exclude_locations") or []),
                     tuple(str(x) for x in merged.get("exclude_characters") or []),
-                    remind, start, end, str(merged.get("timezone") or "UTC"),
+                    remind, start, end, zone_name,
                     bool(merged.get("job_alerts")), notice)
 
 

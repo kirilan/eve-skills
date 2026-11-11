@@ -8,12 +8,16 @@ import unittest
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
-from eve_skills import order_alerts, telegram
+from eve_skills import job_times, order_alerts, telegram
 
 UTC = timezone.utc
+# Europe/Sofia needs a time zone database: Windows has none without the optional tzdata package.
+HAS_ZONES = job_times.zone_database_available()
+needs_zones = unittest.skipUnless(HAS_ZONES, "no time zone database (Windows without tzdata)")
 NOON = datetime(2026, 11, 11, 10, 0, tzinfo=UTC)          # 12:00 in Sofia
+# +02:00 is Sofia in winter, which every date below falls in; a fixed offset works on every platform.
 SETTINGS = order_alerts.parse_settings({"exclude_locations": ["WY-9LL"], "remind_hours": 4,
-                                        "quiet_hours": "00:00-08:00", "timezone": "Europe/Sofia"})
+                                        "quiet_hours": "00:00-08:00", "timezone": "+02:00"})
 READ = {"char:1"}
 
 
@@ -98,7 +102,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual({}, state["pending"])
 
     def test_excluded_locations_and_characters_never_alert(self):
-        settings = order_alerts.parse_settings({"exclude_locations": ["wy-9ll"], "exclude_characters": ["Prime"]})
+        settings = order_alerts.parse_settings({"exclude_locations": ["wy-9ll"], "exclude_characters": ["Prime"], "timezone": "+02:00"})
         _, alert = run(order_alerts.empty_state(),
                        [row(1, location="WY-9LL VIII - Moon 3"), row(2, owner="prime"), row(3)],
                        settings=settings)
@@ -109,11 +113,21 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(alert.silent)                           # 01:00 in Sofia
         self.assertEqual(1, len(alert.behind))
 
+    @needs_zones
+    def test_quiet_hours_follow_an_iana_zone(self):
+        settings = order_alerts.parse_settings({"quiet_hours": "00:00-08:00", "timezone": "Europe/Sofia"})
+        self.assertTrue(settings.quiet(datetime(2026, 11, 11, 23, 0, tzinfo=UTC)))     # 01:00 Sofia
+        self.assertFalse(settings.quiet(NOON))
+        self.assertTrue(settings.quiet(datetime(2026, 7, 1, 4, 30, tzinfo=UTC)))       # 07:30 summer time
+
     def test_settings_errors_name_the_field(self):
         with self.assertRaises(RuntimeError) as ctx:
-            order_alerts.parse_settings({"quiet_hours": "late"})
+            order_alerts.parse_settings({"quiet_hours": "late", "timezone": "+02:00"})
         self.assertIn("quiet_hours", str(ctx.exception))
-        self.assertFalse(order_alerts.parse_settings({"quiet_hours": ""}).quiet(NOON))
+        with self.assertRaises(RuntimeError) as ctx:
+            order_alerts.parse_settings({"timezone": "Nowhere/Atlantis"})
+        self.assertIn("timezone", str(ctx.exception))
+        self.assertFalse(order_alerts.parse_settings({"quiet_hours": "", "timezone": "+02:00"}).quiet(NOON))
 
     def test_a_job_is_announced_once_within_the_notice_then_reminded_until_delivered(self):
         state, alert = jrun(order_alerts.empty_state(), [job(left_min=45)])
@@ -160,7 +174,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(text.startswith("EVE jobs: 3 jobs ending"))
         self.assertIn("⚙ Job ending: Small EM Shield Reinforcer II Blueprint\n"
                       "   Builder · invention · 3 jobs · 4GYV-Q · 10 min–12 min left", text)
-        settings = order_alerts.parse_settings({"job_alerts": False, "exclude_characters": ["builder"]})
+        settings = order_alerts.parse_settings({"job_alerts": False, "exclude_characters": ["builder"], "timezone": "+02:00"})
         self.assertFalse(settings.job_alerts)
         _, alert = jrun(order_alerts.empty_state(), jobs, settings=settings)
         self.assertTrue(alert.empty())

@@ -1151,7 +1151,8 @@ Settings live in `alerts.json` in the config directory, written with the default
 `exclude_locations` (case-insensitive parts of a station name, e.g. `"WY-9LL"`), `exclude_characters`,
 `remind_hours` (default 4; 0 = no reminders), `job_alerts` (default `true`), `job_notice_minutes`
 (default 20; the timer runs every 20 minutes, so a shorter notice can miss straight to "done"), `quiet_hours` (default `"00:00-08:00"`; messages then arrive
-silently) and `timezone` (default `Europe/Sofia`). Excluded orders are never checked, which also saves
+silently) and `timezone` (default `Europe/Sofia`; an IANA name needs a time zone database, which Windows only has with
+`pip install tzdata`, otherwise use a fixed offset such as `+02:00`, which ignores daylight saving). Excluded orders are never checked, which also saves
 their ESI calls. The bot token and chat id are in `telegram.json` in the config directory, owner-only.
 The token is read from a file or stdin, never from the command line, and no error message contains it.
 State (`order-alerts.json`, state directory) is saved only after Telegram accepted the message, so a
