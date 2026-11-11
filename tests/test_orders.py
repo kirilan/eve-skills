@@ -348,7 +348,7 @@ class OrdersCommandTests(unittest.TestCase):
         self.assertIn("behind sliver", text)
         self.assertIn("2 of 3 order(s) behind a competitor", text)
 
-    STRUCTURE = 1_053_970_513_596
+    STRUCTURE = 1_040_000_000_001
 
     def _install_structure_order(self, *, refuse: bool = False):
         """Mira's one order moves into a player structure; the regional feed has none of its book."""

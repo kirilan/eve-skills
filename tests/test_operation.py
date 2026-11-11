@@ -171,7 +171,7 @@ if __name__ == "__main__":
 class StructureMarketTest(unittest.TestCase):
     """A configured hub that is a player structure reads `/markets/structures/{id}` with a token."""
 
-    STRUCTURE = 1_053_970_513_596
+    STRUCTURE = 1_040_000_000_001
 
     def setUp(self):
         from tests.fake_esi import ADA, MARKET_FORGE
