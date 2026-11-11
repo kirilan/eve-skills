@@ -197,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--facility", metavar="NAME",
                         help="with --times: only jobs installed in this facility of the operation file "
                              "(times are always reported per facility)")
+    p_jobs.add_argument("--site", metavar="NAME",
+                        help="with --times: hours per run where this operation-file site does each "
+                             "activity (its facilities); jobs measured at another facility of the file are "
+                             "converted by the time multipliers and marked ~, others are listed but never "
+                             "scaled. Reads the site's characters (a corp site: the corporation)")
     p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
                         help="with --times: run counts that end inside these local-time windows, "
                              "e.g. 08-10,20-22")

@@ -159,3 +159,56 @@ def median_times(rows: Iterable[dict], since: datetime, facility_names: dict[int
            for (activity, product, installer, facility_id, label), values in groups.items()]
     out.sort(key=lambda r: (r["activity"], r["product"].casefold(), r["hours_per_run"]))
     return out
+
+
+def site_times(times: Sequence[dict], op, site) -> tuple[list[dict], list[dict]]:
+    """Hours per run where `site` does each activity: `(rows, unscaled)`.
+
+    `times` is `median_times` output (one row per activity, product, installer and facility). Per
+    (activity, product, installer) the answer is the median measured at the site's facility for that
+    activity (`site.facility_for`), with `"scaled_from": None`. Without such jobs it is the median from
+    another facility of the operation file that has a `location_id`, converted by the two facilities'
+    time multipliers for the activity (`hours x home / source`; with several, the one with the most
+    jobs) and `"scaled_from": <source key>`. A product measured only somewhere the file does not know
+    gives no row: it is listed in `unscaled`, because a structure's unknown rigs would make any scaling
+    a guess - the error this exists to prevent."""
+    known = {f.location_id: (key, f) for key, f in op.facilities.items() if f.location_id}
+    homes: dict[str, tuple[str, object]] = {}
+
+    def home(activity: str):
+        if activity not in homes:
+            key = site.facility_for(activity)
+            facility = op.facility(key)
+            if not facility.location_id:
+                raise RuntimeError(f"facility {key} (where site {site.name} does {activity}) has no "
+                                   f"location_id in the operation file - add it to measure times there")
+            homes[activity] = (key, facility)
+        return homes[activity]
+
+    groups: dict[tuple, list[dict]] = {}
+    for row in times:
+        groups.setdefault((row["activity"], row["product"], row["installer"]), []).append(row)
+    out: list[dict] = []
+    unscaled: list[dict] = []
+    for (activity, product, installer), rows in groups.items():
+        home_key, home_facility = home(activity)
+        at_home = [r for r in rows if r.get("facility_id") == home_facility.location_id]
+        if at_home:
+            out.append({**at_home[0], "facility": home_key, "scaled_from": None})
+            continue
+        sources = [r for r in rows if r.get("facility_id") in known]
+        if not sources:
+            unscaled.extend({"activity": activity, "product": product, "installer": installer,
+                             "facility_id": r.get("facility_id"), "facility": r.get("facility"),
+                             "jobs": r.get("jobs")} for r in rows)
+            continue
+        source = max(sources, key=lambda r: (r["jobs"], -(r.get("facility_id") or 0)))
+        source_key, source_facility = known[source["facility_id"]]
+        factor = home_facility.time_multiplier(activity) / source_facility.time_multiplier(activity)
+        out.append({**source, "facility_id": home_facility.location_id, "facility": home_key,
+                    "hours_per_run": source["hours_per_run"] * factor,
+                    "min_hours": source["min_hours"] * factor, "max_hours": source["max_hours"] * factor,
+                    "scaled_from": source_key})
+    out.sort(key=lambda r: (r["activity"], r["product"].casefold(), r["hours_per_run"]))
+    unscaled.sort(key=lambda r: (r["activity"], r["product"].casefold(), r["installer"]))
+    return out, unscaled

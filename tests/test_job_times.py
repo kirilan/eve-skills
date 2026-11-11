@@ -105,3 +105,71 @@ class FacilityTests(unittest.TestCase):
                          [(r["facility"], r["hours_per_run"]) for r in out])
         only = job_times.median_times(rows, NOW - timedelta(days=14), facility=60003760)
         self.assertEqual([4.1], [r["hours_per_run"] for r in only])
+
+
+class SiteTimesTests(unittest.TestCase):
+    """`jobs --times --site`: the time where the site does the activity, never scaled from a guess."""
+    LABS, FACTORY, ELSEWHERE = 1_040_000_000_000, 1_040_000_000_002, 1_040_000_000_009
+
+    def setUp(self):
+        from eve_skills import operation
+        self.op = operation.parse({
+            "sites": {"null": {"owner": "personal", "facility": "labs", "characters": ["Ada", "Mira"],
+                               "facilities": {"manufacturing": "factory"}}},
+            "facilities": {
+                # Labs: manufacturing time 0.70 (stated); the factory 0.406.
+                "labs": {"location_id": self.LABS, "tax_pct": 1, "material": {}, "time": {"manufacturing": 0.70}},
+                "factory": {"location_id": self.FACTORY, "tax_pct": 1, "material": {},
+                            "time": {"manufacturing": 0.406}},
+                "nowhere": {"system": "Z-EXMPL", "tax_pct": 1, "material": {}, "time": {}}}})
+        self.site = self.op.site("null")
+
+    def times(self, *specs):
+        """(installer, facility_id, hours, jobs) -> median_times-shaped rows."""
+        return [{"activity": "manufacturing", "product": "Widget II", "installer": who, "facility_id": fid,
+                 "facility": f"facility {fid}", "hours_per_run": hours, "min_hours": hours * 0.9,
+                 "max_hours": hours * 1.1, "jobs": jobs} for who, fid, hours, jobs in specs]
+
+    def test_measured_at_home_is_used_as_is(self):
+        rows, unscaled = job_times.site_times(self.times(("Ada", self.FACTORY, 0.96, 12),
+                                                         ("Ada", self.LABS, 2.0, 30)), self.op, self.site)
+        self.assertEqual([("factory", 0.96, None)], [(r["facility"], r["hours_per_run"], r["scaled_from"]) for r in rows])
+        self.assertEqual([], unscaled)
+
+    def test_measured_only_at_a_known_facility_is_scaled_by_the_multipliers(self):
+        rows, unscaled = job_times.site_times(self.times(("Mira", self.LABS, 1.40, 5)), self.op, self.site)
+        self.assertEqual(1, len(rows))
+        self.assertAlmostEqual(1.40 * 0.406 / 0.70, rows[0]["hours_per_run"])
+        self.assertAlmostEqual(1.40 * 0.9 * 0.406 / 0.70, rows[0]["min_hours"])
+        self.assertEqual(("factory", self.FACTORY, "labs"),
+                         (rows[0]["facility"], rows[0]["facility_id"], rows[0]["scaled_from"]))
+        self.assertEqual([], unscaled)
+
+    def test_several_sources_use_the_one_with_most_jobs(self):
+        self.op.facilities["other"] = type(self.op.facilities["labs"])(
+            name="other", location_id=self.ELSEWHERE, tax=0.01, time={"manufacturing": 1.0})
+        rows, _ = job_times.site_times(self.times(("Ada", self.LABS, 1.4, 2), ("Ada", self.ELSEWHERE, 2.0, 9)),
+                                       self.op, self.site)
+        self.assertEqual("other", rows[0]["scaled_from"])
+        self.assertAlmostEqual(2.0 * 0.406, rows[0]["hours_per_run"])
+
+    def test_measured_only_at_an_unknown_facility_is_never_scaled(self):
+        rows, unscaled = job_times.site_times(self.times(("Ada", 60003760, 4.0, 7)), self.op, self.site)
+        self.assertEqual([], rows)
+        self.assertEqual([{"activity": "manufacturing", "product": "Widget II", "installer": "Ada",
+                           "facility_id": 60003760, "facility": "facility 60003760", "jobs": 7}], unscaled)
+
+    def test_a_home_facility_without_location_id_is_an_error_naming_it(self):
+        from eve_skills import operation
+        op = operation.parse({"sites": {"s": {"owner": "personal", "facility": "nowhere", "characters": ["Ada"]}},
+                              "facilities": {"nowhere": {"system": "Z-EXMPL"}}})
+        with self.assertRaises(RuntimeError) as ctx:
+            job_times.site_times(self.times(("Ada", self.LABS, 1.0, 1)), op, op.site("s"))
+        self.assertIn("nowhere", str(ctx.exception))
+
+    def test_window_fits_use_the_scaled_hours(self):
+        rows, _ = job_times.site_times(self.times(("Mira", self.LABS, 1.40, 5)), self.op, self.site)
+        hours = rows[0]["hours_per_run"]                       # 0.812 h per run at the factory
+        fits = job_times.window_fits(NOW, hours, job_times.parse_windows("20-22"), HELSINKI, max_hours=30)
+        # From 08:45 local, 0.812 h runs: 14 runs end 20:12, 16 end 21:44, 17 would end 22:33.
+        self.assertEqual(16, fits[0]["runs"])

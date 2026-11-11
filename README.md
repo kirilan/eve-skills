@@ -555,6 +555,7 @@ eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
 eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Helsinki --start 09:30
                                       # measured hours per run, and run counts ending in those windows
+eve-skills jobs --times --site null   # hours per run where an operation-file site does each activity
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
@@ -590,6 +591,18 @@ by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `E
 follows daylight saving, or a fixed offset such as `+03:00` / `UTC+3`, which does not (default UTC).
 IANA names need a time zone database: Linux and macOS have one, Windows does not unless the optional
 `tzdata` package is installed (`pip install tzdata`) - without it, use the offset. `--times` has no `--group` or `--csv` form.
+
+`--times --site NAME` answers "how long does a run take where this site does that activity", for a site
+of the operation file whose activities may run in different facilities (`sites.NAME.facilities`). It
+reads the site's characters (a corp site: the corporation, through its first reader). Per activity,
+product and installer it reports the median measured at the site's facility for that activity. Without
+such jobs it converts the median from another facility of the operation file that has a `location_id`:
+hours x that activity's time multiplier at the site's facility / the one at the source (the source with
+the most jobs wins); the table marks those `~` and `--json` names the source in `scaled_from` (`null` when
+measured in place). A product measured only somewhere the file does not know is not scaled at all: its
+rigs are unknown, so the row is left out and listed under "no time" (`unscaled` in `--json`). A site
+facility without a `location_id` is an error. Window fits use the final hours. `--site` and `--facility`
+do not combine.
 
 Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
 `Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
@@ -949,6 +962,7 @@ Commands that use the file:
 | `restock --site NAME` | Build at the site's facility. On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
 | `can-build --site NAME` | Applies the facility's material bonus. On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
 | `jobs --times [--facility NAME]` | Median hours per run are always kept per facility, so a structure's rigged times never mix with NPC-station history. |
+| `jobs --times --site NAME` | Hours per run where the site does each activity (`facilities` per activity), converting times measured at another facility of the file by the time multipliers and never scaling from an unknown one. |
 | `dashboard` | Reads industry status for every site: a corp site through its reader, a personal site from its characters' own snapshots. |
 | `ledger sync` | Reports a corporation that refuses every section on roles (building in someone else's corporation) as one expected line. The members' personal jobs, orders and wallets are booked as before. |
 
