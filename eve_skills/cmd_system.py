@@ -4,17 +4,17 @@ Picking a staging system for a spread of colonies needed three throwaway ESI scr
 command here answered any of the three questions at once: what a system's security status really is
 (not what it displays), what kinds of planet it holds, and how many jumps each candidate sits from
 Jita. The decision then turned on a boundary case that only the true security figure exposes -
-measured against live ESI on 2026-09-13, **Enderailen at 0.4487847685813904 is lowsec while Kulelen
-at 0.4753689467906952 is highsec** - so the report prints the true value, the rounded value the game
+measured against live ESI on 2026-11-11, **Akidagi at 0.4449388384819031 is lowsec while Balle
+at 0.4608891010284424 is highsec** - so the report prints the true value, the rounded value the game
 shows, and the class both imply, in three columns nobody has to reconcile by hand.
 
 Where each column comes from matters, because the two sources disagree in kind:
 
   security, region, jumps   live ESI (`/universe/systems`, `/universe/constellations`, `/route`).
                             Security status is read live even though the SDE has it too: measured on
-                            build 3494416, `mapSolarSystems.jsonl`'s `securityStatus` for Enderailen
-                            is 0.448785 against ESI's 0.4487847685813904 - the same call on a class
-                            boundary, made against a snapshot CCP can move between builds. Anything
+                            build 3494416, `mapSolarSystems.jsonl`'s `securityStatus` is rounded to
+                            six places against ESI's full float - the same call on a class boundary,
+                            made against a snapshot CCP can move between builds. Anything
                             CCP can move is read from ESI. Region needs two calls because ESI's system
                             record names a constellation and nothing above it.
   planets, planet types     the local census (`alphadata.system_planets()`, built by `update-data`).
@@ -281,10 +281,10 @@ def system_text(report: SystemReport) -> str:
 def _boundary_note(rows: tuple[SystemRow, ...]) -> str | None:
     """Name the systems sitting within half a displayed decimal of a class line.
 
-    This is the column people read wrong: 0.4488 looks like it belongs with 0.4754 until it is
+    This is the column people read wrong: 0.4449 looks like it belongs with 0.4609 until it is
     rounded, and then one is highsec and the other is not. Rather than lecture every report, the note
-    fires only for a run that actually contains such a system - measured live on 2026-09-13, Enderailen
-    (0.4488 -> 0.4, lowsec) and Kulelen (0.4754 -> 0.5, highsec) are 0.0266 apart."""
+    fires only for a run that actually contains such a system - measured live on 2026-11-11, Akidagi
+    (0.4449 -> 0.4, lowsec) and Balle (0.4609 -> 0.5, highsec) are 0.0160 apart."""
     near = [row for row in rows
             if min(abs(row.security_status - line) for line in (0.0, HIGHSEC_MINIMUM)) < BOUNDARY_BAND]
     if not near:

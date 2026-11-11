@@ -49,7 +49,7 @@ _OFFSET = re.compile(r"^(?:UTC|GMT)?\s*([+-])(\d{1,2})(?::?(\d{2}))?$", re.IGNOR
 
 
 def zone(name: str | None) -> tzinfo:
-    """UTC, a fixed offset (`+03:00`, `UTC+3`, `-0530`) or an IANA name (`Europe/Sofia`).
+    """UTC, a fixed offset (`+03:00`, `UTC+3`, `-0530`) or an IANA name (`Europe/Helsinki`).
 
     An IANA zone follows daylight saving; it needs a time zone database, which Linux and macOS ship
     and Windows does not - there Python only finds one when the optional `tzdata` package is
@@ -72,7 +72,7 @@ def zone(name: str | None) -> tzinfo:
                 f"no time zone database on this machine to look up '{name}' (Windows ships none) - "
                 f"install the optional tzdata package (pip install tzdata), or pass a fixed offset "
                 f"such as +03:00, which does not follow daylight saving") from None
-        raise RuntimeError(f"unknown time zone '{name}' - use an IANA name such as Europe/Sofia, "
+        raise RuntimeError(f"unknown time zone '{name}' - use an IANA name such as Europe/Helsinki, "
                            f"or a fixed offset such as +03:00") from None
 
 
@@ -134,7 +134,7 @@ def median_times(rows: Iterable[dict], since: datetime, facility_names: dict[int
 
     Rows are `jobs` rows (`_job_rows` output). Invention products are the invented blueprint; the
     ' Blueprint' suffix is kept so an invention row never reads as the manufactured item. The facility
-    is part of the key because a structure's rigs change the time per run: a Kulelen median applied to
+    is part of the key because a structure's rigs change the time per run: an NPC station's median applied to
     a job in a rigged null-sec structure would size it for the wrong finish window. `facility_names`
     labels known facility ids (the operation file's names); `facility` keeps only that one."""
     names = facility_names or {}

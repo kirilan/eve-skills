@@ -367,7 +367,7 @@ class OrdersCommandTests(unittest.TestCase):
                 _market_row(900002, 1.00, self.STRUCTURE, 5, buy=True),
                 {**_market_row(900003, 0.10, self.STRUCTURE, 50), "type_id": 35}])  # another type
         self.env.server.get(f"/universe/structures/{self.STRUCTURE}", token=MIRA.token,
-                            doc={"name": "4-HWWF - WinterCo. Central Station", "solar_system_id": 30000142})
+                            doc={"name": "X-EXMPL - Example Market Hub", "solar_system_id": 30000142})
 
     def test_check_reads_a_structure_order_against_the_structures_own_book(self):
         self._install_structure_order()
@@ -378,7 +378,7 @@ class OrdersCommandTests(unittest.TestCase):
         # The regional feed has nothing there, which used to read as "alone".
         self.assertEqual(("undercut", 4.80, 300), (mira["check"]["status"], mira["check"]["best_other"],
                                                    mira["check"]["units_ahead"]))
-        self.assertEqual("4-HWWF - WinterCo. Central Station", mira["location_name"])
+        self.assertEqual("X-EXMPL - Example Market Hub", mira["location_name"])
         owners = {o["owner_name"]: o for o in doc["owners"]}
         self.assertEqual(("2026-11-11T08:03:32Z", "2026-11-11T08:23:32Z"),
                          (owners["Mira Solen"]["as_of"], owners["Mira Solen"]["expires"]))

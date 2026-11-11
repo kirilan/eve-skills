@@ -264,7 +264,7 @@ class PlannerTests(unittest.TestCase):
         self.assertIsNotNone(planner.extraction_rules_warning(verified + timedelta(days=181)))
 
     def test_attribute_rate_is_ccps_formula(self):
-        # Khanid Hotie's live attributes (they sum to exactly EVE's 99-point base allocation):
+        # One character's live attributes (they sum to exactly EVE's 99-point base allocation):
         # the two pairs a PI plan spans, charisma/intelligence and intelligence/memory, price
         # at 1,680 and 2,100 SP/hour - the figures `plan --rate` used to make the user work out.
         attrs = {"perception": 17, "intelligence": 22, "memory": 26, "charisma": 17, "willpower": 17}

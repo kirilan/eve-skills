@@ -1,9 +1,8 @@
 """The operation file: sites, facilities (stated or derived from rigs), hubs, freight - and the
 `build-cost --facility/--site` seam that reads it.
 
-The derivations are written out by hand: a Raitaru with T1 rigs in null-sec is the 4GYV-Q case the
-null-sec scan (ledger note #322) was costed with, 0.99 * (1 - 0.02 * 2.1) material and
-0.85 * (1 - 0.20 * 2.1) time."""
+The derivations are written out by hand: a Raitaru with T1 rigs in null-sec costs
+0.99 * (1 - 0.02 * 2.1) material and 0.85 * (1 - 0.20 * 2.1) time."""
 
 from __future__ import annotations
 
@@ -15,7 +14,7 @@ from eve_skills import industry, operation
 from tests.fake_esi import BUILD_ARTICLE, SYSTEM_FORGE, FakeEsiEnv
 
 
-NULL = {"system": "4GYV-Q", "structure": "raitaru", "security": "null", "tax_pct": 1.0,
+NULL = {"system": "X-EXMPL", "structure": "raitaru", "security": "null", "tax_pct": 1.0,
         "location_id": 1_040_000_000_000,
         "rigs": {"manufacturing": {"me": "t1", "te": "t1"}, "invention": {"te": "t2"}}}
 
@@ -49,54 +48,54 @@ class DeriveTest(unittest.TestCase):
 class ParseTest(unittest.TestCase):
     def doc(self, **extra):
         doc = {"default_site": "null",
-               "sites": {"Kulelen": {"owner": "corp", "facility": "kulelen", "readers": ["General Fail"]},
-                         "null": {"owner": "personal", "facility": "4gyv",
-                                  "characters": ["Santraginus XI", "Santraginus XII"]}},
-               "facilities": {"kulelen": {"location_id": 60002329, "system": "Kulelen"}, "4gyv": dict(NULL)},
-               "hubs": {"4-hwwf": {"location_id": 1053970513596, "region_id": 10000003}},
-               "freight": {"4-HWWF->Jita": {"per_m3": 350, "collateral_pct": 1, "min": 10_000_000}}}
+               "sites": {"Highsec": {"owner": "corp", "facility": "highsec", "readers": ["Alice Builder"]},
+                         "null": {"owner": "personal", "facility": "example",
+                                  "characters": ["Carol Hauler", "Dave Miner"]}},
+               "facilities": {"highsec": {"location_id": 60003760, "system": "Jita"}, "example": dict(NULL)},
+               "hubs": {"x-hub": {"location_id": 1040000000001, "region_id": 10000060}},
+               "freight": {"X-Hub->Jita": {"per_m3": 400, "collateral_pct": 1, "min": 10_000_000}}}
         doc.update(extra)
         return doc
 
     def test_sites_facilities_hubs_freight(self):
         op = operation.parse(self.doc(), "/x/operation.json")
         self.assertEqual(op.site(None).name, "null")
-        self.assertEqual(op.site("KULELEN").owner, "corp")
-        self.assertEqual(op.site("null").characters, ("Santraginus XI", "Santraginus XII"))
-        facility = op.facility("4gyv")
+        self.assertEqual(op.site("HIGHSEC").owner, "corp")
+        self.assertEqual(op.site("null").characters, ("Carol Hauler", "Dave Miner"))
+        facility = op.facility("example")
         self.assertEqual(facility.tax, 0.01)
         self.assertEqual(facility.unknown, ())
         self.assertIn("raitaru", facility.derived_from)
-        self.assertEqual(op.facility("kulelen").material_multiplier("manufacturing"), 1.0)
-        self.assertEqual(op.hubs["4-hwwf"].location_id, 1053970513596)
-        route = op.route("4-hwwf", "jita")
-        # 20,000 m3 and 5B collateral: 7M volume + 50M collateral (the screenshot's 57M).
-        self.assertEqual(route.contract_cost(20_000, 5_000_000_000), 57_000_000)
+        self.assertEqual(op.facility("highsec").material_multiplier("manufacturing"), 1.0)
+        self.assertEqual(op.hubs["x-hub"].location_id, 1040000000001)
+        route = op.route("x-hub", "jita")
+        # 20,000 m3 and 5B collateral: 8M volume + 50M collateral.
+        self.assertEqual(route.contract_cost(20_000, 5_000_000_000), 58_000_000)
         self.assertEqual(route.contract_cost(10, 1_000_000), 10_000_000)   # the minimum binds
 
     def test_a_structure_without_tax_or_rigs_says_so(self):
         doc = self.doc()
-        doc["facilities"]["4gyv"] = {"system": "4GYV-Q", "structure": "raitaru", "security": "null"}
-        facility = operation.parse(doc).facility("4gyv")
+        doc["facilities"]["example"] = {"system": "X-EXMPL", "structure": "raitaru", "security": "null"}
+        facility = operation.parse(doc).facility("example")
         self.assertEqual(set(facility.unknown), {"tax_pct", "rigs", "location_id"})
 
     def test_stated_multipliers_win_over_derivation(self):
         doc = self.doc()
-        doc["facilities"]["4gyv"] = {"system": "4GYV-Q", "tax_pct": 0.5,
+        doc["facilities"]["example"] = {"system": "X-EXMPL", "tax_pct": 0.5,
                                      "material": {"manufacturing": 0.95}, "time": {"manufacturing": 0.6}}
-        facility = operation.parse(doc).facility("4gyv")
+        facility = operation.parse(doc).facility("example")
         self.assertEqual((facility.material_multiplier("manufacturing"), facility.time_multiplier("manufacturing")),
                          (0.95, 0.6))
 
     def test_mistakes_are_named(self):
         bad = [
             self.doc(default_site="moon"),
-            self.doc(sites={"x": {"owner": "alliance", "facility": "kulelen"}}),
-            self.doc(sites={"x": {"owner": "personal", "facility": "kulelen"}}),
+            self.doc(sites={"x": {"owner": "alliance", "facility": "highsec"}}),
+            self.doc(sites={"x": {"owner": "personal", "facility": "highsec"}}),
             self.doc(sites={"x": {"owner": "corp", "facility": "nowhere"}}),
             self.doc(freight={"jita": {"per_m3": 1}}),
             self.doc(hubs={"h": {"location_id": "x"}}),
-            self.doc(hubs={"h": {"location_id": 1053970513596, "region": "Vale of the Silent"}}),
+            self.doc(hubs={"h": {"location_id": 1040000000001, "region": "Delve"}}),
         ]
         for doc in bad:
             with self.subTest(doc=doc), self.assertRaises(operation.OperationError):
@@ -111,7 +110,7 @@ class ParseTest(unittest.TestCase):
 
     def test_template_parses(self):
         op = operation.parse(operation.TEMPLATE)
-        self.assertEqual(op.site(None).name, "kulelen")
+        self.assertEqual(op.site(None).name, "highsec")
 
 
 class InventedRunLimitTest(unittest.TestCase):
@@ -227,19 +226,19 @@ class DashboardSitesTest(unittest.TestCase):
         from unittest import mock
         from eve_skills import cmd_dashboard
         op = operation.parse({"sites": {
-            "kulelen": {"owner": "corp", "facility": "k", "readers": ["Santraginus IX"]},
-            "null": {"owner": "personal", "facility": "n", "characters": ["Santraginus XI"]}},
-            "facilities": {"k": {"location_id": 60002329}, "n": {"system": "4GYV-Q"}}})
+            "highsec": {"owner": "corp", "facility": "k", "readers": ["Bob Inventor"]},
+            "null": {"owner": "personal", "facility": "n", "characters": ["Carol Hauler"]}},
+            "facilities": {"k": {"location_id": 60003760}, "n": {"system": "X-EXMPL"}}})
         with mock.patch.object(operation, "load", return_value=op):
             plan = cmd_dashboard._status_plan()
-        self.assertEqual([("industry", "status", "--corp", "--char", "Santraginus IX"), ("industry", "status")],
+        self.assertEqual([("industry", "status", "--corp", "--char", "Bob Inventor"), ("industry", "status")],
                          [args for args, _keep in plan])
         corp = {"owners": [{"owner_name": "Corp", "blueprints": [1]}]}
-        personal = {"owners": [{"owner_name": "Santraginus XI", "blueprints": [2]},
-                               {"owner_name": "General Fail", "blueprints": [3]}]}
+        personal = {"owners": [{"owner_name": "Carol Hauler", "blueprints": [2]},
+                               {"owner_name": "Alice Builder", "blueprints": [3]}]}
         status, error = cmd_dashboard._merged_status([((corp, None), plan[0][1]), ((personal, None), plan[1][1])])
         self.assertIsNone(error)
-        self.assertEqual(["Corp", "Santraginus XI"], [o["owner_name"] for o in status["owners"]])
+        self.assertEqual(["Corp", "Carol Hauler"], [o["owner_name"] for o in status["owners"]])
 
     def test_without_a_file_it_is_the_corporation_snapshot(self):
         from unittest import mock
