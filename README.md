@@ -924,6 +924,7 @@ where a command asks for them). Print a starting point and check what is filled 
 ```bash
 eve-skills operation template > ~/.config/eve-skills/operation.json   # then edit it
 eve-skills operation show                                             # flags values still unknown
+eve-skills operation playbook                                         # this installation's own rules
 ```
 
 - **Sites** name a facility plus the characters working it. `owner: corp` keeps stock in the
@@ -962,6 +963,13 @@ eve-skills operation show                                             # flags va
   default) and `"selling": {"keep": [...]}` (parts of item names never offered for sale). A bad time zone
   or window range, or an unknown key, is an error naming the field. Facilities may also carry a `label`
   (the structure's in-game name), used in messages.
+
+**Playbook.** The agent skills hold workflows that suit any operation; an installation's own rules (who
+builds what, which lines, past decisions) are plain Markdown files outside the repository, one per skill,
+in `<config dir>/playbook/` (or `$EVE_SKILLS_PLAYBOOK`), where they cannot be committed by accident.
+`eve-skills operation playbook` lists them with their first heading, size and date (or says where to
+create one); `operation playbook NAME` prints `NAME.md` after a line with its path and date, and a missing
+file is one line, not an error; `--path` prints only the path.
 
 Commands that use the file:
 

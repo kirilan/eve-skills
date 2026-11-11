@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+from datetime import datetime
 
-from . import operation, render
+from . import operation, paths, render
 
 
 def _pct(value: float | None) -> str:
@@ -88,7 +91,62 @@ def operation_text(op: operation.Operation) -> str:
     return "\n".join(lines)
 
 
+_PLAYBOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _stamp(path: str) -> str:
+    return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+
+
+def _first_heading(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    return line.lstrip("#").strip()
+    except (OSError, UnicodeDecodeError):
+        pass
+    return "-"
+
+
+def playbook_path(name: str) -> str:
+    stem = name[:-3] if name.lower().endswith(".md") else name
+    if not _PLAYBOOK_NAME.match(stem):
+        raise RuntimeError(f"playbook name '{name}' must be a plain file name such as industry-jobs")
+    return os.path.join(paths.playbook_dir(), f"{stem}.md")
+
+
+def playbook_text(name: str | None, path_only: bool = False) -> str:
+    """`operation playbook [NAME] [--path]`: list the playbook, print one file, or its path."""
+    folder = paths.playbook_dir()
+    if name is None:
+        if path_only:
+            return folder
+        files = sorted(f for f in os.listdir(folder) if f.endswith(".md")) if os.path.isdir(folder) else []
+        if not files:
+            return (f"no playbook files in {folder} - create <skill>.md there (e.g. industry-jobs.md) for "
+                    f"this installation's own rules")
+        rows = []
+        for entry in files:
+            full = os.path.join(folder, entry)
+            rows.append([entry[:-3], _first_heading(full), f"{os.path.getsize(full):,} B", _stamp(full)])
+        return f"playbook {folder}\n\n" + render.table(["name", "first heading", "size", "modified"], rows)
+    path = playbook_path(name)
+    if path_only:
+        return path
+    if not os.path.isfile(path):
+        return f"no playbook for {name} (create {path})"
+    with open(path, encoding="utf-8") as fh:
+        body = fh.read()
+    return f"playbook {path} (modified {_stamp(path)})\n\n{body.rstrip()}"
+
+
 def cmd_operation(args):
+    if args.action == "playbook":
+        print(playbook_text(getattr(args, "name", None), getattr(args, "path", False)))
+        return
+    if getattr(args, "name", None) or getattr(args, "path", False):
+        raise RuntimeError("NAME and --path only apply to: eve-skills operation playbook")
     if args.action == "template":
         print(json.dumps(operation.TEMPLATE, indent=2))
         return
