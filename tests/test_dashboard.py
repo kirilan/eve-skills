@@ -104,6 +104,16 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(("ESI down", []), (failed["jobs"]["error"], failed["jobs"]["characters"]))
         self.assertEqual("no consent", failed["orders"]["error"])
 
+    def test_orders_say_when_esi_generated_them_not_only_when_we_asked(self):
+        orders = {**ORDERS, "owners": [
+            {"owner_name": "Seller", "as_of": stamp(8, 40), "expires": stamp(9, 0)},
+            {"owner_name": "Other", "as_of": stamp(8, 45), "expires": stamp(9, 5)},
+            {"owner_name": "Refused"}]}
+        section = self.doc(orders=orders)["orders"]
+        self.assertEqual(stamp(9), section["as_of"])                 # when the check ran
+        self.assertEqual((stamp(8, 40), stamp(9, 0)), (section["esi_as_of"], section["esi_expires"]))
+        self.assertIsNone(self.doc(orders=ORDERS)["orders"]["esi_as_of"])   # an older report: unknown
+
     def test_a_freshness_issue_is_one_sentence_however_often_the_report_lists_it(self):
         issue = {"owner_id": 98000111, "subject": "asset", "delivered_jobs": 13}
         status = {**STATUS, "warnings": [issue, {**issue, "subject": "blueprint"}],
@@ -189,8 +199,8 @@ class LiveCommandTests(unittest.TestCase):
 
 
 def _args(**over):
-    base = dict(host="127.0.0.1", port=0, refresh=60, no_sync=True, no_live=True, since=None,
-                orders_char=None, verbose=False)
+    base = dict(host="127.0.0.1", port=0, refresh=60, orders_refresh=20, no_sync=True, no_live=True,
+                since=None, orders_char=None, verbose=False)
     return argparse.Namespace(**{**base, **over})
 
 
@@ -232,6 +242,23 @@ class ServerTests(unittest.TestCase):
         for path in ("/../../etc/passwd", "/data/dashboard.html", "/api/refresh"):
             self.assertEqual(404, self.get(path)[0], path)
         self.assertEqual(404, self.get("/api/dashboard", method="POST")[0])
+
+    def test_an_orders_refresh_replaces_only_the_orders_section(self):
+        self.state.body = json.dumps({"generated": "old", "orders": {"orders": []}, "jobs": {"x": 1}}).encode()
+        fresh = {**ORDERS, "owners": [{"owner_name": "Seller", "as_of": stamp(9), "expires": stamp(9, 20)}]}
+        with mock.patch.object(cmd_dashboard, "_live", return_value=(fresh, None)) as live, \
+                mock.patch.object(cmd_dashboard.storage, "atomic_write"):
+            self.state.refresh_orders()
+        self.assertEqual(("orders", "--check"), live.call_args.args)
+        doc = json.loads(self.state.body)
+        self.assertEqual(("old", {"x": 1}), (doc["generated"], doc["jobs"]))
+        self.assertEqual([1], [o["order_id"] for o in doc["orders"]["orders"]])
+        self.assertEqual(stamp(9), doc["orders"]["esi_as_of"])
+        # A failed read keeps the rows it had; their ESI stamp already says how old they are.
+        with mock.patch.object(cmd_dashboard, "_live", return_value=(None, "ESI down")):
+            self.state.refresh_orders()
+        self.assertEqual([1], [o["order_id"] for o in json.loads(self.state.body)["orders"]["orders"]])
+        self.assertFalse(self.state.status()["refreshing"])
 
     def test_a_manual_refresh_works_right_after_boot(self):
         # time.monotonic() counts from boot: a fresh machine must not read "no refresh yet" as "just now"

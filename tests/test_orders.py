@@ -348,6 +348,51 @@ class OrdersCommandTests(unittest.TestCase):
         self.assertIn("behind sliver", text)
         self.assertIn("2 of 3 order(s) behind a competitor", text)
 
+    STRUCTURE = 1_053_970_513_596
+
+    def _install_structure_order(self, *, refuse: bool = False):
+        """Mira's one order moves into a player structure; the regional feed has none of its book."""
+        self._install_check_books()
+        self.env.server.get(f"/characters/{MIRA.character_id}/orders", token=MIRA.token,
+                            doc=[owner_order(700011, price=4.99, remain=10, location=self.STRUCTURE)],
+                            headers={"Last-Modified": "Wed, 11 Nov 2026 08:03:32 GMT",
+                                     "Expires": "Wed, 11 Nov 2026 08:23:32 GMT"})
+        path = f"/markets/structures/{self.STRUCTURE}"
+        if refuse:
+            self.env.server.get(path, error=(403, {"error": "Forbidden"}))
+        else:
+            self.env.server.get(path, token=MIRA.token, headers={"X-Pages": "1"}, doc=[
+                _market_row(700011, 4.99, self.STRUCTURE, 10),          # ours
+                _market_row(900001, 4.80, self.STRUCTURE, 300),         # a real competitor
+                _market_row(900002, 1.00, self.STRUCTURE, 5, buy=True),
+                {**_market_row(900003, 0.10, self.STRUCTURE, 50), "type_id": 35}])  # another type
+        self.env.server.get(f"/universe/structures/{self.STRUCTURE}", token=MIRA.token,
+                            doc={"name": "4-HWWF - WinterCo. Central Station", "solar_system_id": 30000142})
+
+    def test_check_reads_a_structure_order_against_the_structures_own_book(self):
+        self._install_structure_order()
+        code, out, err = self.env.run(["orders", "--check", "--json"])
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        mira = next(o for o in doc["orders"] if o["order_id"] == 700011)
+        # The regional feed has nothing there, which used to read as "alone".
+        self.assertEqual(("undercut", 4.80, 300), (mira["check"]["status"], mira["check"]["best_other"],
+                                                   mira["check"]["units_ahead"]))
+        self.assertEqual("4-HWWF - WinterCo. Central Station", mira["location_name"])
+        owners = {o["owner_name"]: o for o in doc["owners"]}
+        self.assertEqual(("2026-11-11T08:03:32Z", "2026-11-11T08:23:32Z"),
+                         (owners["Mira Solen"]["as_of"], owners["Mira Solen"]["expires"]))
+
+    def test_an_unreadable_structure_book_leaves_the_order_unchecked(self):
+        self._install_structure_order(refuse=True)
+        code, out, err = self.env.run(["orders", "--check", "--json"])
+        self.assertEqual(code, 0, err)
+        mira = next(o for o in json.loads(out)["orders"] if o["order_id"] == 700011)
+        self.assertEqual("unchecked", mira["check"]["status"])
+        self.assertIn("docking access", mira["check"]["error"])
+        code, text, err = self.env.run(["orders", "--check"])
+        self.assertIn("* unchecked: ", text)
+
     def test_check_refuses_closed_and_csv(self):
         for extra in ("--closed", "--csv"):
             code, _, err = self.env.run(["orders", "--check", extra])

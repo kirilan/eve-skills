@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_alerts, cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
 
 
 def cmd_login(args):
@@ -134,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="run the login flow N times in a row, for N characters. EVE issues one token per "
                               "character, so this is N consent screens - but one command, and the browser keeps "
                               "the SSO session between them")
-    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,planets,blueprints,divisions,wallet,all (re-authenticates the chosen character with EXACTLY these consents, so pass every one you still want - or just 'all')")
+    p_login.add_argument("--scopes", help="extra consents, comma-separated: attributes,standings,jobs,assets,location,clones,orders,corp-orders,structures,structure-search,structure-markets,planets,blueprints,divisions,wallet,all (re-authenticates the chosen character with EXACTLY these consents, so pass every one you still want - or just 'all')")
 
     p_logout = sub.add_parser("logout", help="remove stored tokens")
     p_logout.add_argument("--char", help="only this character (name or id); default removes all")
@@ -677,6 +677,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
     p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
 
+    p_alerts = sub.add_parser("alerts", help="Telegram alerts for undercut/outbid, back-on-top and filled market orders, and industry jobs "
+                                             "about to finish")
+    alerts_sub = p_alerts.add_subparsers(dest="alerts_action")
+    p_asetup = alerts_sub.add_parser("setup", help="store the bot token (from @BotFather) and find the chat; "
+                                                    "message the bot in Telegram first")
+    p_asetup.add_argument("--token-file", metavar="FILE",
+                          help="file holding the bot token, or - for stdin (default: keep the stored token)")
+    p_asetup.add_argument("--chat-id", type=int, help="send to this chat instead of the one that messaged the bot")
+    p_atest = alerts_sub.add_parser("test", help="send a test message")
+    p_atest.add_argument("text", nargs="?", help="message text")
+    p_arun = alerts_sub.add_parser("run", help="check every open order once and send what is new "
+                                               "(for a timer: contrib/systemd/eve-orders-alert.timer)")
+    p_arun.add_argument("--dry-run", action="store_true", help="print the message; send nothing, save no state")
+    p_arun.add_argument("--quiet", action="store_true", help="no summary line on stdout")
     p_dash = sub.add_parser("dashboard", help="web page with profit over time, by product and by market, plus "
                                               "industry slots and market orders (refreshes itself hourly)")
     dash_sub = p_dash.add_subparsers(dest="dashboard_action")
@@ -688,6 +702,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help=f"TCP port (default {cmd_dashboard.DEFAULT_PORT})")
     p_dserve.add_argument("--refresh", type=int, default=cmd_dashboard.DEFAULT_REFRESH_MINUTES, metavar="MIN",
                           help=f"rebuild the data every MIN minutes (default {cmd_dashboard.DEFAULT_REFRESH_MINUTES})")
+    p_dserve.add_argument("--orders-refresh", type=int, default=cmd_dashboard.DEFAULT_ORDERS_REFRESH_MINUTES,
+                          metavar="MIN",
+                          help="between full rebuilds, re-read only the market orders every MIN minutes "
+                               f"(default {cmd_dashboard.DEFAULT_ORDERS_REFRESH_MINUTES}: ESI caches order books "
+                               "that long; 0 = only with the full rebuild)")
     p_dserve.add_argument("--no-sync", action="store_true",
                           help="never run a ledger sync; report what is stored (another timer syncs)")
     p_dserve.add_argument("--verbose", action="store_true", help="log every HTTP request")
@@ -762,7 +781,8 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "doctor": doctor_mod.cmd_doctor, "events": cmd_watch.cmd_events,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
-            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "operation": cmd_operation.cmd_operation, "colonies": cmd_colonies.cmd_colonies}
+            "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "operation": cmd_operation.cmd_operation, "colonies": cmd_colonies.cmd_colonies,
+            "alerts": cmd_alerts.cmd_alerts}
 
 
 def _use_utf8_streams() -> None:

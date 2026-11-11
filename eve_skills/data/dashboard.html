@@ -68,6 +68,9 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
 .btn:hover { background: var(--wash); }
 .btn[disabled] { color: var(--text-muted); cursor: default; }
 .spacer { flex: 1; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 0 0 12px; font-size: 13px; color: var(--text-secondary); }
+.filters label { display: inline-flex; gap: 6px; align-items: center; }
+.filters select { border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); border-radius: 8px; padding: 5px 8px; font: inherit; max-width: 100%; }
 .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .grid2 > .card { margin-bottom: 0; min-width: 0; }
@@ -253,6 +256,11 @@ footer ul { margin: 4px 0; padding-left: 18px; }
   <section class="card">
     <h2>Market orders</h2>
     <p class="sub" id="orders-sub">Open orders against their station's book; undercut and outbid first.</p>
+    <div class="filters">
+      <label>Location <select id="orders-location"><option value="">All locations</option></select></label>
+      <label>Character <select id="orders-owner"><option value="">All characters</option></select></label>
+      <span id="orders-count" class="muted"></span>
+    </div>
     <div id="orders-error"></div>
     <div class="scroll" id="table-orders"></div>
   </section>
@@ -835,23 +843,60 @@ function renderJobs(j) {
       el("br"), el("span", { class: "muted", text: relative(r.end_start) })), r.who || "–", `${r.count}× ${r.product}`, r.runs || "–"]));
 }
 
+const orderFilter = { location: "", owner: "" };
+try {
+  orderFilter.location = localStorage.getItem("orders-location") || "";
+  orderFilter.owner = localStorage.getItem("orders-owner") || "";
+} catch (e) { /* no storage: start unfiltered */ }
+
+// Fill one filter's options from the rows; a remembered choice that no longer matches any order is kept
+// as an option ("none open") so the table does not silently switch back to everything.
+function fillFilter(id, key, values, allLabel) {
+  const sel = document.getElementById(id);
+  const counts = new Map();
+  for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
+  const keys = [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  sel.replaceChildren(el("option", { value: "", text: `${allLabel} (${values.length})` }),
+    ...keys.map(k => el("option", { value: k, text: `${k} (${counts.get(k)})` })));
+  if (orderFilter[key] && !counts.has(orderFilter[key])) sel.append(el("option", { value: orderFilter[key], text: `${orderFilter[key]} (none open)` }));
+  sel.value = orderFilter[key];
+}
+
 function renderOrders(o) {
   const err = clear("orders-error");
   if (o.error) err.append(el("div", { class: "error", text: "Order check unavailable: " + o.error }));
-  const rows = (o.orders || []).slice().sort((a, b) =>
-    (ORDER_RANK[a.status] ?? 2) - (ORDER_RANK[b.status] ?? 2) || (b.price * b.volume_remain) - (a.price * a.volume_remain));
+  const all = (o.orders || []).map(r => ({ ...r, location: r.location || "unknown location", owner: r.owner || "unknown" }));
+  // Each list counts the orders the other filter leaves, so the numbers always add up to what a pick shows.
+  fillFilter("orders-location", "location", all.filter(r => !orderFilter.owner || r.owner === orderFilter.owner).map(r => r.location), "All locations");
+  fillFilter("orders-owner", "owner", all.filter(r => !orderFilter.location || r.location === orderFilter.location).map(r => r.owner), "All characters");
+  const rows = all.filter(r => (!orderFilter.location || r.location === orderFilter.location) && (!orderFilter.owner || r.owner === orderFilter.owner))
+    .sort((a, b) => (ORDER_RANK[a.status] ?? 2) - (ORDER_RANK[b.status] ?? 2) || (b.price * b.volume_remain) - (a.price * a.volume_remain));
   const bad = rows.filter(r => ORDER_RANK[r.status] === 0).length;
-  document.getElementById("orders-sub").textContent = `${rows.length} open orders, ${bad} undercut or outbid` + (o.as_of ? ` · checked ${when(o.as_of)}` : "") + ". Undercut and outbid first.";
-  table("table-orders", [["Status", 0], ["Item", 0], ["Side", 0], ["Where", 0], ["Price", 1], ["Left", 1], ["Filled", 0], ["Best other", 1], ["Ahead", 1], ["Suggest", 1], ["Value left", 1]],
+  const fresh = o.esi_as_of
+    ? ` · as ESI saw them ${when(o.esi_as_of)} (${relative(o.esi_as_of)})` + (o.esi_expires ? `; ESI has newer from ${whenShort(o.esi_expires)}` : "")
+    : (o.as_of ? ` · checked ${when(o.as_of)}` : "");
+  document.getElementById("orders-sub").textContent = `${all.length} open orders, ${all.filter(r => ORDER_RANK[r.status] === 0).length} undercut or outbid${fresh}. Undercut and outbid first.`;
+  document.getElementById("orders-count").textContent = rows.length === all.length ? "" : `showing ${rows.length} of ${all.length}, ${bad} undercut or outbid`;
+  const unchecked = [...new Set(rows.filter(r => r.check_error).map(r => r.check_error))];
+  for (const m of unchecked) err.append(el("div", { class: "error", text: "Not checked: " + m }));
+  table("table-orders", [["Status", 0], ["Item", 0], ["Side", 0], ["Who", 0], ["Where", 0], ["Price", 1], ["Left", 1], ["Filled", 0], ["Best other", 1], ["Ahead", 1], ["Suggest", 1], ["Value left", 1]],
     rows.map(r => {
       const st = ORDER_STATUS[r.status] || ["warning", "?", r.status || "unchecked"];
       const filled = r.volume_total ? (r.volume_total - r.volume_remain) / r.volume_total : 0;
       const meter = el("div", { class: "meter", title: `${num(r.volume_total - r.volume_remain)} of ${num(r.volume_total)} filled` },
         el("span", { style: `left:0;width:${(filled * 100).toFixed(1)}%;background:var(--series-1)` }));
       const ahead = r.units_ahead ? `${num(r.units_ahead)}` + (r.days_ahead !== null && r.days_ahead !== undefined ? ` (${r.days_ahead.toFixed(1)} d)` : "") : "–";
-      return [pill(...st), r.type_name, r.side, system(r.location), isk(r.price), `${num(r.volume_remain)}/${num(r.volume_total)}`, meter,
+      return [pill(...st), r.type_name, r.side, r.owner, el("span", { title: r.location, text: system(r.location) }), isk(r.price), `${num(r.volume_remain)}/${num(r.volume_total)}`, meter,
         isk(r.best_other), ahead, r.suggest ? isk(r.suggest) : "–", isk(r.price * r.volume_remain)];
     }));
+}
+
+for (const [id, key] of [["orders-location", "location"], ["orders-owner", "owner"]]) {
+  document.getElementById(id).addEventListener("change", e => {
+    orderFilter[key] = e.target.value;
+    try { localStorage.setItem("orders-" + key, orderFilter[key]); } catch (err) { /* not remembered */ }
+    if (state.doc) renderOrders(state.doc.orders);
+  });
 }
 
 // ---------- data ----------

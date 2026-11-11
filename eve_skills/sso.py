@@ -47,6 +47,7 @@ OPTIONAL_SCOPES = {
     # Not an asset scope, but inventory needs it: /universe/structures is the only way to name a
     # citadel or engineering site, and without it a player's holdings sit in `structure <id>`.
     "structures": ["esi-universe.read_structures.v1"],
+    "structure-search": ["esi-search.search_structures.v1", "esi-universe.read_structures.v1"],
     # A player structure's market (`/markets/structures/{id}`): the regional feed carries none of its
     # sell orders. ESI also demands docking access there, which no scope can grant.
     "structure-markets": ["esi-markets.structure_markets.v1", "esi-universe.read_structures.v1"],

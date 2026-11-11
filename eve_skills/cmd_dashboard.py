@@ -2,8 +2,9 @@
 
 `serve` runs a small HTTP server (standard library only) that rebuilds its document every
 `--refresh` minutes: a ledger sync when the last one is that old, a replay of the ledger, and the
-live `industry status --corp`, `orders --check` and `colonies --detail` reports. The page polls the
-document and redraws.
+live `industry status --corp`, `orders --check` and `colonies --detail` reports. In between, every
+`--orders-refresh` minutes, only `orders --check` is re-run and its section replaced. The page polls
+the document and redraws.
 `build` writes one document as JSON and exits - the same data, for a script or a cron job.
 
 The server is read-only: it answers GET for the page and the document, and POST /api/refresh only
@@ -32,6 +33,9 @@ from . import cmd_ledger, dashboard, esi as esi_mod, ledger_db, ledger_sync, pat
 
 DEFAULT_PORT = 8765
 DEFAULT_REFRESH_MINUTES = 60
+# ESI caches a character's order book for 20 minutes, so between full rebuilds the orders panel is
+# re-read on that cadence: an hourly rebuild alone showed reprices up to 80 minutes late.
+DEFAULT_ORDERS_REFRESH_MINUTES = 20
 MIN_MANUAL_REFRESH_SECONDS = 300
 # A live report that takes longer than this has hung on ESI; the page shows the last good one.
 LIVE_TIMEOUT_SECONDS = 600
@@ -127,6 +131,10 @@ def _market_volume(conn, type_ids) -> dict[int, float]:
     return out
 
 
+def _orders_args(orders_char: str | None) -> list[str]:
+    return ["orders", "--check"] + (["--char", orders_char] if orders_char else [])
+
+
 def build_document(*, since: str | None, live: bool = True, refresh_minutes: int | None = None,
                    orders_char: str | None = None, record: bool = False) -> dict:
     """Replay the ledger and (unless `live` is off) read jobs, orders and stock from ESI. With `record`
@@ -142,7 +150,7 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
     status = orders = inventory = colonies = None
     status_error = orders_error = inventory_error = colonies_error = None
     if live:
-        orders_args = ["orders", "--check"] + (["--char", orders_char] if orders_char else [])
+        orders_args = _orders_args(orders_char)
         plan = _status_plan()
         with ThreadPoolExecutor(max_workers=3 + len(plan)) as pool:
             jobs = {key: pool.submit(_live, *cmd) for key, cmd in (
@@ -245,11 +253,49 @@ class _State:
             self.last_error = error
             self.next_refresh = _iso(_now() + timedelta(minutes=args.refresh))
 
+    def refresh_orders(self) -> None:
+        """Re-run only `orders --check` and swap its section into the served document.
+
+        A failed read keeps the previous rows, whose `esi_as_of` then says how old they are. It does
+        not mark the server as refreshing: a manual refresh asked for meanwhile still runs right after."""
+        with self.lock:
+            if self.body is None:
+                return
+        started = time.monotonic()
+        orders, error = _live(*_orders_args(self.args.orders_char))
+        if orders is None:
+            _log(f"orders: {error}")
+            return
+        try:
+            with self.lock:
+                doc = json.loads(self.body)
+                doc["orders"] = dashboard.orders_section(orders)
+                self.body = body = json.dumps(doc).encode("utf-8")
+        except ValueError as err:
+            _log(f"orders refresh failed: {err}")
+            return
+        with contextlib.suppress(OSError):
+            storage.atomic_write(_cache_path(), body)
+        _log(f"orders refreshed in {time.monotonic() - started:.0f} s")
+
     def loop(self) -> None:
+        """Full rebuilds every --refresh minutes (or on request), orders alone in between."""
+        full_every = self.args.refresh * 60
+        orders_every = (getattr(self.args, "orders_refresh", 0) or 0) * 60
+        if orders_every >= full_every:
+            orders_every = 0
         while True:
             self.refresh()
-            self.wake.wait(self.args.refresh * 60)
-            self.wake.clear()
+            next_full = time.monotonic() + full_every
+            while True:
+                now = time.monotonic()
+                due = min(next_full, now + orders_every) if orders_every else next_full
+                if self.wake.wait(max(0.0, due - now)):
+                    self.wake.clear()
+                    break           # a manual refresh: rebuild everything now
+                if time.monotonic() >= next_full - 1:
+                    break
+                self.refresh_orders()
 
     def request_refresh(self) -> bool:
         with self.lock:
@@ -321,12 +367,16 @@ def make_server(args) -> tuple[ThreadingHTTPServer, _State]:
 def cmd_serve(args) -> int:
     if args.refresh < 1:
         raise RuntimeError("--refresh must be at least 1 minute")
+    if (getattr(args, "orders_refresh", 0) or 0) < 0:
+        raise RuntimeError("--orders-refresh cannot be negative (0 turns it off)")
     cmd_ledger._open().close()      # fail now, not in the refresh thread, when there is no ledger
     server, state = make_server(args)
     threading.Thread(target=state.loop, name="dashboard-refresh", daemon=True).start()
     host, port = server.server_address[:2]
     shown = "localhost" if host in ("127.0.0.1", "::1") else host
+    orders_every = getattr(args, "orders_refresh", 0) or 0
     _log(f"serving http://{shown}:{port}/ (refresh every {args.refresh} min"
+         f"{f', orders every {orders_every} min' if 0 < orders_every < args.refresh else ''}"
          f"{', no ledger sync' if args.no_sync else ''}{', no live reports' if args.no_live else ''})")
     try:
         server.serve_forever()

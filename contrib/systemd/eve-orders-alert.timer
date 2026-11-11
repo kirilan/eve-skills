@@ -1,0 +1,10 @@
+[Unit]
+Description=Check market orders for Telegram alerts every 20 minutes (ESI's order cache time)
+
+[Timer]
+OnCalendar=*:00/20
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

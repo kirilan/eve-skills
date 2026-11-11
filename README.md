@@ -353,6 +353,7 @@ first login:
    | `orders` | `esi-markets.read_character_orders.v1` |
    | `corp-orders` | `esi-markets.read_corporation_orders.v1`, `esi-characters.read_corporation_roles.v1` |
    | `structures` | `esi-universe.read_structures.v1` |
+| `structure-search` | `esi-search.search_structures.v1`, `esi-universe.read_structures.v1` |
    | `structure-markets` | `esi-markets.structure_markets.v1`, `esi-universe.read_structures.v1` (a structure's market also needs docking access there) |
    | `planets` | `esi-planets.manage_planets.v1` (ESI exposes only GET for the colony routes) |
    | `blueprints` | `esi-characters.read_blueprints.v1`, `esi-corporations.read_blueprints.v1`, `esi-characters.read_corporation_roles.v1` |
@@ -451,7 +452,7 @@ the SSO session between them: characters on the same account cost a pick, not a 
   scope means re-running `login` and selecting that specific character in the browser. The tool
   never re-authenticates anyone implicitly and never bulk-grants.
 - Valid `--scopes` values: `attributes`, `standings`, `jobs`, `assets`, `location`, `clones`,
-  `orders`, `corp-orders`, `structures`, `structure-markets`, `planets`, `blueprints`, `divisions`, `wallet`, `all`. An unknown name is a hard error listing the choices.
+  `orders`, `corp-orders`, `structures`, `structure-search`, `structure-markets`, `planets`, `blueprints`, `divisions`, `wallet`, `all`. An unknown name is a hard error listing the choices.
 - **Attributes need no scope of their own.** `attributes` (and exact `plan` costs) use
   `esi-skills.read_skills.v1`, which every login already requests; `login --attributes` is accepted
   for clarity and asks for nothing beyond the core skills consent.
@@ -841,6 +842,14 @@ cheaper than the next order - undercutting one bait unit would give the gap away
 so such an order reads `behind sliver` and gets no suggestion. The rule lives in `eve_skills/pricing.py`.
 `--json` adds a `check` object to each order; `--check` cannot be combined with `--closed`, `--csv` or
 `--watch`. Only the issuing character can reprice an order, and only from the order's region.
+An order in a player structure is checked against that structure's own book
+(`/markets/structures/{id}`, all types in one read): the regional feed leaves structure orders out, so it
+would always say `alone`. That read needs the `structure-markets` consent and docking access there; the
+issuing character is asked first. When no stored character may read the book, the order is `unchecked`
+with the reason, never `alone`. The structure's name comes from `/universe/structures/{id}`
+(`structures` consent). `--json` also gives each owner `as_of` and `expires`: when CCP generated that
+order book and when ESI will serve a newer one. ESI caches order books for up to 20 minutes, so an order
+changed in game shows only after `expires`.
 
 ### `restock` — what the next builds still need, and what to buy for them
 
@@ -1047,14 +1056,16 @@ eve-skills dashboard build --out dashboard.json    # the same data once, as JSON
 (default 60) it runs `ledger sync` when the last sync is that old (`--no-sync` leaves syncing to someone
 else), replays the ledger, and runs `industry status --corp`, `orders --check` and `colonies --detail` for
 live slots, jobs, order standing and extractor timers (`--no-live` skips them; `--orders-char` limits the
-orders to one character). The page polls
+orders to one character). In between, every `--orders-refresh` minutes (default 20, ESI's own cache time for
+order books; 0 turns it off) only `orders --check` runs again and replaces the orders panel. The page polls
 for new data every 5 minutes and has a *Refresh now* button, accepted at most once per 5 minutes.
 
 The page shows net profit and its parts for the last 7 days, 30 days or since `--since` (default the
 cutover); gross profit per day or ISO week and the running net profit; profit per product (invention lines
 and other builds) and per market station, each with a table view; industry slots per character with jobs
-ready to deliver and running jobs by end time; and every open order with its status in the station's book
-(cheapest, undercut, outbid), units ahead and a suggested price. The figures are `ledger pnl`'s: disposal is
+ready to deliver and running jobs by end time; and every open order with its owner, its status in the
+station's book (cheapest, undercut, outbid), units ahead and a suggested price. The orders panel filters
+by location and by character, and says when ESI generated the orders it shows. The figures are `ledger pnl`'s: disposal is
 left out and the assumptions block is printed underneath.
 
 The **planetary industry** panel is `ledger planetary` for the same period: the colonies' own profit (never
@@ -1107,6 +1118,52 @@ ledger refuses to be opened by code older than its schema, so a checkout switche
 schema change stops the service, the prices timer and every command with "written by a newer eve-skills"
 until it is switched back. It restarts itself 30 s after a crash. A refresh that fails (ESI down, a report
 erroring) is logged and the page keeps the last good data, showing the error.
+
+### `alerts` — order and industry job alerts in Telegram
+
+```bash
+eve-skills alerts setup --token-file token.txt   # token from @BotFather; message the bot once first
+eve-skills alerts test "hello"                   # one line to the chat
+eve-skills alerts run --dry-run                  # print what would be sent; send nothing, save nothing
+eve-skills alerts run                            # what eve-orders-alert.timer runs every 20 minutes
+```
+
+`run` reads every stored character's open orders and history and places each open order in its book
+exactly like `orders --check` (player structures from their own book). One Telegram message then lists
+what is new since the last run:
+
+- **Undercut / Outbid**, once per price of ours: the item's full name, who, where, our price, the best
+  competitor, the units ahead and the price to set. Repricing and falling behind again is a new alert.
+- **Still behind**, a reminder of every order still behind at the announced price, at most every
+  `remind_hours`. It is never sent in quiet hours; it waits for the morning.
+- **Back on top**, when an announced order is cheapest or top bid again at the same price, because the
+  competition left. When you repriced the order yourself, nothing is sent.
+- **Filled**, when an order left the book and ESI's history shows it filled. History is cached for up to
+  an hour, so this can come one or two runs after the sale.
+- **Job ending / Job done**, once per industry job, when it has at most `job_notice_minutes` (default 20)
+  left or has already finished. Jobs of one character, activity, product and facility are one line. Until
+  it is delivered, the job is listed under **Jobs to deliver** in the same reminder as the orders still
+  behind, on the same `remind_hours` clock. A delivered job leaves the character's job list and is
+  dropped without a message; a paused job is not news. Jobs come from each character's own job list,
+  which includes the jobs it installed for its corporation.
+
+Settings live in `alerts.json` in the config directory, written with the defaults on first use:
+`exclude_locations` (case-insensitive parts of a station name, e.g. `"WY-9LL"`), `exclude_characters`,
+`remind_hours` (default 4; 0 = no reminders), `job_alerts` (default `true`), `job_notice_minutes`
+(default 20; the timer runs every 20 minutes, so a shorter notice can miss straight to "done"), `quiet_hours` (default `"00:00-08:00"`; messages then arrive
+silently) and `timezone` (default `Europe/Sofia`). Excluded orders are never checked, which also saves
+their ESI calls. The bot token and chat id are in `telegram.json` in the config directory, owner-only.
+The token is read from a file or stdin, never from the command line, and no error message contains it.
+State (`order-alerts.json`, state directory) is saved only after Telegram accepted the message, so a
+failed send is retried by the next run. An owner whose order book or history could not be read keeps its
+orders as they were: a failed read never reads as "filled".
+
+```bash
+cp contrib/systemd/eve-orders-alert.service contrib/systemd/eve-orders-alert.timer ~/.config/systemd/user/
+# edit the two /path/to/eve-tools paths in the .service, then:
+systemctl --user daemon-reload
+systemctl --user enable --now eve-orders-alert.timer
+```
 
 ### `prices` — is today's Jita price a dip worth waiting out?
 

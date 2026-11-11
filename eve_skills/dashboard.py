@@ -186,7 +186,11 @@ def jobs_section(status: Mapping | None, error: str | None = None) -> dict:
 
 
 def orders_section(doc: Mapping | None, error: str | None = None) -> dict:
-    """Open orders with their standing in the station's book, from `orders --check --json`."""
+    """Open orders with their standing in the station's book, from `orders --check --json`.
+
+    `as_of` is when the check ran; `esi_as_of` is the oldest of the owners' order books as CCP
+    generated them, which is what the rows actually show. ESI serves that snapshot until
+    `esi_expires` (up to 20 minutes), so an order changed in game appears only after it."""
     if doc is None:
         return {"error": error or "no orders", "orders": []}
     rows = []
@@ -202,8 +206,12 @@ def orders_section(doc: Mapping | None, error: str | None = None) -> dict:
                      "expires": o.get("expires"), "status": check.get("status"),
                      "best_other": check.get("best_other"), "units_ahead": check.get("units_ahead"),
                      "days_ahead": check.get("days_ahead"), "suggest": check.get("suggest"),
-                     "book_as_of": check.get("book_as_of")})
-    return {"error": error, "as_of": doc.get("generated"), "orders": rows}
+                     "book_as_of": check.get("book_as_of"), "check_error": check.get("error")})
+    owners = doc.get("owners") or []
+    stamps = [o["as_of"] for o in owners if o.get("as_of")]
+    expiries = [o["expires"] for o in owners if o.get("expires")]
+    return {"error": error, "as_of": doc.get("generated"), "esi_as_of": min(stamps) if stamps else None,
+            "esi_expires": min(expiries) if expiries else None, "orders": rows}
 
 
 def document(book: ledger.Book, header: Mapping, *, since: str, now: str, today: date,

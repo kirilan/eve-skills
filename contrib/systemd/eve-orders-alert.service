@@ -1,0 +1,11 @@
+# One `alerts run`; eve-orders-alert.timer starts it every 20 minutes. Run `alerts setup` first, install
+# alongside the timer (see README, `alerts`) and edit the two /path/to/eve-tools paths.
+[Unit]
+Description=eve-skills: Telegram alerts for market orders and industry jobs about to finish
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/eve-tools
+ExecStart=/path/to/eve-tools/.venv/bin/python -m eve_skills alerts run
+Nice=10

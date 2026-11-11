@@ -99,6 +99,11 @@ class OwnerOrders:
     open: tuple[Order, ...] = ()
     history: tuple[Order, ...] = ()
     history_ok: bool = True
+    # When CCP generated the open book (Last-Modified, epoch) and when ESI will serve a newer one
+    # (Expires). ESI caches order books for up to 20 minutes, so a reprice made in game shows up
+    # only after `expires`; a report has to say how old the rows are, not when it ran.
+    as_of: float | None = None
+    expires: float | None = None
 
 
 def owner_key(kind: str, ident: int) -> str:
@@ -200,7 +205,7 @@ def fetch_character(client: esi_mod.Esi, record: dict) -> OwnerOrders:
     key = owner_key("char", cid)
     token = record["access_token"]
     try:
-        rows = client.get(f"/characters/{cid}/orders", token=token)
+        rows, meta = client.get_meta(f"/characters/{cid}/orders", token=token)
     except esi_mod.AuthError as err:
         raise OrderAccess(f"ESI refused the order book ({err}) - no {CHARACTER_FEATURE} consent; "
                           f"run: eve-skills login --scopes {CHARACTER_FEATURE}") from None
@@ -212,7 +217,7 @@ def fetch_character(client: esi_mod.Esi, record: dict) -> OwnerOrders:
     except esi_mod.EsiError:
         history, history_ok = [], False
     return OwnerOrders(key, name, _rows(rows, key, name, False), _rows(history, key, name, True),
-                       history_ok)
+                       history_ok, meta.last_modified, meta.expires)
 
 
 def fetch_corporation(client: esi_mod.Esi, record: dict, public: dict) -> OwnerOrders:
@@ -227,7 +232,7 @@ def fetch_corporation(client: esi_mod.Esi, record: dict, public: dict) -> OwnerO
     key = owner_key("corp", corp_id)
     token = record["access_token"]
     try:
-        rows = client.get_all(f"/corporations/{corp_id}/orders", token=token)
+        rows, meta = client.get_all_meta(f"/corporations/{corp_id}/orders", token=token)
     except esi_mod.AuthError as err:
         raise OrderAccess(_corp_denied(client, record, corp_name, err)) from None
     try:
@@ -237,7 +242,8 @@ def fetch_corporation(client: esi_mod.Esi, record: dict, public: dict) -> OwnerO
         history, history_ok = [], False
     # Every row here is the corporation's, whether or not ESI bothers to say so.
     return OwnerOrders(key, corp_name, _rows(rows, key, corp_name, False, True),
-                       _rows(history, key, corp_name, True, True), history_ok)
+                       _rows(history, key, corp_name, True, True), history_ok, meta.last_modified,
+                       meta.expires)
 
 
 def _corp_name(client: esi_mod.Esi, corp_id: int) -> str:

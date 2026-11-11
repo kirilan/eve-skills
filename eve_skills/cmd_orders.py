@@ -143,22 +143,47 @@ CHECK_COLUMNS = ["owner", "type", "side", "price", "left", "status", "best other
 CHECK_HISTORY_DAYS = 30
 
 
+def _order_book(client: esi_mod.Esi, order, books: dict) -> tuple[list, esi_mod.Meta]:
+    """Every row of the book `order` competes in, all locations: one fetch per (region, type), or
+    per structure.
+
+    A player structure's orders are not in the regional feed (`/markets/{region}/orders` leaves
+    them out), so checking one there would always come back "alone". Its own book needs a docked
+    character's token; the issuing character is asked first, since it evidently has access."""
+    if order.location_id > market.STRUCTURE_ID_FLOOR:
+        key = ("structure", order.location_id)
+        if key not in books:
+            books[key] = market.structure_book(client, order.location_id, reader=order.owner_name)
+        rows, meta = books[key]
+        return [r for r in rows if market._id(r.get("type_id")) == order.type_id], meta
+    key = (order.region_id, order.type_id)
+    if key not in books:
+        books[key] = client.get_meta(market.book_path(*key))
+    return books[key]
+
+
 def check_orders(client: esi_mod.Esi, shown, own_ids) -> dict[int, dict]:
     """Each open order's standing in its station's book, keyed by order id.
 
     One regional book and one 30-day history per (region, type), however many of our orders share
-    them. Our own orders - every open order of every owner read - are left out of the competition,
-    so an order never counts as undercut by its sibling."""
-    books: dict[tuple[int, int], tuple[list, esi_mod.Meta]] = {}
+    them; one book per player structure. Our own orders - every open order of every owner read - are
+    left out of the competition, so an order never counts as undercut by its sibling. A book that
+    cannot be read leaves the order `unchecked` with the reason, never `alone`."""
+    books: dict[tuple, tuple[list, esi_mod.Meta]] = {}
     volumes: dict[tuple[int, int], float | None] = {}
     out = {}
     for order in shown:
+        try:
+            rows, meta = _order_book(client, order, books)
+        except (esi_mod.EsiError, RuntimeError) as err:
+            out[order.order_id] = {"status": "unchecked", "error": str(err), "best_other": None,
+                                   "units_ahead": 0, "days_ahead": None, "suggest": None,
+                                   "ignored": [], "volume_per_day": None, "book_as_of": None}
+            continue
         key = (order.region_id, order.type_id)
-        if key not in books:
-            books[key] = client.get_meta(market.book_path(*key))
+        if key not in volumes:
             stats = market.history_stats(client, order.region_id, order.type_id, CHECK_HISTORY_DAYS)
             volumes[key] = stats.volume_per_day if stats else None
-        rows, meta = books[key]
         here = [(order.region_id, row) for row in rows
                 if market._id(row.get("location_id")) == order.location_id]
         side = market._order_depth(here, len(here) or 1)["buy" if order.is_buy else "sell"]
@@ -167,6 +192,33 @@ def check_orders(client: esi_mod.Esi, shown, own_ids) -> dict[int, dict]:
         doc["volume_per_day"] = volumes[key]
         doc["book_as_of"] = market.iso_utc(meta.last_modified)
         out[order.order_id] = doc
+    return out
+
+
+def structure_names(client: esi_mod.Esi, book, chars) -> dict[int, str]:
+    """Names of the player structures our orders sit in.
+
+    `/universe/names` cannot name a structure; `/universe/structures/{id}` can, for a character
+    with the structures consent and access to it. The issuing character is asked first; an id
+    nobody may look at stays unnamed (the renderer shows `structure <id>`)."""
+    tokens = {orders.owner_key("char", tok["character_id"]): tok["access_token"] for tok, _ in chars}
+    issuers: dict[int, list[str]] = {}
+    for order in book:
+        if order.location_id > market.STRUCTURE_ID_FLOOR:
+            mine = tokens.get(order.owner_key)
+            queue = issuers.setdefault(order.location_id, [])
+            if mine and mine not in queue:
+                queue.insert(0, mine)
+    out = {}
+    for structure_id, preferred in issuers.items():
+        for token in preferred + [t for t in tokens.values() if t not in preferred]:
+            try:
+                doc = client.get(f"/universe/structures/{structure_id}", token=token)
+            except esi_mod.EsiError:
+                continue
+            if isinstance(doc, dict) and doc.get("name"):
+                out[structure_id] = doc["name"]
+                break
     return out
 
 
@@ -222,6 +274,10 @@ def cmd_orders(args):
               if check else {})
     ids = {i for o in shown for i in (o.type_id, o.region_id, o.location_id, o.issued_by) if i}
     names = esi_mod.resolve_names(client, ids) if ids else {}
+    names.update(structure_names(client, shown, chars))
+    for order in shown:
+        if order.location_id > market.STRUCTURE_ID_FLOOR:
+            names.setdefault(order.location_id, f"structure {order.location_id}")
     # --csv sends the hint lines to stderr inside targets(); --json needs the same treatment here
     # so that stdout stays parseable either way.
     if args.json:
@@ -233,8 +289,11 @@ def cmd_orders(args):
             "book": "closed" if args.closed else "open",
             "filters": {"type_id": type_id,
                         "side": None if side is None else ("buy" if side else "sell")},
+            # as_of: when CCP generated each owner's open book; ESI serves that snapshot until
+            # `expires` (up to 20 minutes), so a reprice made in game is not visible before then.
             "owners": [{"owner_key": o.owner_key, "owner_name": o.owner_name,
-                        "history_ok": o.history_ok} for o in owners],
+                        "history_ok": o.history_ok, "as_of": market.iso_utc(o.as_of),
+                        "expires": market.iso_utc(o.expires)} for o in owners],
             "matched": len(book),
             "shown": len(shown),
             "orders": [dict(order_doc(o, names), **({"check": checks[o.order_id]} if check else {}))
@@ -267,6 +326,8 @@ def cmd_orders(args):
             lines = [render.table(CHECK_COLUMNS, [check_row(o, checks[o.order_id], names) for o in rows])]
             behind = sum(1 for c in checks.values() if c["status"] in ("undercut", "outbid"))
             stamps = sorted(c["book_as_of"] for c in checks.values() if c["book_as_of"])
+            snapshots = sorted(market.iso_utc(o.as_of) for o in owners if o.as_of is not None)
+            unchecked = [c["error"] for c in checks.values() if c["status"] == "unchecked"]
             lines += ["", f"{behind} of {len(checks)} order(s) behind a competitor; ahead = competing units "
                           "priced better than ours, days = those units / the region's "
                           f"{CHECK_HISTORY_DAYS}-day daily volume.",
@@ -276,6 +337,12 @@ def cmd_orders(args):
                       f"* books as of {stamps[0][11:16]}-{stamps[-1][11:16]} UTC; character orders are "
                       "cached up to 20 minutes, so a reprice made just now may not show yet."
                       if stamps else "* no book timestamps"]
+            if snapshots:
+                lines.append(f"* our orders as ESI generated them at {snapshots[0][11:16]}"
+                             f"{'-' + snapshots[-1][11:16] if snapshots[-1][11:16] != snapshots[0][11:16] else ''}"
+                             " UTC")
+            for reason in dict.fromkeys(unchecked):
+                lines.append(f"* unchecked: {reason}")
             blocks.append("\n".join(lines))
         print("\n\n".join(blocks))
         return
