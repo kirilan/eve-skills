@@ -909,6 +909,14 @@ eve-skills operation show                                             # flags va
   installs from their own hangar, and materials move between them by trade. One operation can have both,
   for example a high-sec corporation and a null-sec structure during a move. `default_site` is what
   commands use when no `--site` is given.
+- **A facility per activity:** `facility` is where a site runs everything; `facilities` names another
+  facility for single activities, e.g. `"facilities": {"manufacturing": "example-sotiyo"}` for a site that
+  invents in one structure and builds in the next system. Keys are `manufacturing`, `reaction`,
+  `invention`, `copying`, `research_material`, `research_time`; values are facility keys.
+  `operation show` prints such a site's facility as `example-raitaru; manufacturing: example-sotiyo`.
+- **Who sells and who holds the stock:** a site's optional `seller` is the character who lists its goods;
+  `pool_holder` (personal sites only, one of its `characters`) is the character who holds the shared
+  stock that builders take turns with.
 - **Facilities** carry the system, the structure's `location_id`, the owner's `tax_pct`, and the material
   and time bonuses. Either state them (`material` and `time` per activity, as multipliers) or derive them
   from what you know about the structure: `"structure": "raitaru"`, `"security": "null"`,
@@ -925,6 +933,12 @@ eve-skills operation show                                             # flags va
   names the fix, never an empty book.
 - **Freight** routes (`"jita->x-hub"`) price a courier contract: `per_m3`, `collateral_pct` and `min`.
   A site's `freight_in` and `freight_out` name the routes its supplies and products travel.
+- **Planning and selling settings** (all optional, for planners and selling helpers):
+  `"planning": {"timezone": "Europe/Helsinki", "finish_windows": "08-10,20-22", "never_build": [...],
+  "t1_copies": "invent"}` (`t1_copies`: what a T1 copy is usually for, `invent`, `build` or `both`, the
+  default) and `"selling": {"keep": [...]}` (parts of item names never offered for sale). A bad time zone
+  or window range, or an unknown key, is an error naming the field. Facilities may also carry a `label`
+  (the structure's in-game name), used in messages.
 
 Commands that use the file:
 

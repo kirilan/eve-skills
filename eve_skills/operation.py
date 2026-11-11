@@ -24,20 +24,33 @@ The file format (percentages are percent, multipliers are fractions)::
       "sites": {
         "highsec": {"owner": "corp", "facility": "highsec", "readers": ["Alice Builder"]},
         "null": {"owner": "personal", "facility": "example-raitaru", "hub": "x-hub",
+                 "facilities": {"manufacturing": "example-sotiyo"},
                  "characters": ["Carol Hauler", "Dave Miner"],
+                 "seller": "Carol Hauler", "pool_holder": "Carol Hauler",
                  "freight_in": "jita->x-hub", "freight_out": "x-hub->jita"}
       },
       "facilities": {
         "highsec": {"location_id": 60003760, "system": "Jita"},
         "example-raitaru": {"location_id": 1040000000000, "system": "X-EXMPL", "tax_pct": 1.0,
                          "structure": "raitaru", "security": "null",
-                         "rigs": {"manufacturing": {"me": "t1", "te": "t1"}, "invention": {"te": "t1"}}}
+                         "rigs": {"invention": {"te": "t1"}}},
+        "example-sotiyo": {"location_id": 1040000000002, "system": "Y-EXMPL", "tax_pct": 0.5,
+                           "label": "Y-EXMPL - Example Factory", "structure": "sotiyo",
+                           "security": "null", "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}}
       },
       "hubs": {"x-hub": {"location_id": 1040000000001, "region_id": 10000060,
                           "system_id": 30004759, "reader": "Carol Hauler"}},
       "freight": {"jita->x-hub": {"per_m3": 500, "collateral_pct": 0, "min": 5000000},
-                  "x-hub->jita": {"per_m3": 400, "collateral_pct": 1, "min": 10000000}}
+                  "x-hub->jita": {"per_m3": 400, "collateral_pct": 1, "min": 10000000}},
+      "planning": {"timezone": "Europe/Helsinki", "finish_windows": "08-10,20-22",
+                   "never_build": ["Large Example Rig II"], "t1_copies": "invent"},
+      "selling": {"keep": ["Blueprint"]}
     }
+
+A site's `facilities` names a facility per activity (`manufacturing`, `reaction`, `invention`,
+`copying`, `research_material`, `research_time`); `facility` covers the rest. `seller` is who lists the
+site's goods, `pool_holder` (personal sites) who holds the shared stock. `planning` and `selling` are
+for planners and selling helpers; all of these are optional, and unknown keys are errors.
 """
 
 from __future__ import annotations
@@ -87,6 +100,7 @@ class Facility:
     system: str | None = None
     location_id: int | None = None
     tax: float | None = None
+    label: str | None = None          # the structure's in-game name, for messages
     material: dict[str, float] = field(default_factory=dict)
     time: dict[str, float] = field(default_factory=dict)
     derived_from: str | None = None
@@ -119,7 +133,11 @@ class Site:
 
     `owner` "corp": stock and blueprints sit in the corporation's hangars, read through `readers`
     (characters whose roles open the corporation endpoints). "personal": every character in
-    `characters` installs from their own hangar, and materials move between them by trade."""
+    `characters` installs from their own hangar, and materials move between them by trade.
+
+    `facility` is where every activity runs unless `facilities` names another facility for it: a
+    site that invents in one structure and manufactures in the next system lists
+    `{"manufacturing": "<that facility>"}` there."""
     name: str
     owner: str
     facility: str
@@ -128,6 +146,43 @@ class Site:
     freight_in: str | None = None      # route that brings supplies from the buying hub
     freight_out: str | None = None     # route that takes finished goods to the selling hub
     hub: str | None = None             # the market next to the facility, if any
+    facilities: dict[str, str] = field(default_factory=dict)   # activity -> facility key overrides
+    seller: str | None = None          # the character who lists this site's goods
+    pool_holder: str | None = None     # personal site: who holds the shared stock
+
+    def facility_for(self, activity: str) -> str:
+        """The facility key where this site runs `activity`."""
+        return self.facilities.get(activity, self.facility)
+
+    def facility_keys(self) -> tuple[str, ...]:
+        """Every facility the site uses: the default first, then the overrides, each once."""
+        keys = [self.facility]
+        for key in self.facilities.values():
+            if key not in keys:
+                keys.append(key)
+        return tuple(keys)
+
+
+T1_COPIES = ("invent", "build", "both")
+
+
+@dataclass(frozen=True)
+class Planning:
+    """How this installation plans jobs; every field is optional.
+
+    `timezone` and `finish_windows` size jobs to end when someone is there to deliver them;
+    `never_build` names products a planner must not propose; `t1_copies` says what a T1 blueprint
+    copy is usually for (invention input, manufacturing, or either)."""
+    timezone: str | None = None
+    finish_windows: str | None = None
+    never_build: tuple[str, ...] = ()
+    t1_copies: str = "both"
+
+
+@dataclass(frozen=True)
+class Selling:
+    """`keep`: case-insensitive parts of item names that are never offered for sale."""
+    keep: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,6 +209,8 @@ class Operation:
     hubs: dict[str, Hub]
     freight: dict[str, Freight]
     default_site: str | None
+    planning: Planning = field(default_factory=Planning)
+    selling: Selling = field(default_factory=Selling)
 
     @property
     def configured(self) -> bool:
@@ -286,8 +343,86 @@ def _facility(name: str, raw: dict) -> Facility:
             unknown.append("structure/rigs")
     if location is None and raw.get("structure") not in (None, "station"):
         unknown.append("location_id")
+    label = raw.get("label")
+    if label is not None and not (isinstance(label, str) and label.strip()):
+        raise OperationError(f"{where}.label must be a non-empty string")
     return Facility(name=name, system=raw.get("system"), location_id=location, tax=tax,
+                    label=label.strip() if label else None,
                     material=material, time=time, derived_from=derived_from, unknown=tuple(unknown))
+
+
+def _known_keys(raw, allowed: tuple[str, ...], where: str) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise OperationError(f"{where} must be an object")
+    for key in raw:
+        if key not in allowed:
+            raise OperationError(f"{where}: unknown key '{key}' - one of {', '.join(allowed)}")
+    return raw
+
+
+def _planning(raw) -> Planning:
+    from . import job_times  # local: zoneinfo is only needed when a file sets these
+    raw = _known_keys(raw, ("timezone", "finish_windows", "never_build", "t1_copies"), "planning")
+    zone_name = raw.get("timezone")
+    if zone_name is not None:
+        if not isinstance(zone_name, str) or not zone_name.strip():
+            raise OperationError("planning.timezone must be a time zone name such as Europe/Helsinki")
+        try:
+            job_times.zone(zone_name)
+        except RuntimeError as err:
+            raise OperationError(f"planning.timezone: {err}") from None
+    windows = raw.get("finish_windows")
+    if windows is not None:
+        if not isinstance(windows, str):
+            raise OperationError("planning.finish_windows must be a string such as \"08-10,20-22\"")
+        try:
+            job_times.parse_windows(windows)
+        except RuntimeError as err:
+            raise OperationError(f"planning.finish_windows: {str(err).replace('--finish-window ', '')}") from None
+    never = raw.get("never_build")
+    if never is not None and (not isinstance(never, list)
+                              or not all(isinstance(x, str) and x.strip() for x in never)):
+        raise OperationError("planning.never_build must be a list of product names")
+    copies = raw.get("t1_copies", "both")
+    if copies not in T1_COPIES:
+        raise OperationError(f"planning.t1_copies must be one of {', '.join(T1_COPIES)}, got {copies!r}")
+    return Planning(timezone=zone_name.strip() if zone_name else None,
+                    finish_windows=windows.strip() if windows else None,
+                    never_build=tuple(x.strip() for x in never or ()), t1_copies=copies)
+
+
+def _selling(raw) -> Selling:
+    raw = _known_keys(raw, ("keep",), "selling")
+    keep = raw.get("keep")
+    if keep is not None and (not isinstance(keep, list)
+                             or not all(isinstance(x, str) and x.strip() for x in keep)):
+        raise OperationError("selling.keep must be a list of item names or name parts")
+    return Selling(keep=tuple(x.strip() for x in keep or ()))
+
+
+def _site_facilities(raw, facilities: dict, where: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise OperationError(f"{where}.facilities must be an object of activity -> facility")
+    out = {}
+    for activity, key in raw.items():
+        if activity not in ACTIVITIES:
+            raise OperationError(f"{where}.facilities: unknown activity '{activity}' - one of {', '.join(ACTIVITIES)}")
+        if not isinstance(key, str) or key.lower() not in facilities:
+            raise OperationError(f"{where}.facilities.{activity}: '{key}' is not in facilities")
+        out[activity] = key.lower()
+    return out
+
+
+def _character(raw, where: str) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise OperationError(f"{where} must be a character name")
+    return raw.strip()
 
 
 def parse(document: dict, path: str | None = None) -> Operation:
@@ -309,10 +444,19 @@ def parse(document: dict, path: str | None = None) -> Operation:
         readers = _names(raw.get("readers"), f"{where}.readers")
         if owner == "personal" and not characters:
             raise OperationError(f"{where}: a personal site lists its characters")
+        overrides = _site_facilities(raw.get("facilities"), facilities, where)
+        seller = _character(raw.get("seller"), f"{where}.seller")
+        pool_holder = _character(raw.get("pool_holder"), f"{where}.pool_holder")
+        if pool_holder is not None:
+            if owner != "personal":
+                raise OperationError(f"{where}.pool_holder: only a personal site has a pool holder")
+            if pool_holder.casefold() not in {c.casefold() for c in characters}:
+                raise OperationError(f"{where}.pool_holder '{pool_holder}' is not one of {where}.characters")
         sites[key.lower()] = Site(name=key.lower(), owner=owner, facility=facility,
                                   characters=characters, readers=readers,
                                   freight_in=(raw.get("freight_in") or None), freight_out=(raw.get("freight_out") or None),
-                                  hub=(str(raw["hub"]).lower() if raw.get("hub") else None))
+                                  hub=(str(raw["hub"]).lower() if raw.get("hub") else None),
+                                  facilities=overrides, seller=seller, pool_holder=pool_holder)
     hubs: dict[str, Hub] = {}
     for key, raw in (document.get("hubs") or {}).items():
         where = f"hubs.{key}"
@@ -342,7 +486,8 @@ def parse(document: dict, path: str | None = None) -> Operation:
     if default is not None and str(default).lower() not in sites:
         raise OperationError(f"default_site '{default}' is not in sites")
     return Operation(path=path, sites=sites, facilities=facilities, hubs=hubs, freight=freight,
-                     default_site=str(default).lower() if default else None)
+                     default_site=str(default).lower() if default else None,
+                     planning=_planning(document.get("planning")), selling=_selling(document.get("selling")))
 
 
 EMPTY = Operation(path=None, sites={}, facilities={}, hubs={}, freight={}, default_site=None)
@@ -366,16 +511,24 @@ TEMPLATE = {
     "sites": {
         "highsec": {"owner": "corp", "facility": "highsec", "readers": ["Alice Builder", "Bob Inventor"]},
         "null": {"owner": "personal", "facility": "example-raitaru",
+                 "facilities": {"manufacturing": "example-sotiyo"},
                  "characters": ["Carol Hauler", "Dave Miner", "Erin Director"],
+                 "seller": "Carol Hauler", "pool_holder": "Carol Hauler",
                  "hub": "x-hub", "freight_in": "jita->x-hub", "freight_out": "x-hub->jita"},
     },
     "facilities": {
         "highsec": {"location_id": 60003760, "system": "Jita"},
         "example-raitaru": {"system": "X-EXMPL", "structure": "raitaru", "security": "null",
-                         "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}},
+                         "rigs": {"invention": {"te": "t1"}, "copying": {"te": "t1"}}},
+        "example-sotiyo": {"system": "Y-EXMPL", "label": "Y-EXMPL - Example Factory",
+                           "structure": "sotiyo", "security": "null",
+                           "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}},
     },
     "hubs": {"x-hub": {"location_id": 1040000000001, "label": "X-EXMPL Example Market Hub",
                         "region_id": 10000060, "system_id": 30004759}},
     "freight": {"jita->x-hub": {"per_m3": 500, "collateral_pct": 0, "min": 5000000},
                 "x-hub->jita": {"per_m3": 400, "collateral_pct": 1, "min": 10000000}},
+    "planning": {"timezone": "UTC", "finish_windows": "08-10,20-22", "never_build": [],
+                 "t1_copies": "both"},
+    "selling": {"keep": []},
 }
