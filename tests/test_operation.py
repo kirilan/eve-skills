@@ -254,6 +254,18 @@ class BuildCostFacilityTest(unittest.TestCase):
         # An explicit flag still wins over the facility.
         self.assertEqual(self.job(["--facility", "lab", "--facility-tax", "2"])["job"]["facility_tax"], 0.02)
 
+    def test_site_costs_the_build_at_its_manufacturing_facility(self):
+        self.write({"facilities": {"lab": {"system": str(SYSTEM_FORGE), "tax_pct": 1.0,
+                                           "time": {"manufacturing": 0.5}},
+                                   "factory": {"system": str(SYSTEM_FORGE), "tax_pct": 0.5,
+                                               "time": {"manufacturing": 0.406}}},
+                    "sites": {"split": {"owner": "personal", "facility": "lab", "characters": ["Ada"],
+                                        "facilities": {"manufacturing": "factory"}}}})
+        site, facility = self.job(["--site", "split"]), self.job(["--facility", "factory"])
+        self.assertEqual("factory", site["job"]["facility"])
+        self.assertEqual(facility["job"], site["job"])
+        self.assertEqual(facility["products"], site["products"])
+
     def test_facility_needs_the_file(self):
         code, _out, err = self.env.run(["build-cost", str(BUILD_ARTICLE), "--facility", "lab"])
         self.assertEqual(code, 1)

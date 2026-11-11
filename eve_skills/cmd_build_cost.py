@@ -50,7 +50,7 @@ def _facility_profile(args) -> operation.Facility | None:
         raise RuntimeError(f"--facility/--site read the operation file, and there is none at "
                            f"{operation.file_path()} - start from: eve-skills operation template")
     if site_name:
-        facility = op.site(site_name).facility
+        facility = op.site(site_name).facility_for("manufacturing")   # where the site builds
     return op.facility(facility)
 
 

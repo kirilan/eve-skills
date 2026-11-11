@@ -1189,14 +1189,19 @@ class CanBuildPersonalSiteTests(CommandTestCase):
         server.get(f"/characters/{VELA.character_id}/assets", token=VELA.token, doc=stock([(BUILD_PLATE, 60)]))
         for who in (ADA, VELA):
             server.get(f"/characters/{who.character_id}/industry/jobs", token=who.token, doc=[])
-        with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
-            json.dump({"sites": {"home": {"owner": "personal", "facility": "jita",
-                                          "characters": [ADA.name, VELA.name]}},
-                       "facilities": {"jita": {"location_id": STATION_JITA}}}, fh)
-        code, out, err = self.env.run(["can-build", "--site", "home", "--json"])
-        self.assertEqual(code, 0, err)
-        doc = json.loads(out)
-        row = next(d for d in doc["documents"] if d["owner"] == ADA.name)["rows"][0]
-        self.assertEqual((1, 2), (row["jobs"], row["jobs_with_trades"]))
-        self.assertEqual([("Widget Plate", 38, VELA.name)],
-                         [(t["material"], t["quantity"], t["from"]) for t in row["trades"]])
+        # The same answer when the site invents elsewhere and builds where the stock is.
+        plain = {"owner": "personal", "facility": "jita", "characters": [ADA.name, VELA.name]}
+        split = dict(plain, facility="lab", facilities={"manufacturing": "jita"})
+        for site in (plain, split):
+            with self.subTest(site=site):
+                with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+                    json.dump({"sites": {"home": site},
+                               "facilities": {"jita": {"location_id": STATION_JITA},
+                                              "lab": {"location_id": 1_040_000_000_000, "tax_pct": 1}}}, fh)
+                code, out, err = self.env.run(["can-build", "--site", "home", "--json"])
+                self.assertEqual(code, 0, err)
+                doc = json.loads(out)
+                row = next(d for d in doc["documents"] if d["owner"] == ADA.name)["rows"][0]
+                self.assertEqual((1, 2), (row["jobs"], row["jobs_with_trades"]))
+                self.assertEqual([("Widget Plate", 38, VELA.name)],
+                                 [(t["material"], t["quantity"], t["from"]) for t in row["trades"]])

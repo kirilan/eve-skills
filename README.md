@@ -967,10 +967,10 @@ Commands that use the file:
 
 | Command | What it does with the file |
 |---|---|
-| `build-cost --facility NAME` / `--site NAME` | Cost the job there: the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
+| `build-cost --facility NAME` / `--site NAME` | Cost the job there (a site: its `manufacturing` facility): the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
 | `market --hub KEY`, `build-cost --hub/--sell-at KEY` | Price at a configured hub, including a structure. |
 | `restock --site NAME` | Build at the site's manufacturing facility (inventions at its invention facility). On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
-| `can-build --site NAME` | Applies the facility's material bonus. On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
+| `can-build --site NAME` | Applies the material bonus of the facility where the site builds (its `manufacturing` facility). On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
 | `jobs --times [--facility NAME]` | Median hours per run are always kept per facility, so a structure's rigged times never mix with NPC-station history. |
 | `jobs --times --site NAME` | Hours per run where the site does each activity (`facilities` per activity), converting times measured at another facility of the file by the time multipliers and never scaling from an unknown one. |
 | `dashboard` | Reads industry status for every site: a corp site through its reader, a personal site from its characters' own snapshots. |
