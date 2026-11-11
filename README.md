@@ -891,6 +891,16 @@ and the last line that does not fit is cut to the units that do (stock on site c
 free, so the cut is searched, not scaled). The text ends with a Multibuy block, the pick-ups, the moves
 and what the trip leaves out; `--json` has every line and material with its volume and ISK.
 
+**A personal site with a facility per activity** (`sites.NAME.facilities`, see `operation`): without
+`--at`, build lines are netted against the site characters' stock at the manufacturing facility and
+`--invent` lines against their stock at the invention facility; each character's assets are read once.
+What a site character holds at the *other* facility is not bought: it goes to `move`, with a note line
+`move between site facilities: ITEM QTY at FACILITY, held by CHARACTER QTY`. Transfers are planned where
+each job is installed and carry the facility (`at`). `--json` keeps `build_station` (the manufacturing
+facility) and `holdings` (stock there), and adds `stations` (`manufacturing` and `invention`, id and name)
+and `holdings_by_station` (`{station id: {character: {type id: qty}}}`). With `--at`, one location covers
+everything, as before. A corp site with per-activity facilities needs `--at`.
+
 **Price check.** Every material the trip buys is then judged by the `prices` dip rule from the buyer's
 side: the hub's lowest ask against the median daily average of the hub's region over 30 days (ESI history,
 read live; `--no-price-check` skips it). A **dip** (two spreads under normal, and not low for the whole
@@ -959,7 +969,7 @@ Commands that use the file:
 |---|---|
 | `build-cost --facility NAME` / `--site NAME` | Cost the job there: the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
 | `market --hub KEY`, `build-cost --hub/--sell-at KEY` | Price at a configured hub, including a structure. |
-| `restock --site NAME` | Build at the site's facility. On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
+| `restock --site NAME` | Build at the site's manufacturing facility (inventions at its invention facility). On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
 | `can-build --site NAME` | Applies the facility's material bonus. On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
 | `jobs --times [--facility NAME]` | Median hours per run are always kept per facility, so a structure's rigged times never mix with NPC-station history. |
 | `jobs --times --site NAME` | Hours per run where the site does each activity (`facilities` per activity), converting times measured at another facility of the file by the time multipliers and never scaling from an unknown one. |
