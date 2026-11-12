@@ -15,6 +15,8 @@ and closed orders, and a watch that announces the moment one of them fills, expi
   dashboard.
 - Scripting or driving it from an agent: [docs/agent-reference.md](docs/agent-reference.md) has the
   `--json` shapes, the ledger tables and how to use the package from a script.
+- Agent skills for running an industry operation with it (planning jobs, supply runs, sell trips,
+  pricing, a status check): see [Agent skills](#agent-skills).
 
 ```console
 $ eve-skills                     # same as: eve-skills skills
@@ -2215,6 +2217,38 @@ modes where they mean something, counts, URLs and statuses.
 Exit code is 1 only when something blocks the tool (unreadable/corrupt token store, an expired
 login that cannot refresh, a service unreachable with no cached fallback); everything worth
 knowing but survivable is a warning, and warnings exit 0.
+
+---
+
+## Agent skills
+
+`.claude/skills/` holds five skills for an agent (Claude Code discovers them in a checkout; elsewhere copy
+the folders to `~/.claude/skills/`). Each one turns a recurring request into a tested workflow on top of
+this CLI, for any operation: other characters, other sites, other products.
+
+| Skill | For requests like | Helper |
+|---|---|---|
+| `industry-jobs` | "plan the next jobs", "what can I install now", "did I miss anything" | `job_board.py`: slots, ready jobs, idle blueprints by what they can do, measured times and window-sized runs, a pool check, inputs per facility |
+| `supply-run` | "plan a supply run", "what do I need from the hub" | `restock` (needs vs stock, cargo fit, Multibuy, price check) |
+| `market-trip` | "are our orders ok", "what should I bring to the hub" | `orders --check`, `prices signal`; `unlisted_goods.py` (held, not listed, price state) |
+| `bulk-sell-pricing` | "price these for MultiSell" | `price_sell.py` (one tick under the real floor, the Import Prices text) |
+| `ops-check` | "anything need attention?" | the above, plus `ledger` |
+
+The skills hold what is true for any operation. An installation supplies three things of its own:
+
+- **`operation.json`** (`eve-skills operation template` prints a starting point): sites, the facility of
+  each activity, sellers, planning time zone and finish windows, products never to build, items never to
+  sell. The helper scripts read everything about the operation from it, or from flags.
+- **A playbook** (`eve-skills operation playbook`): Markdown files in `<config dir>/playbook/`, one per
+  skill, with the operation's own rules - which lines, who builds what, decisions and their reasons. A
+  skill reads its playbook first, and **playbook rules win over the skill's defaults**. Each skill folder
+  has a `playbook.example.md` with the usual headings.
+- **Its own `AGENTS.md`** (or `CLAUDE.md`) for the agent: [docs/AGENTS.example.md](docs/AGENTS.example.md)
+  is a neutral starting point. `AGENTS.md` is git-ignored, so it stays with the installation.
+
+Run the scripts from the repository root (`.venv/bin/python .claude/skills/industry-jobs/job_board.py` in
+a source checkout). A rule that holds for every operation goes into the skill through a pull request; one
+about your operation goes into your playbook.
 
 ---
 
