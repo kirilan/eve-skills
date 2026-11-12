@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-from . import alphadata, esi as esi_mod, exports, industry, ledger, ledger_db, ledger_sync, market, sso
+from . import alphadata, esi as esi_mod, exports, industry, ledger, ledger_db, ledger_query, ledger_sync, market, sso
 from . import render
 
 NOTES = {
@@ -731,9 +731,11 @@ def cmd_progress(args) -> int:
 def cmd_ledger(args) -> int:
     handler = {"sync": cmd_sync, "pnl": cmd_pnl, "products": cmd_products, "markets": cmd_markets,
                "invention": cmd_invention, "planetary": cmd_planetary,
-               "inventory": cmd_inventory, "note": cmd_note, "progress": cmd_progress}.get(args.ledger_action)
+               "inventory": cmd_inventory, "note": cmd_note, "progress": cmd_progress,
+               "sql": ledger_query.cmd_sql, "schema": ledger_query.cmd_schema}.get(args.ledger_action)
     if handler is None:
-        print("usage: eve-skills ledger {sync,pnl,products,markets,invention,planetary,inventory,note,progress} "
+        print("usage: eve-skills ledger {sync,pnl,products,markets,invention,planetary,inventory,note,progress,"
+              "sql,schema} "
               "[--help]",
               file=sys.stderr)
         return 2

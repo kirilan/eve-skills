@@ -12,7 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
-from . import cmd_alerts, cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_watch
+from . import cmd_alerts, cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_types, cmd_watch
 
 
 def cmd_login(args):
@@ -694,6 +694,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_lprog.add_argument("--all", action="store_true", help="every sync, not one row per day")
     p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
     p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lsql = ledger_sub.add_parser("sql", help="one read-only SELECT or WITH query against the ledger file, with "
+                                               "type_name(id), character_name(id) and local_time(ts[, zone])")
+    p_lsql.add_argument("query", help="one SELECT or WITH statement (quote it); anything else is refused")
+    p_lsql.add_argument("--limit", type=int, default=200, metavar="N",
+                        help="at most N rows (default 200); the output says when it cut")
+    p_lsql_out = p_lsql.add_mutually_exclusive_group()
+    p_lsql_out.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lsql_out.add_argument("--csv", action="store_true", help="CSV rows on stdout (the cut note goes to stderr)")
+    p_lschema = ledger_sub.add_parser("schema", help="the ledger's tables with their columns and types, read "
+                                                     "from the file")
+    p_lschema.add_argument("table", nargs="?", help="only this table")
+    p_lschema.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_alerts = sub.add_parser("alerts", help="Telegram alerts for undercut/outbid, back-on-top and filled market orders, and industry jobs "
                                              "about to finish")
@@ -771,6 +783,16 @@ def build_parser() -> argparse.ArgumentParser:
         watch_sub.add_parser(action, help=text).add_argument("type", help="exact type name or id")
     p_pwatch.set_defaults(json=False)
 
+    p_types = sub.add_parser("types", help="type id, exact name, group, category and packaged m3 for item names "
+                                           "or ids")
+    p_types.add_argument("names", nargs="+", metavar="NAME|ID",
+                         help="exact item names (case aside) or type ids; '-' reads names from stdin, one per "
+                              "line, and accepts the in-game paste format name<TAB>quantity (adds an m3 total). "
+                              "An unknown name is reported and makes the exit status 1; the others still print")
+    p_types_out = p_types.add_mutually_exclusive_group()
+    p_types_out.add_argument("--json", action="store_true", help="machine-readable output")
+    p_types_out.add_argument("--csv", action="store_true", help="CSV rows on stdout (unknown names go to stderr)")
+
     p_extract = sub.add_parser("extract", help="Skill Extractor math for one character")
     p_extract.add_argument("--char", help="stored character name or id (required when several are stored)")
 
@@ -800,7 +822,7 @@ HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "market": cmd_market.cmd_market, "sell-plan": cmd_sell_plan.cmd_sell_plan,
             "build-cost": cmd_build_cost.cmd_build_cost,
             "orders": cmd_orders.cmd_orders, "restock": cmd_restock.cmd_restock, "ledger": cmd_ledger.cmd_ledger, "dashboard": cmd_dashboard.cmd_dashboard, "prices": cmd_prices.cmd_prices, "pi": cmd_pi.cmd_pi, "system": cmd_system.cmd_system, "operation": cmd_operation.cmd_operation, "colonies": cmd_colonies.cmd_colonies,
-            "alerts": cmd_alerts.cmd_alerts}
+            "alerts": cmd_alerts.cmd_alerts, "types": cmd_types.cmd_types}
 
 
 def _use_utf8_streams() -> None:

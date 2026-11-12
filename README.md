@@ -13,6 +13,8 @@ and closed orders, and a watch that announces the moment one of them fills, expi
   pick one with `--char`.
 - Text output by default, with `--json` / `--csv` for scripting and `--watch` for a live terminal
   dashboard.
+- Scripting or driving it from an agent: [docs/agent-reference.md](docs/agent-reference.md) has the
+  `--json` shapes, the ledger tables and how to use the package from a script.
 
 ```console
 $ eve-skills                     # same as: eve-skills skills
@@ -111,6 +113,7 @@ Run `eve-skills <command> --help` for any command's options; [What it shows](#wh
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `colonies` | Live planetary industry per character: every colony with its planet type, command-centre level, pin count and how old ESI's view of it is; `--detail` adds each extractor with what it produces and when the programmed run ends, plus every facility running a schematic | `--scopes planets` |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
+| `types` | Type id, exact name, group, category and packaged m3 for item names or ids; `-` reads a pasted list (`name<TAB>qty`) and adds an m3 total | no — public ESI; the type catalogue is cached on disk |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
@@ -1030,6 +1033,9 @@ eve-skills ledger progress                    # the figures every sync recorded,
 eve-skills ledger note add "Sell run loaded" --body-file notes.md   # the operation's log
 eve-skills ledger note add "Relist Gyro II in Dodixie" --kind todo
 eve-skills ledger note list --open            # open to-dos; `note show [ID...]`, `note done ID`
+eve-skills ledger schema jobs                 # tables, columns and types, read from the file
+eve-skills ledger sql "select character_name(installer_id), type_name(product_type_id), runs,
+    local_time(end_date) from jobs where status = 'active' order by end_date"
 ```
 
 ESI forgets: wallet journal and transactions are served for **30 days**, completed industry jobs for
@@ -1118,6 +1124,21 @@ from `--body`, a file or stdin, and `--at` to backdate one. Every sync also stor
 figures (jobs running and ready per activity, T2 units built and sold, invention revenue and gross
 profit, net profit, stock at cost, work in progress, open sell and buy orders), so `ledger progress`
 shows the trend one row per day (`--all` for every sync) beside the open to-dos and the latest notes.
+
+For a question no report answers, `ledger sql "SELECT ..."` queries the file directly; no `sqlite3`
+binary is needed. It opens the file read-only (`file:...?mode=ro` and `PRAGMA query_only`), and refuses
+anything but one `SELECT` or `WITH` statement, so a query can never change the books. At most
+`--limit` rows (default 200) are printed, and the output says when it cut; `--json` gives `columns`, `rows`
+(one object per row), `count` and `cut`, and `--csv` plain rows. Three functions save rebuilding the usual
+look-ups, all from local files (no ESI request per row):
+
+| Function | Returns |
+|---|---|
+| `type_name(type_id)` | The name from the local type and name caches that other commands fill; unknown -> `type <id>`. |
+| `character_name(id)` | A stored character's name; anyone else -> the id as text. |
+| `local_time(ts[, zone])` | An ISO UTC stamp as `YYYY-MM-DD HH:MM` in the zone (an IANA name or an offset; default: the operation file's `planning.timezone`, else UTC). |
+
+`ledger schema [TABLE]` lists the tables with their columns and types, read from the file itself.
 
 ### `dashboard` — profitability, jobs and orders in a browser
 
@@ -1833,6 +1854,22 @@ travel as the `hints`, `warnings` and `notices` arrays. `--csv` follows the flag
 one row per extractor with `--detail`, where the colony columns repeat so every row says where that extractor
 stands and a colony without one keeps its row with those cells empty. A colony whose pin document ESI refused
 keeps its summary row, loses only its own pins, and says why on stderr; the run still exits 0.
+
+### `types` — what an item is and how big it packs
+
+```bash
+eve-skills types Tritanium 34 "Medium Core Defense Field Extender I"
+eve-skills types - < cargo.txt          # one name per line, or the in-game name<TAB>quantity paste
+eve-skills types Tritanium --json
+```
+
+Per argument: the type id, the exact name, group, category and packaged volume in m3. Names match
+exactly, case aside (one batched `/universe/ids` request for all of them); digits are type ids. An
+unknown name or id is reported on its own line (`not a type: ...`; on stderr with `--csv`) and makes the
+exit status 1, while the others still print. With `-` and quantities, each row echoes the quantity and
+adds `m3 total`, and a total line follows. `--json` gives `types` rows (`input`, `type_id`, `name`,
+`group`, `category`, `packaged_m3`, `quantity`, `total_m3`), `unknown` and `total_m3`; `--csv` the same
+columns.
 
 ### `system` — security, planets and jump distance for candidate systems
 
