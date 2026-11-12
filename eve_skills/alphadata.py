@@ -481,7 +481,9 @@ def _transform_blueprint_invention(blueprint_docs, dogma_docs, type_docs) -> dic
         except (KeyError, TypeError, ValueError):
             continue
         if products:
-            blueprints[str(doc["_key"])] = {"m": materials, "p": products, "t": int(entry.get("time") or 0)}
+            blueprints[str(doc["_key"])] = {"m": materials, "p": products, "t": int(entry.get("time") or 0),
+                                            "s": {str(int(v["typeID"])): int(v["level"])
+                                                  for v in entry.get("skills") or []}}
 
     names = {str(doc["_key"]): _english(doc.get("name")) or None
              for doc in type_docs if doc.get("groupID") == GROUP_DECRYPTORS}

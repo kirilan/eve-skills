@@ -1018,6 +1018,19 @@ Commands that use the file:
 | `dashboard` | Reads industry status for every site: a corp site through its reader, a personal site from its characters' own snapshots. |
 | `ledger sync` | Reports a corporation that refuses every section on roles (building in someone else's corporation) as one expected line. The members' personal jobs, orders and wallets are booked as before. |
 
+### `production` — continue a round, supply it and replenish its sales
+
+`production round save/check` persists the intended jobs and compares them with observed installs.
+The remaining jobs share one bulk blueprint/material pool, passed from installer to installer.
+`production supply` forecasts shortages and purchase deadlines; `production replenish` recommends
+listing or hauling existing stock before building more. `production scan` compares product economics
+with manufacturing and invention capacity. `production facility` previews and records dated facility
+settings for historical ledger costing.
+
+See [Production workflow](docs/production.md) for examples, the round JSON format, freshness rules and
+costing assumptions. Run `ledger sync` after upgrading to create the new tables; reports do not migrate
+a ledger opened read-only. Plans and handoff confirmations remain private in the ledger.
+
 ### `ledger` — what the business cost, earned and holds
 
 ```bash

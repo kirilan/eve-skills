@@ -21,6 +21,18 @@ not facts.
 
 ## 1. Decide the demand
 
+Start with `production supply --site NAME --days N --history-days 7 --lead-days N` after `ledger sync`.
+It combines the active saved round, recent consumption and expected invention, reports the first
+blocked line/depletion date, and prices local bridge versus hub purchases through actual book depth.
+See [production workflow](../../../docs/production.md) for assumptions and JSON fields. Choose the
+horizon and lead time from the playbook; the command defaults (14 and 2 days) are only scenarios.
+Unfilled bids are never stock: name the fallback deadline and the immediate purchase needed if they
+remain unfilled. A partial quote is not a full purchase budget. Unknown asset balances require refresh.
+
+Use the resulting demand for cargo fitting and Multibuy below. In whole-stack operations, consolidate
+inputs with the bulk holder and hand over the whole pool in installer order; do not turn personal
+empty hangars into separate material batches.
+
 ```bash
 python .claude/skills/industry-jobs/job_board.py [--site NAME]   # idle copies, pool check, restock lines
 eve-skills ledger note show                                       # the last jobs plan, if the installation keeps a ledger

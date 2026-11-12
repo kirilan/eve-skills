@@ -466,6 +466,12 @@ def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, character: str | None
     report.cutover = ledger_db.cutover(conn)
     if report.cutover:
         report.opening_prices = _opening_prices(conn, client, report)
+    from . import operation, production_store
+    try:
+        production_store.observe_facilities(conn, operation.load(), report.synced_at)
+    except (RuntimeError, ValueError) as err:
+        report.problems.append({"owner": "operation", "section": "facilities", "code": "configuration",
+                                "message": str(err)})
     _record_snapshot(conn, report)
     return report
 

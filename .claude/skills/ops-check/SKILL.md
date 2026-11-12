@@ -38,6 +38,15 @@ For money questions add `ledger pnl [--since DATE] [--by week]`, `ledger product
 `ledger inventory`. Every money figure goes out with the report's *assumptions* block (unknown ME or
 decryptor, pre-ledger stock, fees matched by rate): never present those figures as exact.
 
+For a saved round, add `production round check --site NAME`: distinguish changed or missing installs
+from documents awaiting refresh. Add `production supply --site NAME` for impending input deadlines and
+`production replenish --site NAME --hub KEY` for sold-out listings with held or incoming output.
+Use `production facility impact` to explain dated bonus adjustments; explicit historical observations
+need dated evidence and an impact preview before applying. Ledger fee completeness remains unverified
+when journal coverage cannot prove every structure fee. A current projected margin is different from
+realized ledger profit; `production scan` shows their cost basis separately. Full commands and semantics:
+[production workflow](../../../docs/production.md).
+
 ## 2. Rank
 
 1. Finished jobs not delivered (a ready job holds its slot), and free slots that could start now, within

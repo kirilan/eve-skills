@@ -17,6 +17,21 @@ against CLI JSON or the ledger.
   HH:MM --site NAME` for what was installed since then.
 - `types NAME ...` for type ids, groups and packaged volume; `ledger sql "SELECT ..."` and `ledger schema`
   for read-only questions to the ledger.
+- `production round list --site NAME` and `production round check --site NAME` resumes the saved round; use this before reconstructing a
+  plan from notes. `production round save FILE --site NAME` saves the agreed jobs; close a finished or
+  superseded round explicitly. Input format and full workflow: [production.md](production.md).
+- The pool is handed over as a whole stack. Check aggregate remaining material needs, observed holder,
+  exact structure and item hangar versus Deliveries. Do not issue per-builder material batches merely
+  because their hangars are empty. Record `production round handoff` only after the user confirms it;
+  report confirmation separately from ESI evidence and its next refresh.
+- `production supply --site NAME --days N --lead-days N` for depletion and purchase deadlines, local
+  bridge purchases and depth-aware haul costs. Unfilled buy orders are never stock.
+- `production replenish --site NAME --hub KEY` connects sales, held stock, manufacturing and invention;
+  list/haul existing goods before adding jobs. Untested lines need an explicit trial target.
+- `production scan ITEM ... --site NAME` for comparable candidate economics; inspect lab capacity,
+  eligibility, fees and assumed market share before expanding production.
+- `production facility impact` explains historical bonus adjustments. Recording a historical facility
+  profile requires dated evidence; preview before using `--apply`.
 - `build-cost --brief`, `market --depth N`, `sell-plan`, `orders --check`, `restock`, `prices signal`.
 
 Run commands with `.venv/bin/python -m eve_skills` in a source checkout. Tests:

@@ -32,6 +32,8 @@ NOTES = {
     "ambiguous_decryptor": "{n:,} invention jobs: the copies fit two decryptors and neither was bought; "
                            "the first was assumed",
     "fees_from_job_row": "{n:,} jobs have no fee left in the journal; ESI's job cost was used instead",
+    "dated_structure_jobs": "{n:,} jobs use dated facility observations; current configuration is not applied retroactively",
+    "uncertain_structure_jobs": "{n:,} jobs use facility observations with unknown settings; defaults remain assumptions",
     "structure_jobs": "{n:,} jobs ran in a player structure; its material bonuses are not modelled",
     "missing_recipe": "{n:,} jobs have no recipe in the local SDE data - run: eve-skills update-data",
     "missing_invention_recipe": "{n:,} invention jobs have no invention recipe in the local SDE data - "
@@ -115,7 +117,8 @@ def _state(conn):
     book = ledger.replay(facts, recipes, invention, now, planetary)
     header = {"cutover": ledger_db.cutover(conn), "last_sync": last, "warnings": [],
               "notes": [NOTES.get(key, key + ": {n}").format(n=n) for key, n in sorted(book.notes.items())],
-              "note_counts": dict(book.notes)}
+              "note_counts": dict(book.notes), "fee_quality": ledger.fee_quality(book)}
+    header["notes"].append("Fee completeness unverified: journal matching does not prove every structure listing fee was recorded.")
     if facts.pi_polls:
         header["notes"].append(
             f"colony output is read off {len(facts.pi_polls):,} planetary holdings polls since "

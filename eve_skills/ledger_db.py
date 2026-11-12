@@ -30,7 +30,7 @@ from . import paths
 FILE_NAME = "ledger.sqlite3"
 
 # Bumped with every schema change; `_migrate` walks an older file forward one step at a time.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ESI serves this many days of wallet journal and transactions; a row older than that which no sync
 # stored is gone for good. Reports and `doctor` warn once the last sync is STALE_SYNC_DAYS old, which
@@ -351,6 +351,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         with conn:
             conn.executescript(_SCHEMA_V5)
             conn.execute("PRAGMA user_version = 5")
+
+    if version < 6:
+        from .production_store import SCHEMA
+        with conn:
+            conn.executescript(SCHEMA)
+            conn.execute("PRAGMA user_version = 6")
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:

@@ -202,7 +202,7 @@ items: [{type_id: int, type, state, action: str, price: float, price_source: str
                      wins: int, rate: float}}]
 ```
 
-`state` is one of `dip`, `high`, `falling`, `normal`.
+`state` is one of `dip`, `high`, `falling`, `normal`, `thin` (or null). The document and rows include `hub`.
 
 ### `ledger inventory --json`
 
@@ -240,6 +240,39 @@ planning: {timezone: str|null, finish_windows: str|null, never_build: [str], t1_
 selling: {keep: [str]}
 ```
 
+### `production ... --json`
+
+See [production.md](production.md) for the accepted round input and workflows. The saved
+`production_rounds.document` is normalized JSON (`version`, `site`, `title`, `created_at`, `start`,
+`lines`); each line has a stable `line_id`, numeric character/product/blueprint/facility IDs,
+`materials` keyed by type ID, runs, ME/TE and explicit assumptions. Saving expands `jobs` into lines.
+An active site has one round; closing retains its document.
+
+- `round check`: `round_id`, `site`, `generated`, `lines` (saved fields plus `state`, `observed_job`,
+  `blockers`, `selected_blueprint`, `earliest_start`, `estimated_end`, `timing_basis`), `unplanned_jobs`,
+  `pool`, `holders`, `installer_sequence`, `confirmed_handoffs`, `documents`, `warnings`, `assumptions`.
+- `supply`: `generated`, `days`, `history_days`, `lead_days`, `items` with `facility_id`, `type_id`,
+  `held`, `daily_use`, `planned_need`, `buy`, `bridge_buy`, `depletion`, `first_blocked`, `order_by`,
+  `bid_fallback_by`, `open_bid_units`. Quotes add `local_purchase`, `hub_purchase`, `bridge_purchase`:
+  `requested`, `filled`, `unfilled`, `cost`, `landed_cost`, `average`, `complete`, `as_of`, `expires`.
+- `replenish`: `hub`, `items`: `type_id`, `target`, `sold`, `daily_sales`, `demand_basis`, `listed`,
+  `held_at_hub`, `held_elsewhere`, `manufacturing`, `copy_units`, `invention_expected`, `action`,
+  `list_or_haul`, `production_gap`. Run each hub as a scenario; never double-allocate shared stock.
+- `scan`: `site`, `hub`, `input_hub`, `items` with candidate status, costs, margins, eligibility,
+  factory/lab hours, demand assumption, bottleneck, capital and decryptor variants. Unknown net
+  margins are null, never zero.
+- `facility impact/record`: `changed_jobs`, `job_cost_delta`, `stock_cost_delta`, `pnl_before`,
+  `pnl_after`, `fee_quality`, `applied`; `record` also includes the proposed `observation`.
+
+`documents` carries owner, section, availability, `as_of` and `expires`. Stock/shortages are null
+when freshness or completeness does not support them. `pool_handoffs` is user testimony, not an ESI
+asset poll. `facility_history.profile` is an immutable JSON facility snapshot, applied by job start
+and effective time. Neither table should be overwritten to make a report agree with a guess.
+
+Production scans include `realized` ledger product figures (all destinations),
+`projected_minus_realized_unit_cost`, and `demand_basis`. Ledger report headers include `fee_quality`
+with matched/unmatched observed charges and an explicit unverified completeness status.
+
 ### Commands with `--csv`
 
 `skills`, `events`, `standings`, `jobs`, `can-build`, `blueprints`, `inventory`, `travel`, `implants`,
@@ -270,6 +303,9 @@ Every table and column, as `ledger_db.py` creates them:
 | `stock_snapshots` | `ts`, `type_id`, `class`, `held`, `listed`, `unit_cost`, `unit_market` |
 | `pi_polls` | `ts`, `as_of`, `sources` |
 | `pi_holdings` | `ts`, `type_id`, `held`, `listed` |
+| `production_rounds` | `id`, `site`, `title`, `created_at`, `closed_at`, `document` |
+| `pool_handoffs` | `id`, `round_id`, `facility_id`, `holder_id`, `at`, `hangar`, `note` |
+| `facility_history` | `id`, `facility_id`, `effective_at`, `recorded_at`, `reason`, `profile` |
 
 Traps met in earlier sessions:
 

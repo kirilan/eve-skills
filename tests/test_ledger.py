@@ -521,7 +521,7 @@ class StoreTests(unittest.TestCase):
         conn.commit()
         conn.close()
         conn = self.connect()
-        self.assertEqual(5, conn.execute("PRAGMA user_version").fetchone()[0])
+        self.assertEqual(ledger_db.SCHEMA_VERSION, conn.execute("PRAGMA user_version").fetchone()[0])
         self.assertEqual("2026-09-04", ledger_db.cutover(conn))
         self.assertEqual([], ledger_db.pi_polls(conn))
 
