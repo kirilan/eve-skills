@@ -107,6 +107,31 @@ class FacilityTests(unittest.TestCase):
         self.assertEqual([4.1], [r["hours_per_run"] for r in only])
 
 
+class SinceTests(unittest.TestCase):
+    """`jobs --since`: HH:MM looks back to the most recent such local time."""
+
+    def test_hh_mm_earlier_today_is_today(self):
+        # 08:45 Helsinki now; 08:00 was 45 minutes ago.
+        self.assertEqual(datetime(2026, 9, 30, 5, 0, tzinfo=timezone.utc),
+                         job_times.parse_since("08:00", HELSINKI, NOW))
+
+    def test_hh_mm_still_ahead_is_yesterday(self):
+        self.assertEqual(datetime(2026, 9, 29, 17, 0, tzinfo=timezone.utc),
+                         job_times.parse_since("20:00", HELSINKI, NOW))
+
+    def test_iso_with_and_without_offset(self):
+        self.assertEqual(datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc),
+                         job_times.parse_since("2026-09-28T06:00:00Z", HELSINKI, NOW))
+        # No offset: read in the zone given.
+        self.assertEqual(datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc),
+                         job_times.parse_since("2026-09-28T09:00", HELSINKI, NOW))
+
+    def test_bad_values_are_errors(self):
+        for bad in ("25:00", "8:61", "yesterday", ""):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                job_times.parse_since(bad, HELSINKI, NOW)
+
+
 class SiteTimesTests(unittest.TestCase):
     """`jobs --times --site`: the time where the site does the activity, never scaled from a guess."""
     LABS, FACTORY, ELSEWHERE = 1_040_000_000_000, 1_040_000_000_002, 1_040_000_000_009

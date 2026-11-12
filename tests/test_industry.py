@@ -368,3 +368,80 @@ class ValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UsedCopiesTests(unittest.TestCase):
+    """`industry status`: copies used by jobs delivered after the blueprint snapshot."""
+    SNAPSHOT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def bp(item_id, runs, quantity=-2):
+        return {"item_id": item_id, "type_id": 800001, "quantity": quantity, "runs": runs}
+
+    @staticmethod
+    def job(bp, runs, completed, status="delivered"):
+        return {"blueprint_id": bp, "runs": runs, "status": status, "completed_date": completed}
+
+    def adjust(self, blueprints, jobs):
+        from eve_skills import industry_status
+        return industry_status.adjust_used_copies(blueprints, jobs, self.SNAPSHOT)
+
+    def test_a_copy_fully_used_is_dropped(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 10, "2026-01-10T12:30:00Z")])
+        self.assertEqual(([], 1, 0), (kept, dropped, reduced))
+
+    def test_a_copy_partly_used_keeps_its_remaining_runs(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 3, "2026-01-10T12:30:00Z"),
+                                                               self.job(1, 2, "2026-01-10T13:00:00Z")])
+        self.assertEqual(([5], 0, 1), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_a_job_delivered_before_the_snapshot_changes_nothing(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 10, "2026-01-10T11:59:00Z")])
+        self.assertEqual(([10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_originals_and_undelivered_jobs_are_untouched(self):
+        kept, dropped, reduced = self.adjust(
+            [self.bp(1, -1, quantity=-1), self.bp(2, 10)],
+            [self.job(1, 10, "2026-01-10T12:30:00Z"), self.job(2, 10, None, status="active")])
+        self.assertEqual(([-1, 10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_no_snapshot_time_means_no_change(self):
+        from eve_skills import industry_status
+        kept, dropped, reduced = industry_status.adjust_used_copies(
+            [self.bp(1, 10)], [self.job(1, 10, "2026-01-10T12:30:00Z")], None)
+        self.assertEqual(([10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+
+class CapabilitiesTests(unittest.TestCase):
+    """`industry status` rows: what each blueprint can do, from the local SDE data."""
+
+    def setUp(self):
+        from eve_skills import industry_status
+        materials = {
+            "800001": {"manufacturing": {"m": {"34": 10}, "p": ["900001", 1], "t": 600, "limit": 300}},  # T1 module
+            "800002": {"manufacturing": {"m": {"900001": 1}, "p": ["900002", 1], "t": 900, "limit": 10}},  # its T2
+            "800003": {"reaction": {"m": {"16634": 100}, "p": ["16670", 200], "t": 10800, "limit": 1}},
+        }
+        invention = {"800001": {"m": {"20416": 2}, "p": [["800002", 10, 0.34]], "t": 63900}}
+        self.caps = industry_status.Capabilities(materials, invention)
+
+    def test_t1_original_copies_and_researches_and_names_what_its_copies_invent(self):
+        self.assertEqual(["manufacturing", "copying", "material efficiency research", "time efficiency research"],
+                         self.caps.activities(800001, "BPO"))
+        self.assertEqual([900002], self.caps.invented_products(800001))   # the T2 item, not its blueprint
+
+    def test_t1_copy_builds_and_invents(self):
+        self.assertEqual(["manufacturing", "invention"], self.caps.activities(800001, "BPC"))
+
+    def test_t2_copy_only_builds(self):
+        self.assertEqual(["manufacturing"], self.caps.activities(800002, "BPC"))
+        self.assertEqual([], self.caps.invented_products(800002))
+
+    def test_reaction_formula_is_never_copied_or_researched(self):
+        self.assertEqual(["reaction"], self.caps.activities(800003, "BPO"))
+
+    def test_an_unknown_blueprint_has_empty_lists(self):
+        self.assertEqual(([], []), (self.caps.activities(1, "BPO"), self.caps.invented_products(1)))
+        from eve_skills import industry_status
+        empty = industry_status.Capabilities(None, None)
+        self.assertEqual(([], []), (empty.activities(800001, "BPC"), empty.invented_products(800001)))

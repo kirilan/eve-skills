@@ -101,6 +101,26 @@ def parse_start(spec: str | None, tz: tzinfo, now: datetime) -> datetime:
     return (moment if moment.tzinfo else moment.replace(tzinfo=tz)).astimezone(timezone.utc)
 
 
+def parse_since(spec: str, tz: tzinfo, now: datetime) -> datetime:
+    """`jobs --since`: HH:MM = the most recent such local time (today, or yesterday when it is still
+    ahead of now); anything else an ISO timestamp, read in `tz` when it carries no offset."""
+    text = spec.strip()
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        hh, mm = (int(part) for part in text.split(":"))
+        if hh > 23 or mm > 59:
+            raise RuntimeError(f"--since time '{spec}' is not a time of day")
+        local_now = now.astimezone(tz)
+        local = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if local > local_now:
+            local -= timedelta(days=1)
+        return local.astimezone(timezone.utc)
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise RuntimeError(f"--since expects HH:MM or an ISO timestamp such as 2026-01-31T08:00, got '{spec}'") from None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=tz)).astimezone(timezone.utc)
+
+
 def in_window(moment: datetime, windows: Sequence[tuple[int, int]], tz: tzinfo) -> bool:
     local = moment.astimezone(tz)
     minute = local.hour * 60 + local.minute

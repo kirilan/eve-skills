@@ -556,6 +556,7 @@ eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
 eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Helsinki --start 09:30
                                       # measured hours per run, and run counts ending in those windows
 eve-skills jobs --times --site null   # hours per run where an operation-file site does each activity
+eve-skills jobs --since 08:00 --site null   # what was installed since 08:00: "did I miss anything"
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
@@ -591,6 +592,18 @@ by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `E
 follows daylight saving, or a fixed offset such as `+03:00` / `UTC+3`, which does not (default UTC).
 IANA names need a time zone database: Linux and macOS have one, Windows does not unless the optional
 `tzdata` package is installed (`pip install tzdata`) - without it, use the offset. `--times` has no `--group` or `--csv` form.
+
+`--since WHEN` lists what was installed since a moment, the question "did I miss anything" asks after
+a round of jobs. `WHEN` is `HH:MM`, the most recent such time in `--tz` (default: the operation file's
+`planning.timezone`, else UTC; so `08:00` at 07:30 means yesterday 08:00), or an ISO timestamp. It reads
+finished jobs too, since a short job may already be delivered, and keeps the jobs whose `start_date` is
+at or after `WHEN`. Rows are grouped by installer, activity, facility, product and runs, with the count,
+the first start and last end in the zone, the status (`2 delivered, 1 active` when they differ) and, in
+`--json`, `installer_id`, `product_id`, `facility_id`, `blueprint_ids`, and `start`/`end` in UTC. The
+facility is the operation file's name for it when its `location_id` is in the file. Each owner's header
+gives the time of the jobs data (ESI caches it about five minutes, so a job installed a minute ago may
+not be in it yet). `--site NAME` reads the site's characters (a corp site: the corporation). `--since`
+has no `--times`, `--slots`, `--group` or `--csv` form.
 
 `--times --site NAME` answers "how long does a run take where this site does that activity", for a site
 of the operation file whose activities may run in different facilities (`sites.NAME.facilities`). It
@@ -642,8 +655,24 @@ can-build counts are local to the blueprint's station and division; `CorpDeliver
 other stations are separate, not installable stock. JSON includes numeric ids beside names,
 quantities, section availability and `Last-Modified`/`Expires` for each available document.
 Unknown slot budgets and can-build counts remain `null`; missing optional consent supplies
-an actionable hint and never invents a zero. Delivered jobs newer than assets or blueprints
-produce staleness warnings.
+an actionable hint and never invents a zero. Delivered jobs newer than assets produce a
+staleness warning; delivered copying and invention jobs newer than the blueprints say that the
+copies they produced are not listed yet.
+
+Blueprints are cached about an hour and jobs about five minutes, so a copy used by a job delivered
+after the blueprint snapshot would still show with its pre-job runs. The snapshot therefore reads
+finished jobs too (personal ones as well as the corporation's) and takes each such job's runs
+(manufacturing runs, invention attempts) off the copy it used: a copy left with no runs is dropped,
+the others keep the runs they have left. Originals are never changed. Each owner's JSON has
+`blueprint_adjustments: {"dropped": n, "reduced": m}`, and when either is non-zero the text and
+`warnings` say `n copies dropped and m reduced: used by jobs delivered after the blueprint snapshot
+(HH:MM UTC)`. Slot counts and the ready and running jobs never count a delivered job.
+
+Each blueprint row says what it can do, from the local SDE data (`update-data`): `activities` lists
+the industry activities (`manufacturing` or `reaction`; an original adds `copying`,
+`material efficiency research` and `time efficiency research`; a copy with an invention recipe adds
+`invention`, which needs a copy), and `invents` names the items its invention yields (the T2 products;
+on an original, what its copies invent). A blueprint the data does not know has two empty lists.
 
 ### `inventory` — what you own, where it is, what it is worth
 

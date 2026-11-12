@@ -155,6 +155,8 @@ def _status_warning(issue) -> str:
         count, subject = issue["delivered_jobs"], issue.get("subject") or "asset"
         return (f"{count} job{'' if count == 1 else 's'} delivered after ESI's {subject} snapshot: their output "
                 f"is not in the {subject} figures until ESI refreshes it (within the hour)")
+    if isinstance(issue, Mapping) and issue.get("message"):
+        return issue["message"]
     return issue if isinstance(issue, str) else str(issue)
 
 

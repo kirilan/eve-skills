@@ -24,7 +24,7 @@ from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
     INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
     SKILL_UNSTARTED, SKILL_WIDE, BUILD_CELL, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE,
-    STATION_JITA, FakeEsiEnv, industry_jobs, iso,
+    STATION_JITA, FakeEsiEnv, http_date, industry_jobs, iso,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -220,6 +220,63 @@ class JobsCommandTests(CommandTestCase):
         code, text, _ = self.env.run(["jobs", "--char", "Ada", "--times"])
         self.assertEqual(code, 0)
         self.assertIn("h/run", text)
+
+    def since(self, *args, operation_doc=None):
+        self.env.install_jobs()
+        if operation_doc is not None:
+            with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+                json.dump(operation_doc, fh)
+        code, out, err = self.env.run(["jobs", "--since", *args])
+        self.assertEqual(code, 0, err)
+        return out, err
+
+    def test_since_lists_jobs_installed_after_the_moment_delivered_ones_included(self):
+        out, _ = self.since(iso(-100000), "--char", "Ada", "--json")
+        doc = json.loads(out)
+        self.assertEqual("UTC", doc["time_zone"])
+        jobs = doc["documents"][0]["jobs"]
+        # All five jobs started within 100000 s, the delivered invention too (--since implies --completed);
+        # ordered by start.
+        self.assertEqual(["copying", "invention", "manufacturing", "material efficiency research",
+                          "manufacturing"], [row["activity"] for row in jobs])
+        invention = jobs[1]
+        self.assertEqual({"installer", "installer_id", "activity", "product", "product_id", "runs", "count",
+                          "facility_id", "facility", "blueprint_ids", "start", "end", "status"}, set(invention))
+        self.assertEqual(("delivered", 10, 1, [1055717845488], 60015129),
+                         (invention["status"], invention["runs"], invention["count"], invention["blueprint_ids"],
+                          invention["facility_id"]))
+        self.assertIsNotNone(doc["documents"][0]["cache"])   # jobs data time per owner, characters too
+
+    def test_since_keeps_only_jobs_started_at_or_after_it(self):
+        out, _ = self.since(iso(-20000), "--char", "Ada", "--json")
+        rows = json.loads(out)["documents"][0]["jobs"]
+        self.assertEqual(["material efficiency research", "manufacturing"], [row["activity"] for row in rows])
+        self.assertEqual(["active", "active"], [row["status"] for row in rows])
+
+    def test_since_table_names_the_moment_and_the_data_time(self):
+        out, _ = self.since(iso(-20000), "--char", "Ada", "--tz", "+03:00")
+        self.assertIn("jobs installed since", out)
+        self.assertIn("jobs as of", out)
+        self.assertIn("Tritanium", out)
+        self.assertNotIn("copying", out)     # the copy job started before
+
+    def test_since_site_reads_the_site_characters_and_labels_its_facilities(self):
+        doc = {"sites": {"home": {"owner": "personal", "facility": "jita-desk", "characters": ["Ada Vane"]}},
+               "facilities": {"jita-desk": {"location_id": 60003760, "system": "Jita"}},
+               "planning": {"timezone": "+02:00"}}
+        out, _ = self.since(iso(-20000), "--site", "home", "--json", operation_doc=doc)
+        doc = json.loads(out)
+        self.assertEqual(("home", "+02:00"), (doc["site"], doc["time_zone"]))
+        self.assertEqual(["Ada Vane"], [d["owner"] for d in doc["documents"]])   # Vela is not on the site
+        self.assertEqual({"jita-desk"}, {row["facility"] for row in doc["documents"][0]["jobs"]})
+
+    def test_since_refuses_times_slots_and_csv(self):
+        self.env.install_jobs()
+        for extra in (["--times"], ["--slots"], ["--csv"], ["--group"]):
+            with self.subTest(extra=extra):
+                code, _, err = self.env.run(["jobs", "--since", "08:00", *extra])
+                self.assertNotEqual(0, code)
+                self.assertIn("--since", err)
 
     def test_window_flags_need_times(self):
         self.env.install_jobs()
@@ -523,6 +580,57 @@ class IndustryStatusTests(CommandTestCase):
         super().setUp()
         self.env.install_industry_status()
 
+    def used_copy_jobs(self, *specs):
+        """(job_id, blueprint_id, runs, completed offset s) -> delivered manufacturing jobs by Ada."""
+        return [{"job_id": job_id, "activity_id": 1, "status": "delivered", "installer_id": ADA.character_id,
+                 "blueprint_id": bp, "blueprint_type_id": 930001, "product_type_id": 34,
+                 "facility_id": STATION_JITA, "location_id": STATION_JITA, "runs": runs,
+                 "start_date": iso(completed - 7200), "end_date": iso(completed), "completed_date": iso(completed)}
+                for job_id, bp, runs, completed in specs]
+
+    def test_copies_used_by_jobs_delivered_after_the_blueprint_snapshot_are_dropped_or_reduced(self):
+        # Blueprint snapshot 25 h old: 930101 was used up an hour ago, 930102 lost 4 of its 10 runs, and a
+        # job delivered before the snapshot changes nothing.
+        jobs = [{k: v for k, v in dict(job, location_id=job["facility_id"]).items() if k != "station_id"}
+                for job in industry_jobs()]
+        jobs += self.used_copy_jobs((1, 930101, 10, -3600), (2, 930102, 4, -1800), (3, 930102, 5, -100000))
+        self.env.server.get(f"/corporations/{CORP_SHARED}/industry/jobs", token=ADA.token,
+                            handler=lambda call: jobs if call.query.get("include_completed") == "true"
+                            else [j for j in jobs if j["status"] == "active"])
+        code, out, err = self.env.run(["industry", "status", "--corp", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        owner = next(r for r in json.loads(out)["owners"] if r["owner_id"] == CORP_SHARED)
+        self.assertEqual({"dropped": 1, "reduced": 1}, owner["blueprint_adjustments"])
+        copies = [r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001]
+        self.assertEqual([(1, 6)], [(r["count"], r["runs_per_job"]) for r in copies])
+        issue = next(w for w in owner["warnings"] if w["subject"] == "blueprint_adjustments")
+        self.assertTrue(issue["message"].startswith("1 copy dropped and 1 reduced: used by jobs delivered "
+                                                    "after the blueprint snapshot ("))
+        code, text, _ = self.env.run(["industry", "status", "--corp"])
+        self.assertIn("warning: 1 copy dropped and 1 reduced", text)
+
+    def test_personal_status_reads_finished_jobs_and_adjusts_copies_without_changing_slots(self):
+        self.env.server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=[
+            {"item_id": 2101, "type_id": 930001, "location_id": STATION_JITA, "location_flag": "Hangar",
+             "quantity": -2, "runs": 10, "material_efficiency": 7, "time_efficiency": 14}],
+            headers={"Last-Modified": http_date(-7200), "Expires": http_date(3600)})
+        jobs = industry_jobs() + self.used_copy_jobs((9, 2101, 10, -3600))
+        self.env.server.get(f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token,
+                            handler=lambda call: jobs if call.query.get("include_completed") == "true"
+                            else [j for j in jobs if j["status"] == "active"])
+        code, out, err = self.env.run(["industry", "status", "--char", "Ada", "--json"])
+        self.assertEqual(0, code, err)
+        owner = json.loads(out)["owners"][0]
+        self.assertEqual({"dropped": 1, "reduced": 0}, owner["blueprint_adjustments"])
+        self.assertEqual([], [r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001])
+        call = self.env.server.calls_to(f"/characters/{ADA.character_id}/industry/jobs")[-1]
+        self.assertEqual("true", call.query.get("include_completed"))
+        ada = owner["characters"][0]
+        # Delivered jobs count for nothing: the running manufacturing job and the paused one, one ready copy.
+        self.assertEqual((2, 0), (ada["slots"]["manufacturing"]["used"], ada["slots"]["manufacturing"]["ready"]))
+        self.assertEqual(1, ada["slots"]["science"]["ready"])
+        self.assertEqual(1, len(owner["jobs"]["ready"]))
+
     def test_corporation_snapshot_has_every_section_and_deduplicates_colleagues(self):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as handle:
             handle.write("Tritanium\n")
@@ -559,6 +667,7 @@ class IndustryStatusTests(CommandTestCase):
                          (bp["count"], bp["can_build_jobs"], bp["runs_per_job"],
                           bp["me"], bp["division"]))
         self.assertNotIn(1055717863075, [r["blueprint_type_id"] for r in owner["blueprints"]])
+        self.assertTrue(all({"activities", "invents"} <= set(r) for r in owner["blueprints"]))
         self.assertEqual(123, next(r["quantity"] for r in owner["materials"]
                                    if r["type_id"] == 34 and r["division"] == "T2-Prod"))
         self.assertEqual(834, next(r["quantity"] for r in owner["deliveries"]
@@ -567,8 +676,11 @@ class IndustryStatusTests(CommandTestCase):
         self.assertTrue(all(r["location_id"] and r["location"] for r in owner["deliveries"]))
         self.assertEqual(75, next(r["filled_pct"] for r in owner["orders"]
                                   if r["order_id"] == 700201))
-        self.assertEqual([{"owner_id": CORP_SHARED, "subject": subject, "delivered_jobs": 1}
-                          for subject in ("asset", "blueprint")], owner["warnings"])
+        self.assertEqual([{"owner_id": CORP_SHARED, "subject": "asset", "delivered_jobs": 1},
+                          {"owner_id": CORP_SHARED, "subject": "blueprint", "delivered_jobs": 1,
+                           "message": "1 job delivered after the blueprint snapshot: copies they produced "
+                                      "(invention or copying output) are not listed yet"}], owner["warnings"])
+        self.assertEqual({"dropped": 0, "reduced": 0}, owner["blueprint_adjustments"])
         self.assertEqual(owner["warnings"], doc["warnings"])
         for section in ("jobs", "assets", "blueprints", "orders"):
             self.assertEqual(1, len(self.env.server.calls_to(
