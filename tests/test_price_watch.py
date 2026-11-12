@@ -349,5 +349,104 @@ class ThinTest(unittest.TestCase):
         self.assertIs(busy, cmd_prices._thin(busy, days, NOW, "Example Region"))
 
 
+class SalesRateTest(unittest.TestCase):
+    """The hold cap's sales rate: per hub, per listed day, shrunk toward a share of the region's volume."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.conn = ledger_db.connect(os.path.join(self.dir.name, "ledger.sqlite3"))
+        self.addCleanup(self.conn.close)
+        self.tid = 0
+
+    @staticmethod
+    def at(hours_ago: float) -> str:
+        return (NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def sell(self, type_id: int, qty: int, hours_ago: float, location_id: int = pw.HUB.station_id) -> None:
+        self.tid += 1
+        with self.conn:
+            ledger_db.insert_transactions(self.conn, "char:1", [
+                {"transaction_id": self.tid, "date": self.at(hours_ago), "type_id": type_id, "quantity": qty,
+                 "unit_price": 10.0, "is_buy": False, "location_id": location_id}])
+
+    def order(self, order_id: int, type_id: int, hours_ago: float, total: int, remain: int, state: str,
+              location_id: int = pw.HUB.station_id, duration: int = 90) -> None:
+        with self.conn:
+            ledger_db.upsert_orders(self.conn, "char:1", [
+                {"order_id": order_id, "type_id": type_id, "is_buy_order": False, "issued": self.at(hours_ago),
+                 "price": 10.0, "volume_total": total, "volume_remain": remain, "state": state,
+                 "location_id": location_id, "duration": duration}], self.at(0))
+
+    def made(self, type_id: int) -> None:
+        with self.conn:
+            ledger_db.upsert_jobs(self.conn, "char:1", [
+                {"job_id": type_id, "activity_id": pw.MANUFACTURING, "runs": 1, "product_type_id": type_id,
+                 "start_date": self.at(24 * 5), "installer_id": 1, "status": "delivered"}], self.at(0))
+
+    def volume(self, region_id: int, type_id: int, per_day: int) -> None:
+        rows = [{"date": (NOW.date() - timedelta(days=i)).isoformat(), "average": 10.0, "highest": 10.0,
+                 "lowest": 10.0, "volume": per_day, "order_count": 5} for i in range(1, 31)]
+        with self.conn:
+            ledger_db.upsert_market_history(self.conn, region_id, type_id, rows)
+
+    def test_a_new_line_starts_at_the_prior_and_its_own_record_takes_over(self):
+        prior = pw.hub_rate("jita", 0, 0, 400, 0.06, 0.10)
+        self.assertEqual((pw.PRIOR, 24.0), (prior.basis, prior.rate))
+        # 10 sold in 8 listed hours: worth a nudge, not 30 a day
+        early = pw.hub_rate("jita", 10, 1 / 3, 400, 0.06, 0.10)
+        self.assertEqual(pw.BLEND, early.basis)
+        self.assertAlmostEqual((10 + 7 * 24) / (1 / 3 + 7), early.rate)
+        # three weeks listed: the record wins, and a hub that sells nothing goes toward zero
+        self.assertEqual(pw.MEASURED, pw.hub_rate("jita", 420, 21, 400, 0.06, 0.10).basis)
+        self.assertAlmostEqual(7 * 24 / 28, pw.hub_rate("jita", 0, 21, 400, 0.06, 0.10).rate)
+        # a sellout burst stops at the ceiling
+        self.assertEqual(40.0, pw.hub_rate("jita", 500, 0.5, 400, 0.06, 0.10).rate)
+
+    def test_listed_days_join_order_lifetimes_and_snapshots(self):
+        start, end = NOW - timedelta(days=30), NOW
+        # sold out two hours after listing, between two hourly polls: only the order shows it
+        self.order(1, 500, 100, 6, 0, "expired")
+        self.sell(500, 6, 98)
+        self.assertAlmostEqual(2 / 24, pw.listed_days(self.conn, 500, pw.HUB.station_id, start, end))
+        # an open order counts up to now; a reprice moved its `issued`, the snapshots fill the gap before it
+        self.order(2, 600, 10, 5, 5, "open")
+        for h in (14, 13, 12, 11):
+            with self.conn:
+                ledger_db.insert_book_snapshot(self.conn, {
+                    "location_id": pw.HUB.station_id, "type_id": 600, "ts": self.at(h), "polled_at": self.at(h),
+                    "best_sell": 10.0, "best_buy": None, "sell_units": 9, "sell_orders": 2, "buy_units": 0,
+                    "buy_orders": 0, "sell_units_1pct": 9, "sell_units_5pct": 9, "our_sell_units": 5,
+                    "our_best_sell": 10.0})
+        self.assertAlmostEqual(14 / 24, pw.listed_days(self.conn, 600, pw.HUB.station_id, start, end))
+        # expired with units left: its whole duration, clipped to the window (40 days ago + 14 = 4 inside)
+        self.order(3, 700, 24 * 40, 5, 2, "expired", duration=14)
+        self.assertAlmostEqual(4.0, pw.listed_days(self.conn, 700, pw.HUB.station_id, start, end))
+
+    def test_stock_figures_rate_our_lines_per_hub_and_the_rest_flat(self):
+        self.made(500)
+        self.volume(pw.HUB.region_id, 500, 400)
+        self.volume(STRUCTURE.region_id, 500, 20)
+        self.order(1, 500, 8, 10, 0, "expired", location_id=STRUCTURE.station_id)
+        self.sell(500, 10, 1, location_id=STRUCTURE.station_id)
+        self.sell(500, 3, 48, location_id=60_000_001)              # an old station: flat
+        self.sell(800, 30, 48)                                      # not made by us: flat, no prior
+        self.volume(pw.HUB.region_id, 800, 100_000)
+        stocks = pw.stock_figures(self.conn, {}, NOW, [500, 800], [pw.HUB, STRUCTURE])
+        rates = {r.hub: r for r in stocks[500].rates}
+        self.assertEqual({"jita", "example-hub", pw.OTHER}, set(rates))
+        self.assertEqual((pw.PRIOR, 24.0), (rates["jita"].basis, rates["jita"].rate))
+        self.assertEqual(pw.BLEND, rates["example-hub"].basis)
+        self.assertAlmostEqual((10 + 7 * 10) / (7 / 24 + 7), rates["example-hub"].rate)
+        self.assertAlmostEqual(3 / 30, rates[pw.OTHER].rate)
+        self.assertEqual(pw.BLEND, stocks[500].basis)
+        self.assertAlmostEqual(sum(r.rate for r in rates.values()), stocks[500].sold_per_day)
+        self.assertEqual(((pw.OTHER,), 1.0, pw.FLAT),
+                         (tuple(r.hub for r in stocks[800].rates), stocks[800].sold_per_day, stocks[800].basis))
+        # the cap is HORIZON_DAYS of the summed rate, even before the line sold at Jita
+        advice = pw.advise(500, [], None, stocks[500], None, NOW)
+        self.assertAlmostEqual(pw.HORIZON_DAYS * stocks[500].sold_per_day, advice.hold_cap)
+
+
 if __name__ == "__main__":
     unittest.main()

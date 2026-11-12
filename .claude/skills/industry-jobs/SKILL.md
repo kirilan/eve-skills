@@ -109,8 +109,9 @@ scenarios are different evidence. Unknown eligibility, fees or timing need check
   the build slots). Backlog = (runs on idle T2 copies + attempts running x success rate x runs per
   success) / runs the build slots use per day. Under a day: fill the labs. Over two days: cut attempts,
   lowest margin first.
-- **Stock limit** (choice; default: about two weeks of your own sales per line, `prices signal`
-  `hold_cap`). Above it, park the line's copies instead of building more. `planning.never_build` lists
+- **Stock limit** (choice; default: about two weeks of your expected sales per line, `prices signal`
+  `hold_cap`; its `cap basis` says whether that rests on measured sales or, for a new line, on a share of
+  the region's volume - `prices signal --rates` shows each hub's figure). Above it, park the line's copies instead of building more. `planning.never_build` lists
   products never to propose.
 - **Builders.** Check skills before assigning a line to a character that has not built it:
   `can-build --site NAME --builders A,B --type ITEM`. Read clone state and skills live (`summary`,

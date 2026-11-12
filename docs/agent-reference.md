@@ -197,10 +197,15 @@ totals: {sell_orders: int, sell_isk: float, buy_orders: int, buy_escrow_isk: flo
 cutover, last_sync, prices_synced: str, fee_pct: float, warnings, notes, assumptions: [str], note_counts: {...}
 items: [{type_id: int, type, state, action: str, price: float, price_source: str, normal, spread, z,
          week_vs_normal_pct, deviation_pct, stock: float, unit_cost: float|null, sold_per_day: float,
+         sales_rates: [{hub: str, sold: float, listed_days: float|null, prior: float, ceiling: float|null,
+                        rate: float, basis: "measured"|"blend"|"prior"|"flat"}], cap_basis: str|null,
          hold_cap: float|null, hold, sell: float, target: float|null, net_now: float, reason: str,
          past_dips: {dips, recovered: int, median_days: float|null, median_return_pct, mean_return_pct: float,
                      wins: int, rate: float}}]
 ```
+
+`sold_per_day` is the expected rate the cap uses (sum of `sales_rates[].rate`), not raw sales / 30:
+for our own products each hub's rate is units sold per listed day shrunk toward a regional-volume prior.
 
 `state` is one of `dip`, `high`, `falling`, `normal`, `thin` (or null). The document and rows include `hub`.
 

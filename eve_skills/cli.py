@@ -766,8 +766,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_psync.add_argument("--quiet", action="store_true", help="print only problems (for a timer)")
     p_psync.add_argument("--json", action="store_true", help="machine-readable output")
     p_psig = prices_sub.add_parser("signal", help="per watched type: now vs normal, dip/high/falling, and how "
-                                                  "much stock to hold or sell (two weeks of our sales at most)")
+                                                  "much stock to hold or sell (two weeks of our expected sales at most)")
     p_psig.add_argument("--all", action="store_true", help="also types with no stock and a normal price")
+    p_psig.add_argument("--rates", action="store_true", help="also print each type's expected sales per hub: "
+                                                             "units sold per listed day, the regional prior, the basis")
     p_psig.add_argument("--hub", metavar="KEY", help="judge this hub's book against its region's history "
                                                      "(default jita; thin markets get no dip/high advice)")
     p_psig.add_argument("--json", action="store_true", help="machine-readable output")
