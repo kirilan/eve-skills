@@ -192,6 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--times", action="store_true",
                         help="median measured hours per run by activity, product, installer and "
                              "facility (reads finished jobs too)")
+    p_jobs.add_argument("--since", metavar="HH:MM|ISO",
+                        help="jobs installed since then, delivered ones included, grouped by installer, "
+                             "activity, facility, product and runs: 'did I miss anything'. HH:MM is the most "
+                             "recent such time in --tz (default: the operation file's planning.timezone, "
+                             "else UTC)")
     p_jobs.add_argument("--days", type=int, default=14, metavar="N",
                         help="with --times: only jobs started in the last N days (default 14)")
     p_jobs.add_argument("--facility", metavar="NAME",
@@ -201,12 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --times: hours per run where this operation-file site does each "
                              "activity (its facilities); jobs measured at another facility of the file are "
                              "converted by the time multipliers and marked ~, others are listed but never "
-                             "scaled. Reads the site's characters (a corp site: the corporation)")
+                             "scaled. With --times or --since: reads the site's characters (a corp site: "
+                             "the corporation)")
     p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
                         help="with --times: run counts that end inside these local-time windows, "
                              "e.g. 08-10,20-22")
     p_jobs.add_argument("--tz", metavar="ZONE",
-                        help="time zone for --finish-window and --start, e.g. Europe/Helsinki (default UTC)")
+                        help="time zone for --finish-window, --start and --since, e.g. Europe/Helsinki (default UTC; "
+                             "--since defaults to the operation file's planning.timezone)")
     p_jobs.add_argument("--start", metavar="HH:MM|ISO",
                         help="with --finish-window: planned install time (default now)")
     p_jobs.add_argument("--max-hours", type=float, default=60, metavar="H",

@@ -221,6 +221,63 @@ class JobsCommandTests(CommandTestCase):
         self.assertEqual(code, 0)
         self.assertIn("h/run", text)
 
+    def since(self, *args, operation_doc=None):
+        self.env.install_jobs()
+        if operation_doc is not None:
+            with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+                json.dump(operation_doc, fh)
+        code, out, err = self.env.run(["jobs", "--since", *args])
+        self.assertEqual(code, 0, err)
+        return out, err
+
+    def test_since_lists_jobs_installed_after_the_moment_delivered_ones_included(self):
+        out, _ = self.since(iso(-100000), "--char", "Ada", "--json")
+        doc = json.loads(out)
+        self.assertEqual("UTC", doc["time_zone"])
+        jobs = doc["documents"][0]["jobs"]
+        # All five jobs started within 100000 s, the delivered invention too (--since implies --completed);
+        # ordered by start.
+        self.assertEqual(["copying", "invention", "manufacturing", "material efficiency research",
+                          "manufacturing"], [row["activity"] for row in jobs])
+        invention = jobs[1]
+        self.assertEqual({"installer", "installer_id", "activity", "product", "product_id", "runs", "count",
+                          "facility_id", "facility", "blueprint_ids", "start", "end", "status"}, set(invention))
+        self.assertEqual(("delivered", 10, 1, [1055717845488], 60015129),
+                         (invention["status"], invention["runs"], invention["count"], invention["blueprint_ids"],
+                          invention["facility_id"]))
+        self.assertIsNotNone(doc["documents"][0]["cache"])   # jobs data time per owner, characters too
+
+    def test_since_keeps_only_jobs_started_at_or_after_it(self):
+        out, _ = self.since(iso(-20000), "--char", "Ada", "--json")
+        rows = json.loads(out)["documents"][0]["jobs"]
+        self.assertEqual(["material efficiency research", "manufacturing"], [row["activity"] for row in rows])
+        self.assertEqual(["active", "active"], [row["status"] for row in rows])
+
+    def test_since_table_names_the_moment_and_the_data_time(self):
+        out, _ = self.since(iso(-20000), "--char", "Ada", "--tz", "+03:00")
+        self.assertIn("jobs installed since", out)
+        self.assertIn("jobs as of", out)
+        self.assertIn("Tritanium", out)
+        self.assertNotIn("copying", out)     # the copy job started before
+
+    def test_since_site_reads_the_site_characters_and_labels_its_facilities(self):
+        doc = {"sites": {"home": {"owner": "personal", "facility": "jita-desk", "characters": ["Ada Vane"]}},
+               "facilities": {"jita-desk": {"location_id": 60003760, "system": "Jita"}},
+               "planning": {"timezone": "+02:00"}}
+        out, _ = self.since(iso(-20000), "--site", "home", "--json", operation_doc=doc)
+        doc = json.loads(out)
+        self.assertEqual(("home", "+02:00"), (doc["site"], doc["time_zone"]))
+        self.assertEqual(["Ada Vane"], [d["owner"] for d in doc["documents"]])   # Vela is not on the site
+        self.assertEqual({"jita-desk"}, {row["facility"] for row in doc["documents"][0]["jobs"]})
+
+    def test_since_refuses_times_slots_and_csv(self):
+        self.env.install_jobs()
+        for extra in (["--times"], ["--slots"], ["--csv"], ["--group"]):
+            with self.subTest(extra=extra):
+                code, _, err = self.env.run(["jobs", "--since", "08:00", *extra])
+                self.assertNotEqual(0, code)
+                self.assertIn("--since", err)
+
     def test_window_flags_need_times(self):
         self.env.install_jobs()
         code, _, err = self.env.run(["jobs", "--finish-window", "08-10"])

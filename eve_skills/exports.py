@@ -12,7 +12,7 @@ import io
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from . import divisions, esi as esi_mod, freshness, market, render, sso, universe
 
@@ -213,6 +213,8 @@ def _job_rows(jobs, now):
             "product_id": product,
             "product": None,
             "runs": _runs_cell(job),
+            "run_count": runs,
+            "blueprint_id": _job_ident(job, "blueprint_id"),
             "time": when,
             "facility_id": facility,
             "installed_in": None,
@@ -507,14 +509,100 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
     print("\n\n".join(blocks))
 
 
+def _utc_iso(moment) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _since_groups(rows: list[dict], facility_names: dict[int, str]) -> list[dict]:
+    """`jobs --since` rows grouped by installer, activity, facility, product and runs."""
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (row["installer_id"], row["activity"], row["facility_id"], row["product_id"], row["run_count"])
+        groups.setdefault(key, []).append(row)
+    out = []
+    for members in groups.values():
+        first = members[0]
+        statuses: dict[str, int] = {}
+        for row in members:
+            statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+        status = (next(iter(statuses)) if len(statuses) == 1 else
+                  ", ".join(f"{count} {name}" for name, count in sorted(statuses.items())))
+        starts = [row["start"] for row in members if row["start"] is not None]
+        ends = [row["end"] for row in members if row["end"] is not None]
+        out.append({
+            "installer": first["installer"], "installer_id": first["installer_id"],
+            "activity": first["activity"], "product": first["product"], "product_id": first["product_id"],
+            "runs": first["run_count"], "count": len(members), "facility_id": first["facility_id"],
+            "facility": facility_names.get(first["facility_id"]) or first["installed_in"],
+            "blueprint_ids": sorted({row["blueprint_id"] for row in members if row["blueprint_id"] is not None}),
+            "start": _utc_iso(min(starts)) if starts else None,
+            "end": _utc_iso(max(ends)) if ends else None,
+            "status": status,
+            "_start": min(starts) if starts else None,
+        })
+    out.sort(key=lambda row: (row["_start"] is None, row["_start"] or 0, (row["installer"] or "").casefold(),
+                              (row["product"] or "").casefold()))
+    for row in out:
+        del row["_start"]
+    return out
+
+
+def _cmd_jobs_since(args, client, all_rows, hints, failures, since, tz, zone_name, site) -> None:
+    """`jobs --since WHEN`: what was installed since a moment ("did I miss anything")."""
+    from . import operation
+    op = operation.load()
+    facility_names = {f.location_id: name for name, f in op.facilities.items() if f.location_id}
+    documents = []
+    for owner, rows, meta, corp_id in all_rows:
+        recent = [row for row in rows if row["start"] is not None and row["start"] >= since]
+        documents.append((owner, meta, corp_id, _since_groups(recent, facility_names)))
+    if args.json:
+        print(json.dumps({
+            "since": _utc_iso(since), "time_zone": zone_name, "site": site.name if site else None,
+            "hints": hints, "warnings": failures,
+            "documents": [{"owner": owner, "corporation_id": corp_id, "cache": freshness.document(meta),
+                           "jobs": groups} for owner, meta, corp_id, groups in documents]}, indent=2))
+        return
+
+    def local(stamp: str | None) -> str:
+        if not stamp:
+            return "-"
+        return render.parse_ts(stamp).astimezone(tz).strftime("%b %d %H:%M")
+
+    blocks = list(hints)
+    blocks.append(f"jobs installed since {since.astimezone(tz).strftime('%a %b %d %H:%M')} {zone_name}"
+                  + (f" (site {site.name})" if site else "") + "; times in " + zone_name)
+    for owner, meta, _corp_id, groups in documents:
+        table_rows = [[row["installer"], row["activity"], row["product"], str(row["runs"]), str(row["count"]),
+                       row["facility"], local(row["start"]), local(row["end"]), row["status"]] for row in groups]
+        table = (render.table(["installer", "activity", "product", "runs", "count", "facility", "first start",
+                               "last end", "status"], table_rows)
+                 if table_rows else "(no jobs installed since then)")
+        blocks.append(f"{owner}\n{freshness.line('jobs', meta)}\n{table}")
+    print("\n\n".join(blocks))
+
+
 def cmd_jobs(args):
     if getattr(args, "slots", False):
+        if getattr(args, "since", None):
+            raise RuntimeError("--since cannot be combined with --slots")
         return _cmd_job_slots(args)
     times = getattr(args, "times", False)
+    since_spec = getattr(args, "since", None)
+    if since_spec:
+        if times:
+            raise RuntimeError("--since cannot be combined with --times")
+        if args.group or args.csv:
+            raise RuntimeError("--since groups its own rows and has --json; it cannot be combined with "
+                               "--group or --csv")
+        if any(getattr(args, flag, None) for flag in ("finish_window", "start", "facility")):
+            raise RuntimeError("--finish-window, --start and --facility only apply with --times")
     if times and (args.group or args.csv):
         raise RuntimeError("--times has its own table and --json; it cannot be combined with --group or --csv")
-    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz", "facility", "site")):
-        raise RuntimeError("--finish-window, --start, --tz, --facility and --site only apply with --times")
+    if not times and not since_spec and any(getattr(args, flag, None)
+                                            for flag in ("finish_window", "start", "tz", "facility", "site")):
+        raise RuntimeError("--finish-window, --start, --tz, --facility and --site only apply with --times "
+                           "(--tz and --site also with --since)")
     site = None
     if getattr(args, "site", None):
         if getattr(args, "facility", None):
@@ -526,7 +614,12 @@ def cmd_jobs(args):
             args.corp = True                      # a corp site's jobs are the corporation's
             if not args.char and site.readers:
                 args.char = site.readers[0]
-    completed = args.completed or times
+    since = tz = zone_name = None
+    if since_spec:
+        from . import job_times, operation
+        zone_name = args.tz or operation.load().planning.timezone or "UTC"
+        tz = job_times.zone(zone_name)
+    completed = args.completed or times or bool(since_spec)
     scope = ("esi-industry.read_corporation_jobs.v1" if args.corp
              else "esi-industry.read_character_jobs.v1")
     client, chars, hints = targets(args, [("jobs", scope)])
@@ -535,6 +628,8 @@ def cmd_jobs(args):
         chars = [(tok, public) for tok, public in chars
                  if (tok.get("character_name") or public.get("name") or "").casefold() in members]
     now = client.now()
+    if since_spec:
+        since = job_times.parse_since(since_spec, tz, now)
     blocks, failures, all_rows = list(hints), [], []
 
     owners: list[tuple[str, dict, dict, int | None]] = []
@@ -579,6 +674,8 @@ def cmd_jobs(args):
         print(f"warning: {line}", file=sys.stderr)
     if times:
         return _cmd_job_times(args, client, all_rows, hints, failures)
+    if since_spec:
+        return _cmd_jobs_since(args, client, all_rows, hints, failures, since, tz, zone_name, site)
     if getattr(args, "json", False):
         documents = []
         for owner, rows, meta, corp_id in all_rows:
