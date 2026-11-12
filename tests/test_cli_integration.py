@@ -667,6 +667,7 @@ class IndustryStatusTests(CommandTestCase):
                          (bp["count"], bp["can_build_jobs"], bp["runs_per_job"],
                           bp["me"], bp["division"]))
         self.assertNotIn(1055717863075, [r["blueprint_type_id"] for r in owner["blueprints"]])
+        self.assertTrue(all({"activities", "invents"} <= set(r) for r in owner["blueprints"]))
         self.assertEqual(123, next(r["quantity"] for r in owner["materials"]
                                    if r["type_id"] == 34 and r["division"] == "T2-Prod"))
         self.assertEqual(834, next(r["quantity"] for r in owner["deliveries"]

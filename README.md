@@ -668,6 +668,12 @@ the others keep the runs they have left. Originals are never changed. Each owner
 `warnings` say `n copies dropped and m reduced: used by jobs delivered after the blueprint snapshot
 (HH:MM UTC)`. Slot counts and the ready and running jobs never count a delivered job.
 
+Each blueprint row says what it can do, from the local SDE data (`update-data`): `activities` lists
+the industry activities (`manufacturing` or `reaction`; an original adds `copying`,
+`material efficiency research` and `time efficiency research`; a copy with an invention recipe adds
+`invention`, which needs a copy), and `invents` names the items its invention yields (the T2 products;
+on an original, what its copies invent). A blueprint the data does not know has two empty lists.
+
 ### `inventory` — what you own, where it is, what it is worth
 
 ```bash

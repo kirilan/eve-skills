@@ -203,13 +203,50 @@ def adjustment_text(dropped: int, reduced: int, snapshot) -> str:
             f"delivered after the blueprint snapshot ({when} UTC)")
 
 
+class Capabilities:
+    """What a blueprint can do, from the local SDE data: the industry activities and what invention yields.
+
+    The local data has manufacturing and reaction recipes and the invention table. An original can also be
+    copied and researched (ME and TE), a copy cannot; a reaction formula is neither copied nor researched.
+    Invention needs a copy, so an original lists no invention, but its `invents` still names what its copies
+    can invent: the T2 items (products of the invented blueprints)."""
+
+    def __init__(self, materials: dict | None, invention: dict | None):
+        self.materials = materials or {}
+        self.invention = invention or {}
+
+    def invented_products(self, type_id: int) -> list[int]:
+        row = self.invention.get(str(type_id))
+        out = []
+        for invented, _runs, _probability in (row or {}).get("p", []):
+            made = (self.materials.get(str(invented), {}).get("manufacturing") or {}).get("p")
+            out.append(int(made[0]) if made else int(invented))
+        return out
+
+    def activities(self, type_id: int, kind: str) -> list[str]:
+        known = self.materials.get(str(type_id)) or {}
+        inventable = str(type_id) in self.invention
+        result = []
+        if "manufacturing" in known:
+            result.append("manufacturing")
+        if "reaction" in known:
+            result.append("reaction")
+        if kind == "BPO" and "manufacturing" in known:
+            result += ["copying", "material efficiency research", "time efficiency research"]
+        if kind == "BPC" and inventable:
+            result.append("invention")
+        return result
+
+
 def _warning_text(issue) -> str:
     if issue.get("message"):
         return issue["message"]
     return freshness.delivery_warning(issue["delivered_jobs"], issue["subject"])
 
 
-def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok, recipes, extras, division_names):
+def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok, recipes, extras, division_names,
+              capabilities=None):
+    capabilities = capabilities or Capabilities(None, None)
     busy = {int(job["blueprint_id"]) for job in jobs
             if job.get("blueprint_id") is not None and job.get("status") not in
             {"cancelled", "delivered", "reverted"}}
@@ -245,6 +282,7 @@ def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok,
     ids = (materials | {int(bp["type_id"]) for bp in idle} |
            {int(a["type_id"]) for a in assets if corp_id and a.get("location_flag") == "CorpDeliveries"})
     ids.update(recipe.product_id for bp in idle if (recipe := recipes.get(int(bp["type_id"]))))
+    ids.update(product for bp in idle for product in capabilities.invented_products(int(bp["type_id"])))
     names = esi_mod.resolve_names(client, ids) if ids else {}
     stock = defaultdict(int)
     available = defaultdict(int)
@@ -291,6 +329,8 @@ def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok,
             "division_number": divisions.number(flag) if corp_id else None,
             "division": divisions.label(flag, division_names) if corp_id else flag,
             "kind": kind, "runs_per_job": job_runs, "me": me, "te": te,
+            "activities": capabilities.activities(type_id, kind),
+            "invents": [names.get(product, f"type {product}") for product in capabilities.invented_products(type_id)],
             "count": count, "can_build_jobs": min(possible, count) if possible is not None and asset_ok else None,
             "limiting_type_id": limiting if asset_ok else None,
             "limiting_material": names.get(limiting, f"type {limiting}") if limiting and asset_ok else None,
@@ -350,9 +390,15 @@ def cmd_status(args):
     client = esi_mod.Esi(esi_mod.default_user_agent(sso.load_config()))
     extras = _extras(client, args.materials)
     try:
-        recipes = industry.recipes_by_blueprint(alphadata.blueprint_materials())
+        materials_doc = alphadata.blueprint_materials()
+        recipes = industry.recipes_by_blueprint(materials_doc)
     except FileNotFoundError:
-        recipes = {}
+        materials_doc, recipes = None, {}
+    try:
+        invention_doc = alphadata.blueprint_invention()["blueprints"]
+    except (FileNotFoundError, ValueError):
+        invention_doc = None
+    capabilities = Capabilities(materials_doc, invention_doc)
     owners = {}
     unaffiliated = []
     for rec in records:
@@ -424,7 +470,7 @@ def cmd_status(args):
         blueprints, dropped, reduced = adjust_used_copies(blueprints, jobs, snapshot_at)
         bp_rows, stock_rows, deliveries = _holdings(
             client, bp_reader or asset_reader, corp_id, blueprints, assets, jobs,
-            jobs_meta is not None, asset_meta is not None, recipes, extras, division_names)
+            jobs_meta is not None, asset_meta is not None, recipes, extras, division_names, capabilities)
         order_objects = [orders.normalise(row, orders.owner_key(kind, ident), owner_name,
                                           corporation=bool(corp_id)) for row in order_rows]
         order_ids = {i for order in order_objects for i in (order.type_id, order.region_id,

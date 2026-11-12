@@ -410,3 +410,38 @@ class UsedCopiesTests(unittest.TestCase):
         kept, dropped, reduced = industry_status.adjust_used_copies(
             [self.bp(1, 10)], [self.job(1, 10, "2026-01-10T12:30:00Z")], None)
         self.assertEqual(([10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+
+class CapabilitiesTests(unittest.TestCase):
+    """`industry status` rows: what each blueprint can do, from the local SDE data."""
+
+    def setUp(self):
+        from eve_skills import industry_status
+        materials = {
+            "800001": {"manufacturing": {"m": {"34": 10}, "p": ["900001", 1], "t": 600, "limit": 300}},  # T1 module
+            "800002": {"manufacturing": {"m": {"900001": 1}, "p": ["900002", 1], "t": 900, "limit": 10}},  # its T2
+            "800003": {"reaction": {"m": {"16634": 100}, "p": ["16670", 200], "t": 10800, "limit": 1}},
+        }
+        invention = {"800001": {"m": {"20416": 2}, "p": [["800002", 10, 0.34]], "t": 63900}}
+        self.caps = industry_status.Capabilities(materials, invention)
+
+    def test_t1_original_copies_and_researches_and_names_what_its_copies_invent(self):
+        self.assertEqual(["manufacturing", "copying", "material efficiency research", "time efficiency research"],
+                         self.caps.activities(800001, "BPO"))
+        self.assertEqual([900002], self.caps.invented_products(800001))   # the T2 item, not its blueprint
+
+    def test_t1_copy_builds_and_invents(self):
+        self.assertEqual(["manufacturing", "invention"], self.caps.activities(800001, "BPC"))
+
+    def test_t2_copy_only_builds(self):
+        self.assertEqual(["manufacturing"], self.caps.activities(800002, "BPC"))
+        self.assertEqual([], self.caps.invented_products(800002))
+
+    def test_reaction_formula_is_never_copied_or_researched(self):
+        self.assertEqual(["reaction"], self.caps.activities(800003, "BPO"))
+
+    def test_an_unknown_blueprint_has_empty_lists(self):
+        self.assertEqual(([], []), (self.caps.activities(1, "BPO"), self.caps.invented_products(1)))
+        from eve_skills import industry_status
+        empty = industry_status.Capabilities(None, None)
+        self.assertEqual(([], []), (empty.activities(800001, "BPC"), empty.invented_products(800001)))
