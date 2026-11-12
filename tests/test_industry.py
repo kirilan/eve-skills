@@ -368,3 +368,45 @@ class ValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UsedCopiesTests(unittest.TestCase):
+    """`industry status`: copies used by jobs delivered after the blueprint snapshot."""
+    SNAPSHOT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def bp(item_id, runs, quantity=-2):
+        return {"item_id": item_id, "type_id": 800001, "quantity": quantity, "runs": runs}
+
+    @staticmethod
+    def job(bp, runs, completed, status="delivered"):
+        return {"blueprint_id": bp, "runs": runs, "status": status, "completed_date": completed}
+
+    def adjust(self, blueprints, jobs):
+        from eve_skills import industry_status
+        return industry_status.adjust_used_copies(blueprints, jobs, self.SNAPSHOT)
+
+    def test_a_copy_fully_used_is_dropped(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 10, "2026-01-10T12:30:00Z")])
+        self.assertEqual(([], 1, 0), (kept, dropped, reduced))
+
+    def test_a_copy_partly_used_keeps_its_remaining_runs(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 3, "2026-01-10T12:30:00Z"),
+                                                               self.job(1, 2, "2026-01-10T13:00:00Z")])
+        self.assertEqual(([5], 0, 1), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_a_job_delivered_before_the_snapshot_changes_nothing(self):
+        kept, dropped, reduced = self.adjust([self.bp(1, 10)], [self.job(1, 10, "2026-01-10T11:59:00Z")])
+        self.assertEqual(([10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_originals_and_undelivered_jobs_are_untouched(self):
+        kept, dropped, reduced = self.adjust(
+            [self.bp(1, -1, quantity=-1), self.bp(2, 10)],
+            [self.job(1, 10, "2026-01-10T12:30:00Z"), self.job(2, 10, None, status="active")])
+        self.assertEqual(([-1, 10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))
+
+    def test_no_snapshot_time_means_no_change(self):
+        from eve_skills import industry_status
+        kept, dropped, reduced = industry_status.adjust_used_copies(
+            [self.bp(1, 10)], [self.job(1, 10, "2026-01-10T12:30:00Z")], None)
+        self.assertEqual(([10], 0, 0), ([bp["runs"] for bp in kept], dropped, reduced))

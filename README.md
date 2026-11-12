@@ -655,8 +655,18 @@ can-build counts are local to the blueprint's station and division; `CorpDeliver
 other stations are separate, not installable stock. JSON includes numeric ids beside names,
 quantities, section availability and `Last-Modified`/`Expires` for each available document.
 Unknown slot budgets and can-build counts remain `null`; missing optional consent supplies
-an actionable hint and never invents a zero. Delivered jobs newer than assets or blueprints
-produce staleness warnings.
+an actionable hint and never invents a zero. Delivered jobs newer than assets produce a
+staleness warning; delivered copying and invention jobs newer than the blueprints say that the
+copies they produced are not listed yet.
+
+Blueprints are cached about an hour and jobs about five minutes, so a copy used by a job delivered
+after the blueprint snapshot would still show with its pre-job runs. The snapshot therefore reads
+finished jobs too (personal ones as well as the corporation's) and takes each such job's runs
+(manufacturing runs, invention attempts) off the copy it used: a copy left with no runs is dropped,
+the others keep the runs they have left. Originals are never changed. Each owner's JSON has
+`blueprint_adjustments: {"dropped": n, "reduced": m}`, and when either is non-zero the text and
+`warnings` say `n copies dropped and m reduced: used by jobs delivered after the blueprint snapshot
+(HH:MM UTC)`. Slot counts and the ready and running jobs never count a delivered job.
 
 ### `inventory` — what you own, where it is, what it is worth
 

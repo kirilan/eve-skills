@@ -24,7 +24,7 @@ from tests.fake_esi import (
     ADA, CORP_SHARED, JOB_STRUCTURE, MARKET_BROKEN, MIRA, VELA, INV_CONTAINER_ITEM,
     INV_CITADEL_BLIND, INV_SHIP_ITEM, SKILL_CAPPED, SKILL_NAV, SKILL_OMEGA_ONLY,
     SKILL_UNSTARTED, SKILL_WIDE, BUILD_CELL, BUILD_HOUSING, BUILD_PASTE, BUILD_PLATE,
-    STATION_JITA, FakeEsiEnv, industry_jobs, iso,
+    STATION_JITA, FakeEsiEnv, http_date, industry_jobs, iso,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -580,6 +580,57 @@ class IndustryStatusTests(CommandTestCase):
         super().setUp()
         self.env.install_industry_status()
 
+    def used_copy_jobs(self, *specs):
+        """(job_id, blueprint_id, runs, completed offset s) -> delivered manufacturing jobs by Ada."""
+        return [{"job_id": job_id, "activity_id": 1, "status": "delivered", "installer_id": ADA.character_id,
+                 "blueprint_id": bp, "blueprint_type_id": 930001, "product_type_id": 34,
+                 "facility_id": STATION_JITA, "location_id": STATION_JITA, "runs": runs,
+                 "start_date": iso(completed - 7200), "end_date": iso(completed), "completed_date": iso(completed)}
+                for job_id, bp, runs, completed in specs]
+
+    def test_copies_used_by_jobs_delivered_after_the_blueprint_snapshot_are_dropped_or_reduced(self):
+        # Blueprint snapshot 25 h old: 930101 was used up an hour ago, 930102 lost 4 of its 10 runs, and a
+        # job delivered before the snapshot changes nothing.
+        jobs = [{k: v for k, v in dict(job, location_id=job["facility_id"]).items() if k != "station_id"}
+                for job in industry_jobs()]
+        jobs += self.used_copy_jobs((1, 930101, 10, -3600), (2, 930102, 4, -1800), (3, 930102, 5, -100000))
+        self.env.server.get(f"/corporations/{CORP_SHARED}/industry/jobs", token=ADA.token,
+                            handler=lambda call: jobs if call.query.get("include_completed") == "true"
+                            else [j for j in jobs if j["status"] == "active"])
+        code, out, err = self.env.run(["industry", "status", "--corp", "--json"])
+        self.assertEqual((code, err), (0, ""))
+        owner = next(r for r in json.loads(out)["owners"] if r["owner_id"] == CORP_SHARED)
+        self.assertEqual({"dropped": 1, "reduced": 1}, owner["blueprint_adjustments"])
+        copies = [r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001]
+        self.assertEqual([(1, 6)], [(r["count"], r["runs_per_job"]) for r in copies])
+        issue = next(w for w in owner["warnings"] if w["subject"] == "blueprint_adjustments")
+        self.assertTrue(issue["message"].startswith("1 copy dropped and 1 reduced: used by jobs delivered "
+                                                    "after the blueprint snapshot ("))
+        code, text, _ = self.env.run(["industry", "status", "--corp"])
+        self.assertIn("warning: 1 copy dropped and 1 reduced", text)
+
+    def test_personal_status_reads_finished_jobs_and_adjusts_copies_without_changing_slots(self):
+        self.env.server.get(f"/characters/{ADA.character_id}/blueprints", token=ADA.token, doc=[
+            {"item_id": 2101, "type_id": 930001, "location_id": STATION_JITA, "location_flag": "Hangar",
+             "quantity": -2, "runs": 10, "material_efficiency": 7, "time_efficiency": 14}],
+            headers={"Last-Modified": http_date(-7200), "Expires": http_date(3600)})
+        jobs = industry_jobs() + self.used_copy_jobs((9, 2101, 10, -3600))
+        self.env.server.get(f"/characters/{ADA.character_id}/industry/jobs", token=ADA.token,
+                            handler=lambda call: jobs if call.query.get("include_completed") == "true"
+                            else [j for j in jobs if j["status"] == "active"])
+        code, out, err = self.env.run(["industry", "status", "--char", "Ada", "--json"])
+        self.assertEqual(0, code, err)
+        owner = json.loads(out)["owners"][0]
+        self.assertEqual({"dropped": 1, "reduced": 0}, owner["blueprint_adjustments"])
+        self.assertEqual([], [r for r in owner["blueprints"] if r["blueprint_type_id"] == 930001])
+        call = self.env.server.calls_to(f"/characters/{ADA.character_id}/industry/jobs")[-1]
+        self.assertEqual("true", call.query.get("include_completed"))
+        ada = owner["characters"][0]
+        # Delivered jobs count for nothing: the running manufacturing job and the paused one, one ready copy.
+        self.assertEqual((2, 0), (ada["slots"]["manufacturing"]["used"], ada["slots"]["manufacturing"]["ready"]))
+        self.assertEqual(1, ada["slots"]["science"]["ready"])
+        self.assertEqual(1, len(owner["jobs"]["ready"]))
+
     def test_corporation_snapshot_has_every_section_and_deduplicates_colleagues(self):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as handle:
             handle.write("Tritanium\n")
@@ -624,8 +675,11 @@ class IndustryStatusTests(CommandTestCase):
         self.assertTrue(all(r["location_id"] and r["location"] for r in owner["deliveries"]))
         self.assertEqual(75, next(r["filled_pct"] for r in owner["orders"]
                                   if r["order_id"] == 700201))
-        self.assertEqual([{"owner_id": CORP_SHARED, "subject": subject, "delivered_jobs": 1}
-                          for subject in ("asset", "blueprint")], owner["warnings"])
+        self.assertEqual([{"owner_id": CORP_SHARED, "subject": "asset", "delivered_jobs": 1},
+                          {"owner_id": CORP_SHARED, "subject": "blueprint", "delivered_jobs": 1,
+                           "message": "1 job delivered after the blueprint snapshot: copies they produced "
+                                      "(invention or copying output) are not listed yet"}], owner["warnings"])
+        self.assertEqual({"dropped": 0, "reduced": 0}, owner["blueprint_adjustments"])
         self.assertEqual(owner["warnings"], doc["warnings"])
         for section in ("jobs", "assets", "blueprints", "orders"):
             self.assertEqual(1, len(self.env.server.calls_to(

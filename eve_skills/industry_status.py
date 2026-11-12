@@ -165,6 +165,50 @@ def _job_groups(client, jobs, now):
     return result
 
 
+def adjust_used_copies(blueprints, jobs, snapshot):
+    """Copies as they are now, not as the (older) blueprint snapshot saw them: (blueprints, dropped, reduced).
+
+    Blueprints are cached about an hour and jobs about five minutes, so a copy used by a job delivered
+    after the blueprint snapshot still shows with its pre-job runs. Each such job's `runs` (manufacturing
+    runs, invention attempts) comes off the copy; a copy left with no runs is dropped. Originals are never
+    changed, and nothing changes without a snapshot time."""
+    if snapshot is None:
+        return list(blueprints), 0, 0
+    used: dict[int, int] = defaultdict(int)
+    for job in jobs:
+        if job.get("status") != "delivered" or job.get("blueprint_id") is None:
+            continue
+        completed = render.parse_opt(job.get("completed_date"))
+        if completed is None or completed <= snapshot:
+            continue
+        used[int(job["blueprint_id"])] += int(job.get("runs") or 0)
+    kept, dropped, reduced = [], 0, 0
+    for bp in blueprints:
+        spent = used.get(int(bp["item_id"]), 0)
+        if not spent or int(bp.get("quantity", 0)) != -2:
+            kept.append(bp)
+            continue
+        left = int(bp.get("runs", 0)) - spent
+        if left <= 0:
+            dropped += 1
+            continue
+        reduced += 1
+        kept.append(dict(bp, runs=left))
+    return kept, dropped, reduced
+
+
+def adjustment_text(dropped: int, reduced: int, snapshot) -> str:
+    when = snapshot.strftime("%H:%M") if snapshot else "?"
+    return (f"{dropped} {'copy' if dropped == 1 else 'copies'} dropped and {reduced} reduced: used by jobs "
+            f"delivered after the blueprint snapshot ({when} UTC)")
+
+
+def _warning_text(issue) -> str:
+    if issue.get("message"):
+        return issue["message"]
+    return freshness.delivery_warning(issue["delivered_jobs"], issue["subject"])
+
+
 def _holdings(client, tok, corp_id, blueprints, assets, jobs, jobs_ok, asset_ok, recipes, extras, division_names):
     busy = {int(job["blueprint_id"]) for job in jobs
             if job.get("blueprint_id") is not None and job.get("status") not in
@@ -339,8 +383,7 @@ def cmd_status(args):
         sections = {}
         for title, scope, suffix, paginated in (
             ("jobs", "esi-industry.read_corporation_jobs.v1" if corp_id else
-             "esi-industry.read_character_jobs.v1", "/industry/jobs" +
-             ("?include_completed=true" if corp_id else ""), bool(corp_id)),
+             "esi-industry.read_character_jobs.v1", "/industry/jobs?include_completed=true", bool(corp_id)),
             ("blueprints", "esi-corporations.read_blueprints.v1" if corp_id else
              "esi-characters.read_blueprints.v1", "/blueprints", True),
             ("assets", "esi-assets.read_corporation_assets.v1" if corp_id else
@@ -377,6 +420,8 @@ def cmd_status(args):
         if bp_meta and not asset_meta:
             snapshot["hints"].append({"owner_id": ident, "owner_name": owner_name,
                                       "section": "blueprints", "code": "requires_assets"})
+        snapshot_at = freshness._utc(bp_meta.last_modified) if bp_meta and jobs_meta else None
+        blueprints, dropped, reduced = adjust_used_copies(blueprints, jobs, snapshot_at)
         bp_rows, stock_rows, deliveries = _holdings(
             client, bp_reader or asset_reader, corp_id, blueprints, assets, jobs,
             jobs_meta is not None, asset_meta is not None, recipes, extras, division_names)
@@ -402,11 +447,25 @@ def cmd_status(args):
         warnings = []
         for subject, meta in (("asset", asset_meta), ("blueprint", bp_meta)):
             if jobs_meta is not None and meta is not None:
-                count = freshness.delivered_after(jobs, meta)
+                # Blueprints: only copying and invention hand back new blueprints; copies used by other
+                # delivered jobs are adjusted above instead.
+                count = freshness.delivered_after(
+                    jobs if subject == "asset" else
+                    [job for job in jobs if exports._job_ident(job, "activity_id") in (5, 8)], meta)
                 if count:
                     issue = {"owner_id": ident, "subject": subject, "delivered_jobs": count}
+                    if subject == "blueprint":
+                        noun = "job" if count == 1 else "jobs"
+                        issue["message"] = (f"{count} {noun} delivered after the blueprint snapshot: copies "
+                                            "they produced (invention or copying output) are not listed yet")
                     warnings.append(issue)
                     snapshot["warnings"].append(issue)
+        if dropped or reduced:
+            issue = {"owner_id": ident, "subject": "blueprint_adjustments", "dropped": dropped,
+                     "reduced": reduced, "snapshot": freshness.iso(bp_meta.last_modified),
+                     "message": adjustment_text(dropped, reduced, snapshot_at)}
+            warnings.append(issue)
+            snapshot["warnings"].append(issue)
         snapshot["owners"].append({
             "owner_id": ident, "owner_name": owner_name,
             "read_by_character_id": int(jobs_reader["character_id"]) if jobs_reader and corp_id else None,
@@ -418,6 +477,7 @@ def cmd_status(args):
                           if corp_id else {}),
             "jobs": _job_groups(client, jobs, now), "blueprints": bp_rows,
             "materials": stock_rows, "orders": order_list, "deliveries": deliveries,
+            "blueprint_adjustments": {"dropped": dropped, "reduced": reduced},
             "warnings": warnings,
         })
     if args.json:
@@ -449,8 +509,7 @@ def cmd_status(args):
                     for kind, v in c["slots"].items())
                 lines.append(f"  {c['character_name']} slots used/max/free: {slots}")
             lines.append("  no readable jobs, blueprints, material stock, orders or deliveries")
-            lines.extend(f"  warning: {freshness.delivery_warning(issue['delivered_jobs'], issue['subject'])}"
-                         for issue in owner["warnings"])
+            lines.extend(f"  warning: {_warning_text(issue)}" for issue in owner["warnings"])
             continue
         _table_section(lines, "slots",
                        ["character", "manufacturing used/max/free", "science used/max/free",
@@ -489,6 +548,5 @@ def cmd_status(args):
         _table_section(lines, "deliveries at other stations", ["type", "quantity / location"],
                        [[f"{r['type_name']} ({r['type_id']})",
                          f"{r['quantity']:,} at {r['location']}"] for r in owner["deliveries"]], 8)
-        lines.extend(f"  warning: {freshness.delivery_warning(issue['delivered_jobs'], issue['subject'])}"
-                     for issue in owner["warnings"])
+        lines.extend(f"  warning: {_warning_text(issue)}" for issue in owner["warnings"])
     print("\n".join(lines))
