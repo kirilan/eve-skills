@@ -1031,6 +1031,9 @@ eve-skills ledger progress                    # the figures every sync recorded,
 eve-skills ledger note add "Sell run loaded" --body-file notes.md   # the operation's log
 eve-skills ledger note add "Relist Gyro II in Dodixie" --kind todo
 eve-skills ledger note list --open            # open to-dos; `note show [ID...]`, `note done ID`
+eve-skills ledger schema jobs                 # tables, columns and types, read from the file
+eve-skills ledger sql "select character_name(installer_id), type_name(product_type_id), runs,
+    local_time(end_date) from jobs where status = 'active' order by end_date"
 ```
 
 ESI forgets: wallet journal and transactions are served for **30 days**, completed industry jobs for
@@ -1119,6 +1122,21 @@ from `--body`, a file or stdin, and `--at` to backdate one. Every sync also stor
 figures (jobs running and ready per activity, T2 units built and sold, invention revenue and gross
 profit, net profit, stock at cost, work in progress, open sell and buy orders), so `ledger progress`
 shows the trend one row per day (`--all` for every sync) beside the open to-dos and the latest notes.
+
+For a question no report answers, `ledger sql "SELECT ..."` queries the file directly; no `sqlite3`
+binary is needed. It opens the file read-only (`file:...?mode=ro` and `PRAGMA query_only`), and refuses
+anything but one `SELECT` or `WITH` statement, so a query can never change the books. At most
+`--limit` rows (default 200) are printed, and the output says when it cut; `--json` gives `columns`, `rows`
+(one object per row), `count` and `cut`, and `--csv` plain rows. Three functions save rebuilding the usual
+look-ups, all from local files (no ESI request per row):
+
+| Function | Returns |
+|---|---|
+| `type_name(type_id)` | The name from the local type and name caches that other commands fill; unknown -> `type <id>`. |
+| `character_name(id)` | A stored character's name; anyone else -> the id as text. |
+| `local_time(ts[, zone])` | An ISO UTC stamp as `YYYY-MM-DD HH:MM` in the zone (an IANA name or an offset; default: the operation file's `planning.timezone`, else UTC). |
+
+`ledger schema [TABLE]` lists the tables with their columns and types, read from the file itself.
 
 ### `dashboard` — profitability, jobs and orders in a browser
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
@@ -853,3 +854,86 @@ class UnreadableCorporationTests(unittest.TestCase):
                                 "refused_character_ids": [1]})
         ledger_sync._collapse_unreadable_corporation(report, 0, 9, True)
         self.assertEqual(["esi_refused"], [p["code"] for p in report.problems])
+
+
+class LedgerSqlTests(unittest.TestCase):
+    """`ledger sql` / `ledger schema`: read-only, one SELECT, and the three helper functions."""
+
+    def setUp(self):
+        import contextlib
+        import hashlib
+        from eve_skills import ledger_db
+        self.env = FakeEsiEnv()
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        with contextlib.closing(ledger_db.connect()) as conn, conn:
+            for job_id, product, end in ((1, 34, "2026-01-31T06:30:00Z"), (2, 999001, "2026-01-31T07:00:00Z"),
+                                         (3, 34, "2026-01-31T08:00:00Z")):
+                conn.execute("INSERT INTO jobs (job_id, owner, activity_id, status, installer_id, product_type_id, "
+                             "runs, start_date, end_date, raw, first_seen, last_seen) "
+                             "VALUES (?, 'corp:1', 1, 'active', ?, ?, 10, '2026-01-30T00:00:00Z', ?, '{}', 'x', 'x')",
+                             (job_id, ADA.character_id if job_id != 3 else 42, product, end))
+        self.path = ledger_db.db_path(create=False)
+        self.digest = lambda: hashlib.sha256(Path(self.path).read_bytes()).hexdigest()
+        # The local type catalogue: a name cache entry, as any earlier command leaves behind.
+        from eve_skills import paths
+        with open(os.path.join(paths.cache_dir(), "names.json"), "w", encoding="utf-8") as fh:
+            json.dump({"34": "Tritanium"}, fh)
+
+    def sql(self, *args):
+        return self.env.run(["ledger", "sql", *args])
+
+    def test_write_statements_are_refused_and_the_file_is_unchanged(self):
+        before = self.digest()
+        for statement in ("DELETE FROM jobs", "drop table jobs", "SELECT 1; DELETE FROM jobs",
+                          "WITH x AS (SELECT 1) DELETE FROM jobs", "ATTACH 'other.db' AS o", "PRAGMA user_version = 9"):
+            with self.subTest(statement=statement):
+                code, _, err = self.sql(statement)
+                self.assertEqual(1, code)
+                self.assertIn("error:", err)
+        self.assertEqual(before, self.digest())
+
+    def test_a_semicolon_inside_a_string_is_not_a_second_statement(self):
+        code, out, err = self.sql("select 'a;b' as text;", "--json")
+        self.assertEqual((0, ""), (code, err))
+        self.assertEqual([{"text": "a;b"}], json.loads(out)["rows"])
+
+    def test_the_three_functions(self):
+        with open(os.path.join(self.env.config_home, "eve-skills", "operation.json"), "w") as fh:
+            json.dump({"planning": {"timezone": "+02:00"}}, fh)
+        code, out, err = self.sql("select character_name(installer_id) who, type_name(product_type_id) what, "
+                                  "local_time(end_date) here, local_time(end_date, 'UTC') utc, local_time(null) blank "
+                                  "from jobs order by job_id", "--json")
+        self.assertEqual((0, ""), (code, err))
+        rows = json.loads(out)["rows"]
+        self.assertEqual([("Ada Vane", "Tritanium", "2026-01-31 08:30", "2026-01-31 06:30", None),
+                          ("Ada Vane", "type 999001", "2026-01-31 09:00", "2026-01-31 07:00", None),
+                          ("42", "Tritanium", "2026-01-31 10:00", "2026-01-31 08:00", None)],
+                         [(r["who"], r["what"], r["here"], r["utc"], r["blank"]) for r in rows])
+
+    def test_the_limit_cuts_and_says_so(self):
+        code, out, _ = self.sql("select job_id from jobs order by job_id", "--limit", "2")
+        self.assertEqual(0, code)
+        self.assertIn("cut at 2 rows", out)
+        code, out, _ = self.sql("select job_id from jobs", "--limit", "2", "--json")
+        doc = json.loads(out)
+        self.assertEqual((2, True), (doc["count"], doc["cut"]))
+        code, out, _ = self.sql("select job_id from jobs", "--json")
+        self.assertFalse(json.loads(out)["cut"])
+
+    def test_schema_lists_tables_and_columns_from_the_file(self):
+        code, out, _ = self.env.run(["ledger", "schema", "--json"])
+        self.assertEqual(0, code)
+        tables = json.loads(out)
+        self.assertIn("jobs", tables)
+        self.assertIn({"name": "job_id", "type": "INTEGER", "notnull": False, "pk": True}, tables["jobs"])
+        code, _, err = self.env.run(["ledger", "schema", "types"])
+        self.assertEqual(1, code)
+        self.assertIn("no table 'types'", err)
+
+    def test_no_ledger_is_an_error_not_a_new_file(self):
+        os.remove(self.path)
+        code, _, err = self.sql("select 1")
+        self.assertEqual(1, code)
+        self.assertIn("no ledger yet", err)
+        self.assertFalse(os.path.exists(self.path))

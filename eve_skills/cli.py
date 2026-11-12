@@ -694,6 +694,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_lprog.add_argument("--all", action="store_true", help="every sync, not one row per day")
     p_lprog.add_argument("--notes", type=int, default=5, metavar="N", help="recent notes shown (default 5)")
     p_lprog.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lsql = ledger_sub.add_parser("sql", help="one read-only SELECT or WITH query against the ledger file, with "
+                                               "type_name(id), character_name(id) and local_time(ts[, zone])")
+    p_lsql.add_argument("query", help="one SELECT or WITH statement (quote it); anything else is refused")
+    p_lsql.add_argument("--limit", type=int, default=200, metavar="N",
+                        help="at most N rows (default 200); the output says when it cut")
+    p_lsql_out = p_lsql.add_mutually_exclusive_group()
+    p_lsql_out.add_argument("--json", action="store_true", help="machine-readable output")
+    p_lsql_out.add_argument("--csv", action="store_true", help="CSV rows on stdout (the cut note goes to stderr)")
+    p_lschema = ledger_sub.add_parser("schema", help="the ledger's tables with their columns and types, read "
+                                                     "from the file")
+    p_lschema.add_argument("table", nargs="?", help="only this table")
+    p_lschema.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_alerts = sub.add_parser("alerts", help="Telegram alerts for undercut/outbid, back-on-top and filled market orders, and industry jobs "
                                              "about to finish")
