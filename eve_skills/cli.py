@@ -197,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--facility", metavar="NAME",
                         help="with --times: only jobs installed in this facility of the operation file "
                              "(times are always reported per facility)")
+    p_jobs.add_argument("--site", metavar="NAME",
+                        help="with --times: hours per run where this operation-file site does each "
+                             "activity (its facilities); jobs measured at another facility of the file are "
+                             "converted by the time multipliers and marked ~, others are listed but never "
+                             "scaled. Reads the site's characters (a corp site: the corporation)")
     p_jobs.add_argument("--finish-window", metavar="HH-HH[,HH-HH]",
                         help="with --times: run counts that end inside these local-time windows, "
                              "e.g. 08-10,20-22")
@@ -544,8 +549,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_operation = sub.add_parser("operation",
                                  help="sites, facilities, extra hubs and freight from the operation file "
                                       "(operation.json in the config directory)")
-    p_operation.add_argument("action", nargs="?", choices=["show", "template"], default="show",
-                             help="show what is configured (default), or print a template to start from")
+    p_operation.add_argument("action", nargs="?", choices=["show", "template", "playbook"], default="show",
+                             help="show what is configured (default), print a template to start from, or "
+                                  "list / print this installation's playbook (its own rules for the agent "
+                                  "skills, Markdown files in <config dir>/playbook or $EVE_SKILLS_PLAYBOOK)")
+    p_operation.add_argument("name", nargs="?", metavar="NAME",
+                             help="with playbook: print NAME.md (a missing file is not an error)")
+    p_operation.add_argument("--path", action="store_true",
+                             help="with playbook NAME: print only the file's path")
     p_operation.add_argument("--json", action="store_true", help="machine-readable output")
 
     p_system = sub.add_parser("system",

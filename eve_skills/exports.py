@@ -435,6 +435,7 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
     from . import operation
     op = operation.load()
     facility_names = {f.location_id: name for name, f in op.facilities.items() if f.location_id}
+    site = op.site(args.site) if getattr(args, "site", None) else None
     only = None
     if getattr(args, "facility", None):
         chosen = op.facility(args.facility)
@@ -442,8 +443,12 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
             raise RuntimeError(f"facility {chosen.name} has no location_id in the operation file")
         only = chosen.location_id
     documents = []
+    unscaled: list[dict] = []
     for owner, rows, meta, corp_id in all_rows:
         times = job_times.median_times(rows, since, facility_names, only)
+        if site is not None:
+            times, missing = job_times.site_times(times, op, site)
+            unscaled.extend({"owner": owner, **row} for row in missing)
         if windows:
             for row in times:
                 row["fits"] = job_times.window_fits(start, row["hours_per_run"], windows, tz,
@@ -451,7 +456,10 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
         documents.append((owner, meta, corp_id, times))
     if args.json:
         print(json.dumps({
-            "days": args.days, "time_zone": args.tz or "UTC",
+            "days": args.days, "time_zone": args.tz or "UTC", "site": site.name if site else None,
+            "facilities": ({activity: site.facility_for(activity) for activity in operation.ACTIVITIES}
+                           if site else None),
+            "unscaled": unscaled if site else None,
             "finish_window": args.finish_window, "start": start.isoformat().replace("+00:00", "Z") if start else None,
             "max_hours": args.max_hours if windows else None, "hints": hints, "warnings": failures,
             "documents": [{"owner": owner, "corporation_id": corp_id,
@@ -470,7 +478,9 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
             headers.append("runs -> end")
         table_rows = []
         for row in times:
-            cells = [row["activity"], row["product"], row["installer"], row["facility"], f"{row['hours_per_run']:.2f}",
+            mark = "~" if row.get("scaled_from") else ""
+            cells = [row["activity"], row["product"], row["installer"], row["facility"],
+                     f"{mark}{row['hours_per_run']:.2f}",
                      f"{row['min_hours']:.2f}-{row['max_hours']:.2f}", str(row["jobs"])]
             if windows:
                 fits = row["fits"][:2]
@@ -479,6 +489,16 @@ def _cmd_job_times(args, client, all_rows, hints, failures) -> None:
         table = render.table(headers, table_rows) if table_rows else f"(no timed jobs in the last {args.days} days)"
         cache = f"\n{freshness.line('corp jobs', meta)}" if corp_id is not None else ""
         blocks.append(f"{owner}{cache}\n{table}")
+    if site is not None:
+        where = ", ".join(sorted({f"{a}: {site.facility_for(a)}" for a in ("manufacturing", "invention", "copying")}))
+        note = (f"site {site.name} ({where}): times are where the site does each activity; ~ = measured at "
+                "another facility of the operation file and converted by the two facilities' time multipliers")
+        if unscaled:
+            seen = sorted({(u["activity"], u["product"], u["installer"], u.get("facility") or str(u.get("facility_id")))
+                           for u in unscaled})
+            note += ("\nno time (measured only at a facility the operation file does not know, so not scaled): "
+                     + "; ".join(f"{a} {p} by {i} at {f}" for a, p, i, f in seen))
+        blocks.append(note)
     if windows:
         blocks.append(f"runs -> end: the most runs ending in each {args.finish_window} window ({args.tz or 'UTC'}) "
                       f"when installed {local(start.isoformat())}, longest first, at most {args.max_hours:g} h; "
@@ -493,12 +513,27 @@ def cmd_jobs(args):
     times = getattr(args, "times", False)
     if times and (args.group or args.csv):
         raise RuntimeError("--times has its own table and --json; it cannot be combined with --group or --csv")
-    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz", "facility")):
-        raise RuntimeError("--finish-window, --start, --tz and --facility only apply with --times")
+    if not times and any(getattr(args, flag, None) for flag in ("finish_window", "start", "tz", "facility", "site")):
+        raise RuntimeError("--finish-window, --start, --tz, --facility and --site only apply with --times")
+    site = None
+    if getattr(args, "site", None):
+        if getattr(args, "facility", None):
+            raise RuntimeError("--site and --facility cannot be combined: --site already picks the "
+                               "facility of each activity")
+        from . import operation
+        site = operation.load().site(args.site)
+        if site.owner == "corp":
+            args.corp = True                      # a corp site's jobs are the corporation's
+            if not args.char and site.readers:
+                args.char = site.readers[0]
     completed = args.completed or times
     scope = ("esi-industry.read_corporation_jobs.v1" if args.corp
              else "esi-industry.read_character_jobs.v1")
     client, chars, hints = targets(args, [("jobs", scope)])
+    if site is not None and site.owner == "personal" and not args.char:
+        members = {name.casefold() for name in site.characters}
+        chars = [(tok, public) for tok, public in chars
+                 if (tok.get("character_name") or public.get("name") or "").casefold() in members]
     now = client.now()
     blocks, failures, all_rows = list(hints), [], []
 

@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from unittest import mock
 
-from eve_skills import industry, operation
+from eve_skills import cmd_operation, industry, operation
 from tests.fake_esi import BUILD_ARTICLE, SYSTEM_FORGE, FakeEsiEnv
 
 
@@ -113,6 +114,102 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(op.site(None).name, "highsec")
 
 
+class SiteFacilitiesTest(unittest.TestCase):
+    """A site may run each activity in a different facility, and carries the planning settings."""
+
+    FACTORY = {"system": "Y-EXMPL", "location_id": 1_040_000_000_002, "tax_pct": 0.5,
+               "structure": "sotiyo", "security": "null", "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}}
+
+    def doc(self, site_extra=None, **extra):
+        site = {"owner": "personal", "facility": "labs", "characters": ["Carol Hauler", "Dave Miner"]}
+        site.update(site_extra or {})
+        doc = {"sites": {"null": site},
+               "facilities": {"labs": dict(NULL), "factory": dict(self.FACTORY)}}
+        doc.update(extra)
+        return doc
+
+    def test_override_is_honoured_and_the_default_covers_the_rest(self):
+        site = operation.parse(self.doc({"facilities": {"manufacturing": "Factory"}})).site("null")
+        self.assertEqual("factory", site.facility_for("manufacturing"))
+        for activity in ("invention", "copying", "reaction", "research_time"):
+            self.assertEqual("labs", site.facility_for(activity))
+        self.assertEqual(("labs", "factory"), site.facility_keys())
+
+    def test_facility_keys_lists_each_facility_once(self):
+        site = operation.parse(self.doc({"facilities": {"invention": "labs", "copying": "factory",
+                                                        "manufacturing": "factory"}})).site("null")
+        self.assertEqual(("labs", "factory"), site.facility_keys())
+
+    def test_unknown_activity_or_facility_is_named(self):
+        for overrides, needle in (({"cooking": "factory"}, "cooking"),
+                                  ({"manufacturing": "garage"}, "garage"),
+                                  ("factory", "facilities")):
+            with self.subTest(overrides=overrides), self.assertRaises(operation.OperationError) as ctx:
+                operation.parse(self.doc({"facilities": overrides}))
+            self.assertIn(needle, str(ctx.exception))
+
+    def test_seller_and_pool_holder(self):
+        site = operation.parse(self.doc({"seller": "Dave Miner", "pool_holder": "carol hauler"})).site("null")
+        self.assertEqual(("Dave Miner", "carol hauler"), (site.seller, site.pool_holder))
+        with self.assertRaises(operation.OperationError) as ctx:
+            operation.parse(self.doc({"pool_holder": "Somebody Else"}))
+        self.assertIn("pool_holder", str(ctx.exception))
+        corp = {"sites": {"hq": {"owner": "corp", "facility": "labs", "pool_holder": "Carol Hauler"}},
+                "facilities": {"labs": dict(NULL)}}
+        with self.assertRaises(operation.OperationError):
+            operation.parse(corp)
+
+    def test_planning_and_selling(self):
+        op = operation.parse(self.doc(planning={"timezone": "+02:00", "finish_windows": "08-10,20:30-22",
+                                                "never_build": ["Large Example Rig II"], "t1_copies": "invent"},
+                                      selling={"keep": ["Blueprint", "Skin"]}))
+        self.assertEqual(operation.Planning("+02:00", "08-10,20:30-22", ("Large Example Rig II",), "invent"),
+                         op.planning)
+        self.assertEqual(("Blueprint", "Skin"), op.selling.keep)
+
+    def test_bad_planning_values_are_named(self):
+        for planning, needle in (({"timezone": "Nowhere/Atlantis"}, "planning.timezone"),
+                                 ({"finish_windows": "8 to 10"}, "planning.finish_windows"),
+                                 ({"finish_windows": "10-08"}, "planning.finish_windows"),
+                                 ({"t1_copies": "sell"}, "planning.t1_copies"),
+                                 ({"never_build": "Large Example Rig II"}, "planning.never_build"),
+                                 ({"windows": "08-10"}, "windows")):
+            with self.subTest(planning=planning), self.assertRaises(operation.OperationError) as ctx:
+                operation.parse(self.doc(planning=planning))
+            self.assertIn(needle, str(ctx.exception))
+        with self.assertRaises(operation.OperationError) as ctx:
+            operation.parse(self.doc(selling={"kept": ["Blueprint"]}))
+        self.assertIn("kept", str(ctx.exception))
+
+    def test_a_file_without_the_new_keys_parses_as_before(self):
+        op = operation.parse(self.doc())
+        site = op.site("null")
+        self.assertEqual(({}, None, None), (site.facilities, site.seller, site.pool_holder))
+        self.assertEqual("labs", site.facility_for("manufacturing"))
+        self.assertEqual(operation.Planning(), op.planning)
+        self.assertEqual(operation.Selling(), op.selling)
+
+    def test_show_and_json_report_the_new_keys(self):
+        op = operation.parse(self.doc({"facilities": {"manufacturing": "factory"}, "seller": "Dave Miner"},
+                                      planning={"finish_windows": "08-10"}), "/x/operation.json")
+        text = cmd_operation.operation_text(op)
+        self.assertIn("labs; manufacturing: factory", text)
+        self.assertIn("finish windows 08-10", text)
+        doc = cmd_operation.operation_json(op)
+        self.assertEqual({"manufacturing": "factory"}, doc["sites"]["null"]["facilities"])
+        self.assertEqual("Dave Miner", doc["sites"]["null"]["seller"])
+        self.assertIsNone(doc["sites"]["null"]["pool_holder"])
+        self.assertEqual("both", doc["planning"]["t1_copies"])
+        self.assertEqual({"keep": []}, doc["selling"])
+
+    def test_template_uses_every_new_key(self):
+        op = operation.parse(operation.TEMPLATE)
+        site = op.site("null")
+        self.assertEqual("example-sotiyo", site.facility_for("manufacturing"))
+        self.assertEqual("Carol Hauler", site.pool_holder)
+        self.assertEqual("08-10,20-22", op.planning.finish_windows)
+
+
 class InventedRunLimitTest(unittest.TestCase):
     INVENTION = {"blueprints": {"31719": {"m": {}, "p": [["31725", 1, 0.34]], "t": 1}},
                  "decryptors": {"34203": {"runs": 9, "probability": 0.6, "me": -2, "te": 2},
@@ -157,6 +254,18 @@ class BuildCostFacilityTest(unittest.TestCase):
                                  round(plain["products"][0]["time_seconds"] * 0.5))
         # An explicit flag still wins over the facility.
         self.assertEqual(self.job(["--facility", "lab", "--facility-tax", "2"])["job"]["facility_tax"], 0.02)
+
+    def test_site_costs_the_build_at_its_manufacturing_facility(self):
+        self.write({"facilities": {"lab": {"system": str(SYSTEM_FORGE), "tax_pct": 1.0,
+                                           "time": {"manufacturing": 0.5}},
+                                   "factory": {"system": str(SYSTEM_FORGE), "tax_pct": 0.5,
+                                               "time": {"manufacturing": 0.406}}},
+                    "sites": {"split": {"owner": "personal", "facility": "lab", "characters": ["Ada"],
+                                        "facilities": {"manufacturing": "factory"}}}})
+        site, facility = self.job(["--site", "split"]), self.job(["--facility", "factory"])
+        self.assertEqual("factory", site["job"]["facility"])
+        self.assertEqual(facility["job"], site["job"])
+        self.assertEqual(facility["products"], site["products"])
 
     def test_facility_needs_the_file(self):
         code, _out, err = self.env.run(["build-cost", str(BUILD_ARTICLE), "--facility", "lab"])
@@ -245,3 +354,60 @@ class DashboardSitesTest(unittest.TestCase):
         from eve_skills import cmd_dashboard
         with mock.patch.object(operation, "load", return_value=operation.EMPTY):
             self.assertEqual([(("industry", "status", "--corp"), None)], cmd_dashboard._status_plan())
+
+
+class PlaybookTest(unittest.TestCase):
+    """`operation playbook`: this installation's own rules for the skills, outside the repository."""
+
+    def setUp(self):
+        self.env = FakeEsiEnv()
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.folder = os.path.join(self.env.config_home, "eve-skills", "playbook")
+
+    def run_cli(self, *argv):
+        code, out, err = self.env.run(["operation", "playbook", *argv])
+        self.assertEqual(0, code, err)
+        return out
+
+    def test_without_files_it_says_where_to_create_them(self):
+        out = self.run_cli()
+        self.assertIn("no playbook files in", out)
+        self.assertIn(self.folder, out)
+
+    def test_lists_files_with_their_first_heading(self):
+        os.makedirs(self.folder)
+        with open(os.path.join(self.folder, "industry-jobs.md"), "w", encoding="utf-8") as fh:
+            fh.write("Intro line\n# Industry jobs: our rules\n\n- Install order: biggest first.\n")
+        with open(os.path.join(self.folder, "notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("not a playbook")
+        out = self.run_cli()
+        self.assertIn("industry-jobs", out)
+        self.assertIn("Industry jobs: our rules", out)
+        self.assertNotIn("notes", out)
+
+    def test_prints_one_file_after_its_path(self):
+        os.makedirs(self.folder)
+        path = os.path.join(self.folder, "supply-run.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Supply run\n\nBuy at the cheapest hub.\n")
+        out = self.run_cli("supply-run")
+        first, _, rest = out.partition("\n")
+        self.assertTrue(first.startswith(f"playbook {path} (modified "), first)
+        self.assertIn("Buy at the cheapest hub.", rest)
+        self.assertEqual(path, self.run_cli("supply-run.md", "--path").strip())
+
+    def test_a_missing_file_is_not_an_error(self):
+        out = self.run_cli("market-trip")
+        self.assertEqual(f"no playbook for market-trip (create {os.path.join(self.folder, 'market-trip.md')})",
+                         out.strip())
+
+    def test_the_folder_can_be_moved_and_names_stay_plain(self):
+        other = os.path.join(self.env.config_home, "elsewhere")
+        with mock.patch.dict(os.environ, {"EVE_SKILLS_PLAYBOOK": other}):
+            self.assertEqual(os.path.join(other, "ops-check.md"), self.run_cli("ops-check", "--path").strip())
+        code, _out, err = self.env.run(["operation", "playbook", "../tokens"])
+        self.assertNotEqual(0, code)
+        self.assertIn("plain file name", err)
+        code, _out, err = self.env.run(["operation", "show", "industry-jobs"])
+        self.assertNotEqual(0, code)

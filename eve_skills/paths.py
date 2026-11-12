@@ -110,6 +110,16 @@ def config_dir(create: bool = True) -> str:
     return _resolve("config", create)
 
 
+def playbook_dir() -> str:
+    """This installation's own rules for the agent skills, one Markdown file per skill:
+    ``<config_dir>/playbook``, or ``$EVE_SKILLS_PLAYBOOK``. Never created here - it only exists once
+    somebody writes a playbook, and it lives outside any repository so it cannot be committed."""
+    override = os.environ.get("EVE_SKILLS_PLAYBOOK")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(config_dir(create=False), "playbook")
+
+
 def cache_dir(create: bool = True) -> str:
     """Regenerable caches (SSO endpoints, id-to-name lookups):
     ``$XDG_CACHE_HOME/eve-skills`` on POSIX, ``%LOCALAPPDATA%\\eve-skills\\cache``."""

@@ -733,6 +733,9 @@ class FakeEsiEnv:
         self._patchers.append(mock.patch.object(esi.urllib.request, "urlopen", self.server))
         for patcher in self._patchers:
             patcher.start()
+        # A developer's own overrides must not reach the tests (patch.dict restores them on stop).
+        for name in ("EVE_SKILLS_OPERATION", "EVE_SKILLS_PLAYBOOK"):
+            os.environ.pop(name, None)
         os.makedirs(os.path.join(self.config_home, "eve-skills"), exist_ok=True)
         # Ada consented to everything; Vela only to the base skills scopes - every
         # optional command must degrade to a hint for her rather than fail.

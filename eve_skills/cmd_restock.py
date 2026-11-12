@@ -14,6 +14,11 @@ file) has no shared hangar: every character listed for it holds their own stock 
 stock is read per character, and a line or invention assigned to a character (`...@NAME`) is supplied
 from that character's own hangar first and then by **transfers** from the others - the trades to make
 before installing. With a freight route configured, the haul is priced as a courier contract.
+
+A personal site may build in one facility and invent in another (`sites.NAME.facilities`). Without
+`--at`, build lines are then netted against stock at the manufacturing facility and `--invent` lines
+against stock at the invention facility; what a site character holds at the other one is not bought
+but listed as a move between the site's facilities.
 """
 
 from __future__ import annotations
@@ -144,7 +149,18 @@ def personal_stock(client, characters, wanted: set[int], at_id: int,
     Returns ({character: Counter}, pickup Counter, notes). A character that is not stored, did not
     grant the assets consent, or is refused by ESI is named in the notes and counted as holding
     nothing - never silently, because their stock is then bought again."""
-    holdings: dict[str, Counter] = {}
+    by_station, pickup, notes = personal_stock_at(client, characters, wanted, (at_id,), hub_id)
+    return by_station[at_id], pickup, notes
+
+
+def personal_stock_at(client, characters, wanted: set[int], at_ids, hub_id: int | None
+                      ) -> tuple[dict[int, dict[str, Counter]], Counter, list[str]]:
+    """`personal_stock` for several facilities, reading each character's assets once.
+
+    Returns ({station id: {character: Counter}}, pickup Counter, notes); every readable character has
+    an entry (possibly empty) at every station."""
+    at_ids = tuple(dict.fromkeys(at_ids))
+    by_station: dict[int, dict[str, Counter]] = {at: {} for at in at_ids}
     pickup: Counter = Counter()
     notes: list[str] = []
     missing: list[str] = []
@@ -165,26 +181,27 @@ def personal_stock(client, characters, wanted: set[int], at_id: int,
         except esi_mod.EsiError as err:
             missing.append(f"{name} (ESI refused personal assets: {err})")
             continue
-        stock: Counter = Counter()
+        stocks = {at: Counter() for at in at_ids}
         roots = _roots(assets)
         for asset in assets:
             type_id = int(asset["type_id"])
             if type_id not in wanted or int(asset.get("quantity", 0)) <= 0:
                 continue
             root = roots.get(int(asset["location_id"]), int(asset["location_id"]))
-            if root == at_id:
-                stock[type_id] += int(asset["quantity"])
+            if root in stocks:
+                stocks[root][type_id] += int(asset["quantity"])
             elif hub_id is not None and root == hub_id:
                 pickup[type_id] += int(asset["quantity"])
                 if name not in at_hub:
                     at_hub.append(name)
-        holdings[name] = stock
+        for at in at_ids:
+            by_station[at][name] = stocks[at]
         notes.append(freshness.line(f"{name}'s assets", meta))
     if missing:
         notes.append("not read, so their stock is not counted: " + "; ".join(missing))
     if at_hub:
         notes.append(f"pick-ups at the hub are held by {', '.join(at_hub)}")
-    return holdings, pickup, notes
+    return by_station, pickup, notes
 
 
 def plan_transfers(demands: list[Demand], holdings: dict[str, Counter]) -> tuple[list[dict], dict[str, Counter]]:
@@ -313,8 +330,15 @@ def cmd_restock(args):
         raise RuntimeError("no local blueprint data - run: eve-skills update-data") from None
     op = operation.load()
     site = op.site(args.site) if (args.site or (op.configured and not args.at)) else None
-    facility = op.facility(site.facility) if site else None
+    if site is not None and site.owner == "corp" and site.facilities and not args.at:
+        raise RuntimeError(f"site {site.name} names a facility per activity, which is not supported for a "
+                           f"corp site - pass --at with the station or structure to read")
+    facility = op.facility(site.facility_for("manufacturing")) if site else None
     personal = site is not None and site.owner == "personal"
+    # A personal site that invents somewhere else than it builds: two stock locations (no --at).
+    invent_facility = (op.facility(site.facility_for("invention"))
+                       if personal and not args.at and site.facility_for("invention") != facility.name else None)
+    split = invent_facility is not None
     material_multiplier = facility.material_multiplier("manufacturing") if facility else 1.0
     notes_pre: list[str] = []
     if personal:
@@ -340,6 +364,16 @@ def cmd_restock(args):
         at_id, at_name = facility.location_id, f"{facility.name} ({facility.system or facility.location_id})"
     else:
         raise RuntimeError("name the build station with --at, or a site of the operation file with --site")
+    inv_id = inv_name = None
+    if split:
+        if invent_facility.location_id is None:
+            raise RuntimeError(f"facility {invent_facility.name} (where site {site.name} invents) has no "
+                               f"location_id in the operation file - fill it in, or pass --at")
+        inv_id = invent_facility.location_id
+        inv_name = f"{invent_facility.name} ({invent_facility.system or inv_id})"
+    labels = {at_id: (facility.label or at_name) if facility is not None else at_name}
+    if split:
+        labels[inv_id] = invent_facility.label or inv_name
 
     # ---- demand
     demands: list[Demand] = []
@@ -395,17 +429,27 @@ def cmd_restock(args):
 
     # ---- stock
     usable, pickup, move = Counter(), Counter(), Counter()
-    holdings: dict[str, Counter] = {}       # personal site: character -> stock in the facility
+    holdings: dict[str, Counter] = {}       # personal site: character -> stock in the (build) facility
+    by_station: dict[int, dict[str, Counter]] = {}
+    stock_at: dict[int, Counter] = {}       # split site: station -> site stock left to allocate
     systems: dict[int, int | None] = {}
     at_system = _station_system(client, at_id, systems)
     notes = list(notes_pre)
     if personal:
-        holdings, picked, read_notes = personal_stock(client, site.characters, wanted, at_id, hub.location_id)
+        stations = (at_id, inv_id) if split else (at_id,)
+        by_station, picked, read_notes = personal_stock_at(client, site.characters, wanted, stations,
+                                                           hub.location_id)
+        holdings = by_station[at_id]
         for stock in holdings.values():
             usable.update(stock)
+        if split:
+            for station in stations:
+                stock_at[station] = Counter()
+                for stock in by_station[station].values():
+                    stock_at[station].update(stock)
         pickup.update(picked)
         notes += read_notes
-        known = {name.lower() for name in holdings}
+        known = {name.lower() for name in holdings}   # every readable character has an entry
         for d in demands:
             if d.builder and d.builder.lower() not in known:
                 raise RuntimeError(f"{d.label}: {d.builder} is not a readable character of site {site.name} "
@@ -454,6 +498,8 @@ def cmd_restock(args):
         notes.append(f"{hname}'s personal hangars counted: at {hub.label} as pick-ups, elsewhere in "
                      f"{at_name.split(' ')[0]}'s system as moves into the corporation hangar")
     held = usable + pickup + move     # before the allocation spends them: what we own, for the price check
+    if split:
+        held += stock_at[inv_id]
 
     # ---- prices and volumes
     figures = market.book_figures(client, sorted(wanted), hub)
@@ -467,12 +513,25 @@ def cmd_restock(args):
     # ---- allocation
     remaining = args.cargo if args.cargo is not None else math.inf
 
+    def home_of(d: Demand) -> tuple[int, int]:
+        """(station whose stock the demand uses, the other site facility) on a split site."""
+        return (inv_id, at_id) if d.kind == "invent" else (at_id, inv_id)
+
     def need_for(d: Demand, units: int) -> dict[int, dict]:
         out = {}
         for tid, per in d.per_unit.items():
             want = math.ceil(per * units - 1e-9)
             if d.kind == "extra":
                 out[tid] = {"need": want, "usable": 0, "pickup": 0, "move": 0, "buy": want}
+                continue
+            if split:
+                home, other = home_of(d)
+                a = min(stock_at[home][tid], want)
+                b = min(pickup[tid], want - a)
+                s = min(stock_at[other][tid], want - a - b)   # at the site's other facility: move it
+                c = min(move[tid], want - a - b - s)
+                out[tid] = {"need": want, "usable": a, "pickup": b, "move": s + c, "buy": want - a - b - s - c,
+                            "site_move": s}
                 continue
             a = min(usable[tid], want)
             b = min(pickup[tid], want - a)
@@ -501,15 +560,24 @@ def cmd_restock(args):
             d.fit = d.units
         d.need = n
         for t, r in n.items():
-            usable[t] -= r["usable"]
+            if split and d.kind != "extra":
+                home, other = home_of(d)
+                stock_at[home][t] -= r["usable"]
+                stock_at[other][t] -= r["site_move"]
+                move[t] -= r["move"] - r["site_move"]
+            else:
+                usable[t] -= r["usable"]
+                move[t] -= r["move"]
             pickup[t] -= r["pickup"]
-            move[t] -= r["move"]
         remaining -= haul(n)
 
     totals: dict[int, Counter] = {}
+    site_moves: Counter = Counter()          # (type id, from station) -> units moved between site facilities
     for d in ordered:
         for t, r in d.need.items():
             totals.setdefault(t, Counter()).update(r)
+            if r.get("site_move"):
+                site_moves[(t, home_of(d)[1])] += r["site_move"]
     names = esi_mod.resolve_names(client, set(totals))
     rows = []
     for t, r in totals.items():
@@ -525,7 +593,30 @@ def cmd_restock(args):
         notes.append(f"no sell order at {hub.label} for: {', '.join(unpriced)} - their cost is left out")
     total_m3 = sum(r["haul_m3"] for r in rows)
     total_isk = sum(r["buy_isk"] or 0 for r in rows)
-    transfers, deliveries = (plan_transfers(ordered, holdings) if personal else ([], {}))
+    if split:
+        # Transfers happen where each job is installed: builds at the factory, inventions at the lab.
+        transfers, deliveries = plan_transfers([d for d in ordered if d.kind != "invent"], holdings)
+        inv_transfers, inv_deliveries = plan_transfers([d for d in ordered if d.kind == "invent"],
+                                                       by_station[inv_id])
+        for item in transfers:
+            item["at"] = labels[at_id]
+        for item in inv_transfers:
+            item["at"] = labels[inv_id]
+        transfers += inv_transfers
+        for who, items in inv_deliveries.items():
+            deliveries.setdefault(who, Counter()).update(items)
+        for (t, station), qty in sorted(site_moves.items()):
+            left, holders = qty, []
+            for who, stock in sorted(by_station[station].items(), key=lambda kv: (-kv[1][t], kv[0])):
+                if left <= 0 or stock[t] <= 0:
+                    break
+                take = min(stock[t], left)
+                holders.append(f"{who} {take:,}")
+                left -= take
+            notes.append(f"move between site facilities: {names.get(t) or f'type {t}'} {qty:,} at "
+                         f"{labels[station]}, held by {', '.join(holders) or 'nobody readable'}")
+    else:
+        transfers, deliveries = (plan_transfers(ordered, holdings) if personal else ([], {}))
     for item in transfers:
         item["name"] = names.get(item["type_id"]) or f"type {item['type_id']}"
     for who, items in deliveries.items():
@@ -559,6 +650,11 @@ def cmd_restock(args):
            "site": site.name if site else None, "owner": site.owner if site else "corp",
            "holdings": {k: {str(t): q for t, q in v.items()} for k, v in holdings.items()},
            "transfers": transfers, "deliveries": deliveries, "freight": freight}
+    if split:
+        doc["stations"] = {"manufacturing": {"id": at_id, "name": at_name},
+                           "invention": {"id": inv_id, "name": inv_name}}
+        doc["holdings_by_station"] = {str(station): {k: {str(t): q for t, q in v.items()} for k, v in chars.items()}
+                                      for station, chars in by_station.items()}
     if args.json:
         for line in hints:
             print(line, file=sys.stderr)
@@ -584,11 +680,13 @@ def cmd_restock(args):
         lines += ["", f"already ours at {hub.label} - pick up:"] + [f"  {r['name']} {r['pickup']:,}" for r in picks]
     moves = [r for r in rows if r["move"]]
     if moves:
-        lines += ["", "in personal hangars nearby - move into the corporation hangar:"] + \
+        lines += ["", ("at the site's other facility or in personal hangars nearby - move it:" if split else
+                       "in personal hangars nearby - move into the corporation hangar:")] + \
                  [f"  {r['name']} {r['move']:,}" for r in moves]
     if transfers:
         lines += ["", "transfers before installing (trade window, in the facility):"] + \
-                 [f"  {t['from']} -> {t['to']}: {t['name']} {t['quantity']:,}" for t in transfers]
+                 [f"  {t['from']} -> {t['to']}: {t['name']} {t['quantity']:,}"
+                  + (f" (at {t['at']})" if t.get("at") else "") for t in transfers]
     if deliveries:
         lines += ["", "hand the haul to the installers:"] + \
                  [f"  {who}: " + ", ".join(f"{n} {q:,}" for n, q in sorted(items.items()))
@@ -605,7 +703,9 @@ def cmd_restock(args):
         blocks.append(price_check_text(check, rows))
     blocks.append("\n".join(f"* {n}" for n in notes + [
         "materials are direct inputs only: a component you build yourself is its own line",
-        ("on site = every site character's own hangars in the facility; transfers move it to the "
+        (f"on site = every site character's own hangars where the job runs (builds: {labels[at_id]}, "
+         f"inventions: {labels[inv_id]}); transfers move it to the character installing each line" if split else
+         "on site = every site character's own hangars in the facility; transfers move it to the "
          "character installing each line" if personal else
          "on site = the corporation's hangars at the build station")
         + "; extras are bought in full"]))

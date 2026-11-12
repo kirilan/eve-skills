@@ -318,7 +318,7 @@ def cmd_can_build(args):
         from . import operation
         op = operation.load()
         site = op.site(args.site)
-        facility = op.facility(site.facility)
+        facility = op.facility(site.facility_for("manufacturing"))   # stock where the site builds
         if site.owner == "corp":
             args.corp = True
             if not args.char and site.readers:

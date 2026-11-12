@@ -555,6 +555,7 @@ eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
 eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Helsinki --start 09:30
                                       # measured hours per run, and run counts ending in those windows
+eve-skills jobs --times --site null   # hours per run where an operation-file site does each activity
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
 ```
@@ -590,6 +591,18 @@ by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `E
 follows daylight saving, or a fixed offset such as `+03:00` / `UTC+3`, which does not (default UTC).
 IANA names need a time zone database: Linux and macOS have one, Windows does not unless the optional
 `tzdata` package is installed (`pip install tzdata`) - without it, use the offset. `--times` has no `--group` or `--csv` form.
+
+`--times --site NAME` answers "how long does a run take where this site does that activity", for a site
+of the operation file whose activities may run in different facilities (`sites.NAME.facilities`). It
+reads the site's characters (a corp site: the corporation, through its first reader). Per activity,
+product and installer it reports the median measured at the site's facility for that activity. Without
+such jobs it converts the median from another facility of the operation file that has a `location_id`:
+hours x that activity's time multiplier at the site's facility / the one at the source (the source with
+the most jobs wins); the table marks those `~` and `--json` names the source in `scaled_from` (`null` when
+measured in place). A product measured only somewhere the file does not know is not scaled at all: its
+rigs are unknown, so the row is left out and listed under "no time" (`unscaled` in `--json`). A site
+facility without a `location_id` is an error. Window fits use the final hours. `--site` and `--facility`
+do not combine.
 
 Corporation `jobs`, `blueprints`, and `inventory` output reports the ESI document's
 `Last-Modified` and `Expires` times as an “as of / next refresh” line. JSON carries the two ISO
@@ -878,6 +891,16 @@ and the last line that does not fit is cut to the units that do (stock on site c
 free, so the cut is searched, not scaled). The text ends with a Multibuy block, the pick-ups, the moves
 and what the trip leaves out; `--json` has every line and material with its volume and ISK.
 
+**A personal site with a facility per activity** (`sites.NAME.facilities`, see `operation`): without
+`--at`, build lines are netted against the site characters' stock at the manufacturing facility and
+`--invent` lines against their stock at the invention facility; each character's assets are read once.
+What a site character holds at the *other* facility is not bought: it goes to `move`, with a note line
+`move between site facilities: ITEM QTY at FACILITY, held by CHARACTER QTY`. Transfers are planned where
+each job is installed and carry the facility (`at`). `--json` keeps `build_station` (the manufacturing
+facility) and `holdings` (stock there), and adds `stations` (`manufacturing` and `invention`, id and name)
+and `holdings_by_station` (`{station id: {character: {type id: qty}}}`). With `--at`, one location covers
+everything, as before. A corp site with per-activity facilities needs `--at`.
+
 **Price check.** Every material the trip buys is then judged by the `prices` dip rule from the buyer's
 side: the hub's lowest ask against the median daily average of the hub's region over 30 days (ESI history,
 read live; `--no-price-check` skips it). A **dip** (two spreads under normal, and not low for the whole
@@ -901,6 +924,7 @@ where a command asks for them). Print a starting point and check what is filled 
 ```bash
 eve-skills operation template > ~/.config/eve-skills/operation.json   # then edit it
 eve-skills operation show                                             # flags values still unknown
+eve-skills operation playbook                                         # this installation's own rules
 ```
 
 - **Sites** name a facility plus the characters working it. `owner: corp` keeps stock in the
@@ -909,6 +933,14 @@ eve-skills operation show                                             # flags va
   installs from their own hangar, and materials move between them by trade. One operation can have both,
   for example a high-sec corporation and a null-sec structure during a move. `default_site` is what
   commands use when no `--site` is given.
+- **A facility per activity:** `facility` is where a site runs everything; `facilities` names another
+  facility for single activities, e.g. `"facilities": {"manufacturing": "example-sotiyo"}` for a site that
+  invents in one structure and builds in the next system. Keys are `manufacturing`, `reaction`,
+  `invention`, `copying`, `research_material`, `research_time`; values are facility keys.
+  `operation show` prints such a site's facility as `example-raitaru; manufacturing: example-sotiyo`.
+- **Who sells and who holds the stock:** a site's optional `seller` is the character who lists its goods;
+  `pool_holder` (personal sites only, one of its `characters`) is the character who holds the shared
+  stock that builders take turns with.
 - **Facilities** carry the system, the structure's `location_id`, the owner's `tax_pct`, and the material
   and time bonuses. Either state them (`material` and `time` per activity, as multipliers) or derive them
   from what you know about the structure: `"structure": "raitaru"`, `"security": "null"`,
@@ -925,16 +957,30 @@ eve-skills operation show                                             # flags va
   names the fix, never an empty book.
 - **Freight** routes (`"jita->x-hub"`) price a courier contract: `per_m3`, `collateral_pct` and `min`.
   A site's `freight_in` and `freight_out` name the routes its supplies and products travel.
+- **Planning and selling settings** (all optional, for planners and selling helpers):
+  `"planning": {"timezone": "Europe/Helsinki", "finish_windows": "08-10,20-22", "never_build": [...],
+  "t1_copies": "invent"}` (`t1_copies`: what a T1 copy is usually for, `invent`, `build` or `both`, the
+  default) and `"selling": {"keep": [...]}` (parts of item names never offered for sale). A bad time zone
+  or window range, or an unknown key, is an error naming the field. Facilities may also carry a `label`
+  (the structure's in-game name), used in messages.
+
+**Playbook.** The agent skills hold workflows that suit any operation; an installation's own rules (who
+builds what, which lines, past decisions) are plain Markdown files outside the repository, one per skill,
+in `<config dir>/playbook/` (or `$EVE_SKILLS_PLAYBOOK`), where they cannot be committed by accident.
+`eve-skills operation playbook` lists them with their first heading, size and date (or says where to
+create one); `operation playbook NAME` prints `NAME.md` after a line with its path and date, and a missing
+file is one line, not an error; `--path` prints only the path.
 
 Commands that use the file:
 
 | Command | What it does with the file |
 |---|---|
-| `build-cost --facility NAME` / `--site NAME` | Cost the job there: the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
+| `build-cost --facility NAME` / `--site NAME` | Cost the job there (a site: its `manufacturing` facility): the system's index, the tax, the material bonus, and job time with the time bonus. Explicit `--system`, `--facility-tax` and `--material-multiplier` still win. Build lines may also ask for the runs an invented T2 copy holds (10 on a rig copy invented with Augmentation), not only the T2 blueprint's own limit. |
 | `market --hub KEY`, `build-cost --hub/--sell-at KEY` | Price at a configured hub, including a structure. |
-| `restock --site NAME` | Build at the site's facility. On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
-| `can-build --site NAME` | Applies the facility's material bonus. On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
+| `restock --site NAME` | Build at the site's manufacturing facility (inventions at its invention facility). On a personal site, stock is read per character; `PRODUCT=UNITS[:ME[:RUNS]]@CHAR` and `--invent ...@CHAR` assign the installer. Output lists the **transfers** that supply each installer, what to hand them from the haul, and the courier cost on `freight_in` (or `--freight ROUTE`). |
+| `can-build --site NAME` | Applies the material bonus of the facility where the site builds (its `manufacturing` facility). On a personal site it adds `with trades`, the jobs possible once other site characters hand over what they hold there, and the trades that make them possible. |
 | `jobs --times [--facility NAME]` | Median hours per run are always kept per facility, so a structure's rigged times never mix with NPC-station history. |
+| `jobs --times --site NAME` | Hours per run where the site does each activity (`facilities` per activity), converting times measured at another facility of the file by the time multipliers and never scaling from an unknown one. |
 | `dashboard` | Reads industry status for every site: a corp site through its reader, a personal site from its characters' own snapshots. |
 | `ledger sync` | Reports a corporation that refuses every section on roles (building in someone else's corporation) as one expected line. The members' personal jobs, orders and wallets are booked as before. |
 
