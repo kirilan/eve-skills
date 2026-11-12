@@ -47,7 +47,12 @@ DEFAULT_SETTINGS = {
     "timezone": "UTC",
     "job_alerts": True,            # industry jobs ending soon, then in the reminder until delivered
     "job_notice_minutes": 20,
+    # On top of the per-job alerts (`job_alerts.py`): a summary at the start of each finish window, and
+    # job news held back while more of the same site is about to finish. `windows: null` = the operation
+    # file's planning.finish_windows (none there: no summaries).
+    "jobs": {"enabled": True, "windows": None, "batch_minutes": 45, "max_wait_minutes": 90},
 }
+JOB_DEFAULTS = DEFAULT_SETTINGS["jobs"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,10 @@ class Settings:
     timezone: str = "UTC"
     job_alerts: bool = True
     job_notice_minutes: float = 20
+    jobs_enabled: bool = True             # window summary and batching (job_alerts.py)
+    jobs_windows: str | None = None       # None: the operation file's planning.finish_windows
+    batch_minutes: float = 45
+    max_wait_minutes: float = 90
 
     def excluded_character(self, name) -> bool:
         return str(name or "").casefold() in {n.casefold() for n in self.exclude_characters}
@@ -108,10 +117,34 @@ def parse_settings(doc: dict) -> Settings:
         job_times.zone(zone_name)       # an IANA name, or a fixed offset such as +02:00
     except RuntimeError as err:
         raise RuntimeError(f"alerts.json: timezone: {err}") from None
+    jobs = merged.get("jobs") if merged.get("jobs") is not None else {}
+    if not isinstance(jobs, dict):
+        raise RuntimeError("alerts.json: jobs must be an object such as {\"enabled\": true}")
+    unknown = sorted(set(jobs) - set(JOB_DEFAULTS))
+    if unknown:
+        raise RuntimeError(f"alerts.json: jobs: unknown key {unknown[0]!r} (known: {', '.join(JOB_DEFAULTS)})")
+    jobs = {**JOB_DEFAULTS, **jobs}
+    windows = jobs.get("windows")
+    if windows is not None:
+        if not isinstance(windows, str):
+            raise RuntimeError("alerts.json: jobs.windows must be a string such as \"08-10,20-22\" (or null)")
+        windows = windows.strip()
+        if windows:
+            try:
+                job_times.parse_windows(windows)
+            except RuntimeError as err:
+                raise RuntimeError(f"alerts.json: jobs.windows: {str(err).replace('--finish-window ', '')}") from None
+    minutes = {}
+    for key in ("batch_minutes", "max_wait_minutes"):
+        try:
+            minutes[key] = float(jobs.get(key) or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"alerts.json: jobs.{key} must be a number of minutes") from None
     return Settings(tuple(str(x) for x in merged.get("exclude_locations") or []),
                     tuple(str(x) for x in merged.get("exclude_characters") or []),
                     remind, start, end, zone_name,
-                    bool(merged.get("job_alerts")), notice)
+                    bool(merged.get("job_alerts")), notice,
+                    bool(jobs.get("enabled")), windows, minutes["batch_minutes"], minutes["max_wait_minutes"])
 
 
 def settings_path() -> str:

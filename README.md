@@ -1244,17 +1244,30 @@ what is new since the last run:
   behind, on the same `remind_hours` clock. A delivered job leaves the character's job list and is
   dropped without a message; a paused job is not news. Jobs come from each character's own job list,
   which includes the jobs it installed for its corporation.
+- **Window summary**, once per finish window, on the first run inside it: the jobs ready to deliver per
+  character, the free manufacturing and science slots per character, and the jobs still ending inside
+  the window. It is sent only when something is ready or a slot is free, and the jobs it lists count as
+  announced. The windows are `jobs.windows` in `alerts.json`, else the operation file's
+  `planning.finish_windows`; with neither there are no summaries. Slots are read only on that run.
+- **Batching:** jobs finish one by one over an hour or two, so a job due for its "Job ending / Job done"
+  line is held back while another job of the same site (the operation file's sites; everyone is one site
+  without one) ends within `jobs.batch_minutes` (default 45), unless the oldest held job has waited
+  `jobs.max_wait_minutes` (default 90). Then the whole site goes out in one message. In quiet hours no
+  job news is sent at all; the next window summary covers the night. A failed jobs read skips the
+  summary and the batching for that run (the per-job lines work as before).
 
 Settings live in `alerts.json` in the config directory, written with the defaults on first use:
 `exclude_locations` (case-insensitive parts of a station name, e.g. `"Z-EXCL"`), `exclude_characters`,
 `remind_hours` (default 4; 0 = no reminders), `job_alerts` (default `true`), `job_notice_minutes`
-(default 20; the timer runs every 20 minutes, so a shorter notice can miss straight to "done"), `quiet_hours` (default `"00:00-08:00"`; messages then arrive
-silently) and `timezone` (default `UTC`; an IANA name needs a time zone database, which Windows only has with
+(default 20; the timer runs every 20 minutes, so a shorter notice can miss straight to "done"),
+`jobs` (default `{"enabled": true, "windows": null, "batch_minutes": 45, "max_wait_minutes": 90}`: the
+window summary and batching; `enabled: false` turns both off), `quiet_hours` (default `"00:00-08:00"`;
+messages then arrive silently, and job news waits for the morning) and `timezone` (default `UTC`; an IANA name needs a time zone database, which Windows only has with
 `pip install tzdata`, otherwise use a fixed offset such as `+02:00`, which ignores daylight saving). Excluded orders are never checked, which also saves
 their ESI calls. The bot token and chat id are in `telegram.json` in the config directory, owner-only.
 The token is read from a file or stdin, never from the command line, and no error message contains it.
-State (`order-alerts.json`, state directory) is saved only after Telegram accepted the message, so a
-failed send is retried by the next run. An owner whose order book or history could not be read keeps its
+State (`order-alerts.json` and `job-alerts.json`, state directory) is saved only after Telegram accepted
+the message, so a failed send is retried by the next run. An owner whose order book or history could not be read keeps its
 orders as they were: a failed read never reads as "filled".
 
 ```bash
