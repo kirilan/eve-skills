@@ -379,5 +379,110 @@ class JobBoardWithoutOperationFileTests(unittest.TestCase):
         self.assertIn("no site 'moon'", str(caught.exception.code))
 
 
+# --- selling scripts -------------------------------------------------------------------------------------
+
+def book(name: str, sells: list[tuple[int, float, int]], per_day: float = 50) -> dict:
+    return {"type_id": 3, "name": name, "reference": None, "scopes": [{
+        "scope": "jita", "last_modified": iso(-0.1), "sales_tax_pct": 4.0, "broker_fee_pct": 1.5,
+        "history": {"volume_per_day": per_day, "average_price": 1_000_000.0},
+        "depth": {"sell": [{"order_id": oid, "price": price, "volume": volume} for oid, price, volume in sells],
+                  "buy": []}}]}
+
+
+def selling_routes(op: dict) -> dict:
+    return {
+        ("operation",): op,
+        ("orders",): {"orders": [{"order_id": 500, "is_buy": False, "location_name": "Jita IV - Moon 4",
+                                  "type_name": "Small Auxiliary Thrusters II", "volume_remain": 9,
+                                  "volume_total": 10}]},
+        ("prices", "signal"): {"prices_synced": iso(-1), "items": [
+            {"type": "Medium Auxiliary Thrusters II", "state": "high", "deviation_pct": 12.0, "normal": 2e6,
+             "hold_cap": None, "reason": "above normal"}]},
+        ("ledger", "inventory"): {"items": [
+            {"type_name": "Small Auxiliary Thrusters II", "class": "finished", "held": 5, "in_sell_orders": 9,
+             "unit_cost": 500_000.0, "market_value": 5e6},
+            {"type_name": "Medium Auxiliary Thrusters II", "class": "finished", "held": 3, "in_sell_orders": 0,
+             "unit_cost": 1_500_000.0, "market_value": 6e6},
+            {"type_name": "Datacore - Example Physics", "class": "finished", "held": 20, "in_sell_orders": 0,
+             "unit_cost": 90_000.0, "market_value": 2e6},
+            {"type_name": "Small Anti-EM Pump I", "class": "finished", "held": 4, "in_sell_orders": 0,
+             "unit_cost": 10_000.0, "market_value": 1e5}]},
+        ("inventory",): inventory(item("Medium Auxiliary Thrusters II", 3, FACTORY)),
+        ("sell-plan",): {"items": [{"type": "Medium Auxiliary Thrusters II", "packaged_m3": 10.0}]},
+        ("market",): lambda args: {"types": [
+            book(name, [(500, 900_000.0, 9), (501, 1_000_000.0, 40)] if name.startswith("Small")
+                 else [(502, 2_200_000.0, 30)])
+            for name in args[1:] if not name.startswith("--") and not name.replace(".", "").isdigit()
+            and name not in ("jita", "30")]},
+    }
+
+
+class UnlistedGoodsTests(unittest.TestCase):
+    def setUp(self):
+        self.script = load("market-trip/unlisted_goods.py")
+
+    def test_personal_site_seller_keep_list_and_one_listing_rule(self):
+        self.script.cli = cli = FakeCli(selling_routes(PERSONAL_OP))
+        out, _ = run(self.script, ["--json"])
+        report = json.loads(out)
+        self.assertEqual(report["seller"], "Carol Hauler")           # the default site's seller
+        self.assertEqual(report["keep"], ["Datacore"])
+        names = {r["type"]: r for r in report["unlisted"]}
+        self.assertNotIn("Datacore - Example Physics", names)        # selling.keep, case aside
+        self.assertNotIn("Small Anti-EM Pump I", names)              # T1 left out by default
+        self.assertEqual(names["Small Auxiliary Thrusters II"]["blocking_orders"], 1)  # HOLD
+        medium = names["Medium Auxiliary Thrusters II"]
+        self.assertEqual(medium["state"], "high")
+        self.assertEqual(medium["suggest"], 2_199_000.0)
+        sell_plan = cli.called("sell-plan")[0]
+        self.assertEqual(sell_plan[sell_plan.index("--from") + 1], "X-EXMPL")
+        self.assertEqual({c[2] for c in cli.called("inventory", "--char")},
+                         {"Alice Builder", "Bob Inventor", "Carol Hauler"})
+
+    def test_text_says_when_nothing_is_kept_back(self):
+        op = dict(CORP_OP, sites={"corp": site("corp", "office", readers=["Carol Hauler"], seller="Carol Hauler")})
+        self.script.cli = cli = FakeCli(selling_routes(op))
+        out, _ = run(self.script, [])
+        self.assertIn("nothing - selling.keep is not set", out)
+        self.assertIn("HOLD: already 1 jita order(s)", out)
+        self.assertIn("Datacore - Example Physics", out)              # no keep list: offered for sale
+        self.assertEqual(cli.called("inventory", "--corp")[0][:4], ("inventory", "--corp", "--char", "Carol Hauler"))
+
+    def test_corp_site_without_seller_needs_the_flag(self):
+        self.script.cli = FakeCli(selling_routes(CORP_OP))
+        with self.assertRaises(SystemExit) as caught:
+            run(self.script, [])
+        self.assertIn("--seller", str(caught.exception.code))
+        self.script.cli = FakeCli(selling_routes(NO_OP))
+        with self.assertRaises(SystemExit) as caught:
+            run(self.script, ["--seller", "Carol Hauler"])
+        self.assertIn("--from", str(caught.exception.code))
+        self.script.cli = FakeCli(selling_routes(NO_OP))
+        out, _ = run(self.script, ["--seller", "Carol Hauler", "--from", "Jita", "--json"])
+        self.assertEqual(json.loads(out)["seller"], "Carol Hauler")
+
+
+class PriceSellTests(unittest.TestCase):
+    def setUp(self):
+        self.script = load("bulk-sell-pricing/price_sell.py")
+
+    def test_seller_from_the_operation_file_and_own_orders_left_out(self):
+        self.script.cli = cli = FakeCli(selling_routes(PERSONAL_OP))
+        out, err = run(self.script, ["Small Auxiliary Thrusters II=20"])
+        # our own order at 900k is not the floor; the next one at 1.0M is (four significant digits)
+        self.assertEqual(out.strip(), "Small Auxiliary Thrusters II\t999000.00")
+        self.assertIn("ours (left out): 9@900,000", err)
+        self.assertTrue(all(c[2] == "Carol Hauler" for c in cli.called("orders")))
+
+    def test_without_a_seller_the_flag_is_required(self):
+        self.script.cli = FakeCli(selling_routes(CORP_OP))
+        with self.assertRaises(SystemExit) as caught:
+            run(self.script, ["Small Auxiliary Thrusters II=20"])
+        self.assertIn("--seller", str(caught.exception.code))
+        self.script.cli = FakeCli(selling_routes(CORP_OP))
+        out, _ = run(self.script, ["Small Auxiliary Thrusters II=20", "--seller", "Carol Hauler"])
+        self.assertTrue(out.startswith("Small Auxiliary Thrusters II\t"))
+
+
 if __name__ == "__main__":
     unittest.main()
