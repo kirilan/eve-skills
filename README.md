@@ -111,6 +111,7 @@ Run `eve-skills <command> --help` for any command's options; [What it shows](#wh
 | `pi` | Planetary industry off the local SDE: `chain` — one product's whole recipe tree with per-step price, value added per facility-hour and an optional customs column; `fit` — a colony layout against its command-centre budget and how many extractor heads still fit; `planet-type` — what one planet yields and everything it can refine with no imports | no — `chain` reads public order books; `fit` and `planet-type` need no network at all, and recipes, fitting costs and customs values come from local SDE data (`update-data`) |
 | `colonies` | Live planetary industry per character: every colony with its planet type, command-centre level, pin count and how old ESI's view of it is; `--detail` adds each extractor with what it produces and when the programmed run ends, plus every facility running a schematic | `--scopes planets` |
 | `system` | One row per solar system: true security status and the figure the client shows, highsec/lowsec/nullsec, region, planet types with counts, and jumps to a hub with `--route HUB`; several systems at once | no — public ESI; the planet breakdown comes from local SDE data (`update-data`) |
+| `types` | Type id, exact name, group, category and packaged m3 for item names or ids; `-` reads a pasted list (`name<TAB>qty`) and adds an m3 total | no — public ESI; the type catalogue is cached on disk |
 | `chars` | Stored characters, access-token time left, auto-refresh availability | offline (no network) |
 | `events` | Recorded watch alerts: training finished / queue emptied / your orders filled, expired or cancelled / an extraction finished | offline (no network) |
 | `standings` | Agent / NPC corp / faction standings | `--scopes standings` |
@@ -1833,6 +1834,22 @@ travel as the `hints`, `warnings` and `notices` arrays. `--csv` follows the flag
 one row per extractor with `--detail`, where the colony columns repeat so every row says where that extractor
 stands and a colony without one keeps its row with those cells empty. A colony whose pin document ESI refused
 keeps its summary row, loses only its own pins, and says why on stderr; the run still exits 0.
+
+### `types` — what an item is and how big it packs
+
+```bash
+eve-skills types Tritanium 34 "Medium Core Defense Field Extender I"
+eve-skills types - < cargo.txt          # one name per line, or the in-game name<TAB>quantity paste
+eve-skills types Tritanium --json
+```
+
+Per argument: the type id, the exact name, group, category and packaged volume in m3. Names match
+exactly, case aside (one batched `/universe/ids` request for all of them); digits are type ids. An
+unknown name or id is reported on its own line (`not a type: ...`; on stderr with `--csv`) and makes the
+exit status 1, while the others still print. With `-` and quantities, each row echoes the quantity and
+adds `m3 total`, and a total line follows. `--json` gives `types` rows (`input`, `type_id`, `name`,
+`group`, `category`, `packaged_m3`, `quantity`, `total_m3`), `unknown` and `total_m3`; `--csv` the same
+columns.
 
 ### `system` — security, planets and jump distance for candidate systems
 
