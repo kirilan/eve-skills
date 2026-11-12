@@ -11,12 +11,12 @@ from datetime import datetime, timedelta, timezone
 from eve_skills import job_times, order_alerts, telegram
 
 UTC = timezone.utc
-# Europe/Sofia needs a time zone database: Windows has none without the optional tzdata package.
+# Europe/Helsinki needs a time zone database: Windows has none without the optional tzdata package.
 HAS_ZONES = job_times.zone_database_available()
 needs_zones = unittest.skipUnless(HAS_ZONES, "no time zone database (Windows without tzdata)")
-NOON = datetime(2026, 11, 11, 10, 0, tzinfo=UTC)          # 12:00 in Sofia
-# +02:00 is Sofia in winter, which every date below falls in; a fixed offset works on every platform.
-SETTINGS = order_alerts.parse_settings({"exclude_locations": ["WY-9LL"], "remind_hours": 4,
+NOON = datetime(2026, 11, 11, 10, 0, tzinfo=UTC)          # 12:00 in Helsinki
+# +02:00 is Helsinki in winter, which every date below falls in; a fixed offset works on every platform.
+SETTINGS = order_alerts.parse_settings({"exclude_locations": ["Z-EXCL"], "remind_hours": 4,
                                         "quiet_hours": "00:00-08:00", "timezone": "+02:00"})
 READ = {"char:1"}
 
@@ -36,7 +36,7 @@ def run(state, rows, at=NOON, closed=None, read=READ, settings=SETTINGS):
 def job(job_id=7, left_min=10, at=NOON, **over):
     end = (at + timedelta(minutes=left_min)).isoformat().replace("+00:00", "Z")
     base = {"job_id": job_id, "owner_key": "char:1", "installer": "Builder", "activity": "invention",
-            "product_id": 99, "product": "Widget II Blueprint", "location": "4GYV-Q - Labs",
+            "product_id": 99, "product": "Widget II Blueprint", "location": "X-EXMPL - Example Labs",
             "runs": 1, "end": end, "status": "active"}
     return {**base, **over}
 
@@ -62,10 +62,10 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual([1], [r["order_id"] for r in alert.still_behind])
         _, alert = run(later, [row()], NOON + timedelta(hours=6))
         self.assertTrue(alert.empty())                          # the clock restarted at the reminder
-        night = datetime(2026, 11, 12, 1, 0, tzinfo=UTC)        # 03:00 in Sofia
+        night = datetime(2026, 11, 12, 1, 0, tzinfo=UTC)        # 03:00 in Helsinki
         held, alert = run(later, [row()], night)
         self.assertTrue(alert.empty() and alert.silent)         # quiet hours: the reminder waits
-        _, alert = run(held, [row()], datetime(2026, 11, 12, 6, 30, tzinfo=UTC))   # 08:30 Sofia
+        _, alert = run(held, [row()], datetime(2026, 11, 12, 6, 30, tzinfo=UTC))   # 08:30 Helsinki
         self.assertEqual(1, len(alert.still_behind))
 
     def test_back_on_top_only_when_the_competition_moved(self):
@@ -102,21 +102,21 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual({}, state["pending"])
 
     def test_excluded_locations_and_characters_never_alert(self):
-        settings = order_alerts.parse_settings({"exclude_locations": ["wy-9ll"], "exclude_characters": ["Prime"], "timezone": "+02:00"})
+        settings = order_alerts.parse_settings({"exclude_locations": ["z-excl"], "exclude_characters": ["Prime"], "timezone": "+02:00"})
         _, alert = run(order_alerts.empty_state(),
-                       [row(1, location="WY-9LL VIII - Moon 3"), row(2, owner="prime"), row(3)],
+                       [row(1, location="Z-EXCL VIII - Moon 3"), row(2, owner="prime"), row(3)],
                        settings=settings)
         self.assertEqual([3], [r["order_id"] for r in alert.behind])
 
     def test_quiet_hours_send_silently(self):
         _, alert = run(order_alerts.empty_state(), [row()], datetime(2026, 11, 11, 23, 0, tzinfo=UTC))
-        self.assertTrue(alert.silent)                           # 01:00 in Sofia
+        self.assertTrue(alert.silent)                           # 01:00 in Helsinki
         self.assertEqual(1, len(alert.behind))
 
     @needs_zones
     def test_quiet_hours_follow_an_iana_zone(self):
-        settings = order_alerts.parse_settings({"quiet_hours": "00:00-08:00", "timezone": "Europe/Sofia"})
-        self.assertTrue(settings.quiet(datetime(2026, 11, 11, 23, 0, tzinfo=UTC)))     # 01:00 Sofia
+        settings = order_alerts.parse_settings({"quiet_hours": "00:00-08:00", "timezone": "Europe/Helsinki"})
+        self.assertTrue(settings.quiet(datetime(2026, 11, 11, 23, 0, tzinfo=UTC)))     # 01:00 Helsinki
         self.assertFalse(settings.quiet(NOON))
         self.assertTrue(settings.quiet(datetime(2026, 7, 1, 4, 30, tzinfo=UTC)))       # 07:30 summer time
 
@@ -173,7 +173,7 @@ class EvaluateTests(unittest.TestCase):
         text = order_alerts.render(alert, SETTINGS, NOON)
         self.assertTrue(text.startswith("EVE jobs: 3 jobs ending"))
         self.assertIn("⚙ Job ending: Small EM Shield Reinforcer II Blueprint\n"
-                      "   Builder · invention · 3 jobs · 4GYV-Q · 10 min–12 min left", text)
+                      "   Builder · invention · 3 jobs · X-EXMPL · 10 min–12 min left", text)
         settings = order_alerts.parse_settings({"job_alerts": False, "exclude_characters": ["builder"], "timezone": "+02:00"})
         self.assertFalse(settings.job_alerts)
         _, alert = jrun(order_alerts.empty_state(), jobs, settings=settings)

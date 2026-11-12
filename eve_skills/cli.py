@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --times: run counts that end inside these local-time windows, "
                              "e.g. 08-10,20-22")
     p_jobs.add_argument("--tz", metavar="ZONE",
-                        help="time zone for --finish-window and --start, e.g. Europe/Sofia (default UTC)")
+                        help="time zone for --finish-window and --start, e.g. Europe/Helsinki (default UTC)")
     p_jobs.add_argument("--start", metavar="HH:MM|ISO",
                         help="with --finish-window: planned install time (default now)")
     p_jobs.add_argument("--max-hours", type=float, default=60, metavar="H",
@@ -456,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 "file's default site when --at is not given")
     p_restock.add_argument("--freight", metavar="ROUTE",
                            help="price the haul as a courier contract on this operation-file route "
-                                "(e.g. jita->4-hwwf); default: the site's freight_in")
+                                "(e.g. jita->x-hub); default: the site's freight_in")
     p_restock.add_argument("--hub", default="jita", metavar="HUB",
                            help=f"where to buy and pick up (default jita): {', '.join(market.HUBS)}")
     p_restock.add_argument("--char", help="stored character that reads the corporation's assets")
@@ -553,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
                                    "systems, with jumps to a hub (planet census from local SDE data, "
                                    "the rest from public ESI, no login)")
     p_system.add_argument("systems", nargs="+", metavar="SYSTEM",
-                          help="exact system name or numeric id, e.g. Rairomon or 30002772; several are "
+                          help="exact system name or numeric id, e.g. Rens or 30002510; several are "
                                "printed as one comparison table")
     p_system.add_argument("--route", metavar="HUB",
                           help=f"add a jumps column to one of the trade hubs ({', '.join(market.HUBS)}) "

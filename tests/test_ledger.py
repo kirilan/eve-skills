@@ -70,7 +70,7 @@ def journal(day, ref_type, amount, *, context=None, context_type=None, party=CHA
 
 
 def job(job_id, activity, *, blueprint_type, product, runs, start, end, status="delivered", cost=0.0,
-        blueprint_id=None, licensed_runs=None, successes=None, facility=60002329):
+        blueprint_id=None, licensed_runs=None, successes=None, facility=60003760):
     return {"job_id": job_id, "owner": f"corp:{CORP}", "activity_id": activity, "status": status,
             "installer_id": CHAR, "facility_id": facility, "blueprint_id": blueprint_id or job_id * 10,
             "blueprint_type_id": blueprint_type, "product_type_id": product, "runs": runs,

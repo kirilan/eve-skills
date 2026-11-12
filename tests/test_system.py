@@ -3,8 +3,8 @@
 Runs against tests/fake_esi.py's in-process ESI with a small census seeded into
 `$XDG_DATA_HOME/eve-skills/system_planets.json`. Four of the systems are real ones, because the
 boundary case this command exists for only exists in real data: measured against live ESI on
-2026-09-13, Enderailen sits at 0.4487847685813904 and Kulelen at 0.4753689467906952 - twenty-six
-ten-thousandths apart - and EVE shows them as 0.4 (lowsec) and 0.5 (highsec). Their security figures
+2026-11-11, Akidagi sits at 0.4449388384819031 and Balle at 0.4608891010284424 - sixteen
+thousandths apart - and EVE shows them as 0.4 (lowsec) and 0.5 (highsec). Their security figures
 below are ESI's own, and their census rows are the shipped document's counts for them, so a change
 here means New Eden moved rather than that this file drifted. Everything else - the route paths, the
 `/universe/constellations` records, the invented system that carries a Shattered planet - is fixture.
@@ -34,27 +34,32 @@ from eve_skills import alphadata, cmd_system
 from tests.fake_esi import MARKET_IDS, SYSTEM_FORGE, FakeEsiEnv, http_error, iso
 
 # ---------------------------------------------------------------------------
-# The universe. Rairomon is the control: 0.6294 is nowhere near a class line, so it is what every
+# The universe. Rens is the control: 0.8946 is nowhere near a class line, so it is what every
 # "this report says nothing about rounding" assertion compares against, and Zarzakh is the system
 # ESI gives no `planets` key for at all (measured live 2026-09-13) as well as the one the SDE has no
 # planets in - which is why it reads `-` rather than `0`.
 
-ENDERAELEN, RAIROMON, KULELEN = 30002769, 30002772, 30002771
+AKIDAGI, RENS, BALLE = 30045342, 30002510, 30002634
 ZARZAKH = 30100000
 SHATTERED, SHATTERED_NAME = 39000001, "Glass Reach"     # invented: the row with an uncolonisable type
 
-SECURITY = {ENDERAELEN: 0.4487847685813904, RAIROMON: 0.6293596029281616,
-            KULELEN: 0.4753689467906952, ZARZAKH: -1.0, SHATTERED: 0.0499, SYSTEM_FORGE: 0.9}
-NAMES = {ENDERAELEN: "Enderailen", RAIROMON: "Rairomon", KULELEN: "Kulelen", ZARZAKH: "Zarzakh",
+SECURITY = {AKIDAGI: 0.4449388384819031, RENS: 0.8945818543434143,
+            BALLE: 0.4608891010284424, ZARZAKH: -1.0, SHATTERED: 0.0499, SYSTEM_FORGE: 0.9}
+NAMES = {AKIDAGI: "Akidagi", RENS: "Rens", BALLE: "Balle", ZARZAKH: "Zarzakh",
          SHATTERED: SHATTERED_NAME, SYSTEM_FORGE: "Jita"}
 
-KANTANEN, CITADEL = 20000406, 10000033          # the three Caldari-Gallente systems live here
+ISHAGA, BLACK_RISE = 20000785, 10000069        # the three real systems' constellations and regions
+DISIER, SINQ_LAISON = 20000386, 10000032
+ORTNER, HEIMATAR = 20000367, 10000030
 WORMHOLE_SPAN, DEEP_SPAN = 39000101, 39000201   # invented spans, for the two invented systems
-THE_CITADEL, FORGE = 20000020, 10000002         # Jita's real constellation and region
-CONSTELLATION_OF = {ENDERAELEN: KANTANEN, RAIROMON: KANTANEN, KULELEN: KANTANEN,
-                    ZARZAKH: WORMHOLE_SPAN, SHATTERED: DEEP_SPAN, SYSTEM_FORGE: THE_CITADEL}
-CONSTELLATIONS = {KANTANEN: ("Kantanen", CITADEL), WORMHOLE_SPAN: ("Duzna Kah", CITADEL),
-                  DEEP_SPAN: ("Glass Span", CITADEL), THE_CITADEL: ("The Citadel", FORGE)}
+KIMOTORO, FORGE = 20000020, 10000002            # Jita's real constellation and region
+CONSTELLATION_OF = {AKIDAGI: ISHAGA, RENS: ORTNER, BALLE: DISIER,
+                    ZARZAKH: WORMHOLE_SPAN, SHATTERED: DEEP_SPAN, SYSTEM_FORGE: KIMOTORO}
+CONSTELLATIONS = {ISHAGA: ("Ishaga", BLACK_RISE), DISIER: ("Disier", SINQ_LAISON),
+                  ORTNER: ("Ortner", HEIMATAR), WORMHOLE_SPAN: ("Duzna Kah", BLACK_RISE),
+                  DEEP_SPAN: ("Glass Span", BLACK_RISE), KIMOTORO: ("Kimotoro", FORGE)}
+REGION_NAMES = {BLACK_RISE: "Black Rise", SINQ_LAISON: "Sinq Laison", HEIMATAR: "Heimatar",
+                FORGE: "The Forge"}
 
 # The shipped document's rows for the three real systems, plus the invented ones.
 CENSUS = {
@@ -63,9 +68,9 @@ CENSUS = {
                      "2015": "Lava", "2016": "Barren", "2017": "Storm", "2063": "Plasma",
                      "30889": "Shattered"},
     "systems": {
-        str(RAIROMON): {"11": 2, "2014": 1, "2015": 1, "2016": 3, "2017": 2, "2063": 2},
-        str(ENDERAELEN): {"12": 1, "13": 5, "2015": 1, "2017": 2},
-        str(KULELEN): {"13": 2, "2015": 2, "2016": 1, "2063": 2},
+        str(RENS): {"11": 4, "12": 1, "13": 2, "2016": 2},
+        str(AKIDAGI): {"11": 3, "13": 1, "2014": 1, "2016": 3, "2063": 2},
+        str(BALLE): {"12": 1, "13": 5, "2016": 2},
         str(SHATTERED): {"30889": 4, "2016": 1},
     },
 }
@@ -88,18 +93,18 @@ def system_document(system_id: int, planets: int | None = ...) -> dict:
 class SecurityRuleTests(unittest.TestCase):
     """The figure EVE shows and the class it means, tested on the values that motivated them."""
 
-    def test_the_two_systems_twenty_six_thousandths_apart_are_not_one_class(self):
+    def test_the_two_systems_sixteen_thousandths_apart_are_not_one_class(self):
         """Both readings pinned at full precision, so a refactor to `round(security, 1)` - which is
         what every other tool in this family got wrong - fails on the pair that proves it wrong."""
-        self.assertEqual((0.4, "low"), (cmd_system.display_security(SECURITY[ENDERAELEN]),
-                                        cmd_system.security_class(SECURITY[ENDERAELEN])))
-        self.assertEqual((0.5, "high"), (cmd_system.display_security(SECURITY[KULELEN]),
-                                         cmd_system.security_class(SECURITY[KULELEN])))
+        self.assertEqual((0.4, "low"), (cmd_system.display_security(SECURITY[AKIDAGI]),
+                                        cmd_system.security_class(SECURITY[AKIDAGI])))
+        self.assertEqual((0.5, "high"), (cmd_system.display_security(SECURITY[BALLE]),
+                                         cmd_system.security_class(SECURITY[BALLE])))
 
     def test_the_highsec_line_is_0_45_on_the_true_value(self):
         """`x >= 0.45` is highsec and anything above zero below that is lowsec, whatever the client
         shows: 0.4499 still displays 0.4 and stays lowsec."""
-        for value in (0.4487847685813904, 0.4499):
+        for value in (0.4449388384819031, 0.4499):
             self.assertEqual("low", cmd_system.security_class(value), f"{value} read as highsec")
         self.assertEqual("high", cmd_system.security_class(0.45))
 
@@ -137,15 +142,15 @@ class PlanetCensusTransformTests(unittest.TestCase):
         """`planet_industry.json` names the eight colonisable types only; a census that copied that
         list would silently drop a Shattered planet from the system being weighed, so the count and
         the name both come out of the data."""
-        planets = [{"_key": 1, "solarSystemID": RAIROMON, "typeID": 13},
-                   {"_key": 2, "solarSystemID": RAIROMON, "typeID": 30889},
-                   {"_key": 3, "solarSystemID": RAIROMON, "typeID": 13},
-                   {"_key": 4, "solarSystemID": ENDERAELEN, "typeID": 30889}]
+        planets = [{"_key": 1, "solarSystemID": RENS, "typeID": 13},
+                   {"_key": 2, "solarSystemID": RENS, "typeID": 30889},
+                   {"_key": 3, "solarSystemID": RENS, "typeID": 13},
+                   {"_key": 4, "solarSystemID": AKIDAGI, "typeID": 30889}]
         types = [{"_key": 13, "name": {"en": "Planet (Gas)"}},
                  {"_key": 30889, "name": {"en": "Planet (Shattered)"}}]
         document = alphadata._transform_system_planets(planets, types)
         self.assertEqual({"13": "Gas", "30889": "Shattered"}, document["planet_types"])
-        self.assertEqual({str(RAIROMON): {"13": 2, "30889": 1}, str(ENDERAELEN): {"30889": 1}},
+        self.assertEqual({str(RENS): {"13": 2, "30889": 1}, str(AKIDAGI): {"30889": 1}},
                          document["systems"])
 
     def test_keys_are_ordered_numerically_so_a_rebuild_differs_by_nothing(self):
@@ -165,16 +170,16 @@ class PlanetCensusTransformTests(unittest.TestCase):
         """The SDE's planet types are unpublished marker rows, so a counted id can reach the census
         with no name in `types.jsonl`; a placeholder carrying the id beats dropping the planet."""
         document = alphadata._transform_system_planets(
-            [{"_key": 1, "solarSystemID": RAIROMON, "typeID": 99123}], [])
+            [{"_key": 1, "solarSystemID": RENS, "typeID": 99123}], [])
         self.assertEqual("unnamed planet type 99123", document["planet_types"]["99123"])
 
     def test_a_row_without_a_system_or_a_type_is_not_counted(self):
         """`update()` streams one row at a time, so a malformed line has to be skipped without
         inventing a census entry for it and without losing the well-formed rows around it."""
         document = alphadata._transform_system_planets(
-            [{"_key": 1, "typeID": 13}, {"_key": 2, "solarSystemID": RAIROMON},
-             {"_key": 3, "solarSystemID": RAIROMON, "typeID": 13}], [])
-        self.assertEqual({str(RAIROMON): {"13": 1}}, document["systems"])
+            [{"_key": 1, "typeID": 13}, {"_key": 2, "solarSystemID": RENS},
+             {"_key": 3, "solarSystemID": RENS, "typeID": 13}], [])
+        self.assertEqual({str(RENS): {"13": 1}}, document["systems"])
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +193,7 @@ class SystemCommandTestCase(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.env.install_market()          # POST /universe/ids, driven by MARKET_IDS
         self.env.server.post("/universe/names", handler=self.env._names_handler)
-        self.env.names.update({CITADEL: "The Citadel", FORGE: "The Forge", **NAMES})
+        self.env.names.update({**REGION_NAMES, **NAMES})
         self.ids = mock.patch.dict(MARKET_IDS, {name: {"systems": [ident]}
                                                 for ident, name in NAMES.items()})
         self.ids.start()
@@ -264,34 +269,33 @@ class SystemCommandTestCase(unittest.TestCase):
 class ReportTests(SystemCommandTestCase):
 
     def test_the_table_prints_true_and_displayed_security_side_by_side(self):
-        """The whole point of the row: `0.4488` and `0.4` are both printed, and the class comes from
-        the true figure, so Enderailen reads lowsec under a displayed 0.4."""
-        code, stdout, stderr = self.run_cli("Enderailen", "Kulelen")
+        """The whole point of the row: `0.4449` and `0.4` are both printed, and the class comes from
+        the true figure, so Akidagi reads lowsec under a displayed 0.4."""
+        code, stdout, stderr = self.run_cli("Akidagi", "Balle")
         self.assertEqual(0, code, stderr)
         self.assertEqual(["system", "security", "shown", "class", "region", "planets", "planet types"],
                          re.split(r"\s{2,}", stdout.splitlines()[0].strip()))
-        enderailen, kulelen = self.cells(stdout, "Enderailen"), self.cells(stdout, "Kulelen")
-        self.assertEqual(["0.4488", "0.4", "lowsec"], enderailen[1:4])
-        self.assertEqual(["0.4754", "0.5", "highsec"], kulelen[1:4])
+        akidagi, balle = self.cells(stdout, "Akidagi"), self.cells(stdout, "Balle")
+        self.assertEqual(["0.4449", "0.4", "lowsec"], akidagi[1:4])
+        self.assertEqual(["0.4609", "0.5", "highsec"], balle[1:4])
 
     def test_a_report_that_straddles_a_class_line_says_so(self):
         """Two candidates a rounding step apart are the mistake this command was written against, so
         the note names both and states they are not one class - and says nothing at all when the run
         is nowhere near a line."""
-        _, straddling, _ = self.run_cli("Enderailen", "Kulelen")
+        _, straddling, _ = self.run_cli("Akidagi", "Balle")
         self.assertIn("class line", straddling)
         self.assertIn("not all one class", straddling)
-        self.assertIn("0.0266", straddling)         # the true spread between them, four decimals
-        _, quiet, _ = self.run_cli("Rairomon")
+        self.assertIn("0.0160", straddling)         # the true spread between them, four decimals
+        _, quiet, _ = self.run_cli("Rens")
         self.assertNotIn("class line", quiet)
 
     def test_planet_types_come_from_the_census_biggest_first(self):
         """The column answers "what is this system mostly made of", so it is ordered by count and the
         printed total is the same number its own breakdown adds up to."""
-        planets = self.json_doc("Rairomon")["systems"][0]["planets"]
-        self.assertEqual(11, planets["total"])
-        self.assertEqual([("Barren", 3), ("Plasma", 2), ("Storm", 2), ("Temperate", 2),
-                          ("Lava", 1), ("Oceanic", 1)],
+        planets = self.json_doc("Rens")["systems"][0]["planets"]
+        self.assertEqual(9, planets["total"])
+        self.assertEqual([("Temperate", 4), ("Barren", 2), ("Gas", 2), ("Ice", 1)],
                          [(entry["name"], entry["count"]) for entry in planets["types"]])
 
     def test_a_planet_type_nobody_can_colonise_is_still_named(self):
@@ -315,19 +319,19 @@ class ReportTests(SystemCommandTestCase):
         """The printed figure is the census total so that it sums to the breakdown beside it, while
         both raw counts survive as their own columns - which is how a reader can tell an SDE build
         from a live count without asking for `--json`."""
-        row = self.csv_rows("Rairomon")["Rairomon"]
-        self.assertEqual("11", row["planets"])
-        self.assertEqual("11", row["census_planets"])
-        self.assertEqual("11", row["esi_planets"])
+        row = self.csv_rows("Rens")["Rens"]
+        self.assertEqual("9", row["planets"])
+        self.assertEqual("9", row["census_planets"])
+        self.assertEqual("9", row["esi_planets"])
 
     def test_the_two_planet_sources_disagreeing_is_reported_with_the_build(self):
         """The census is a build and ESI is now; when they disagree the report has to say which said
         what, because that difference is an SDE update the reader should go and run."""
-        self.env.server.get(f"/universe/systems/{RAIROMON}",
-                            doc=system_document(RAIROMON, planets=12))
-        doc = self.json_doc("Rairomon")
+        self.env.server.get(f"/universe/systems/{RENS}",
+                            doc=system_document(RENS, planets=12))
+        doc = self.json_doc("Rens")
         planets = doc["systems"][0]["planets"]
-        self.assertEqual((11, 12, 11), (planets["census"], planets["esi"], planets["total"]))
+        self.assertEqual((9, 12, 9), (planets["census"], planets["esi"], planets["total"]))
         note = next(n for n in doc["notes"] if "ESI counts 12 planets" in n)
         self.assertIn("SDE build 3494416", note)
         self.assertIn("eve-skills update-data", note)
@@ -336,19 +340,19 @@ class ReportTests(SystemCommandTestCase):
         self.assertIn("NotASystemName", self.refuses("system", "NotASystemName"))
 
     def test_a_system_specified_twice_is_printed_once(self):
-        """`system Rairomon Rairomon 30002772` is one system asked three ways, which is what a pasted
+        """`system Rens Rens 30002772` is one system asked three ways, which is what a pasted
         list or a shell glob produces; repeating the row would double its planets in a reader's sum."""
-        code, stdout, stderr = self.run_cli("Rairomon", "Rairomon", str(RAIROMON))
+        code, stdout, stderr = self.run_cli("Rens", "Rens", str(RENS))
         self.assertEqual(0, code, stderr)
-        self.assertEqual(1, len([line for line in stdout.splitlines() if line.startswith("Rairomon")]))
-        self.assertEqual(1, len(self.env.server.calls_to(f"/universe/systems/{RAIROMON}")))
+        self.assertEqual(1, len([line for line in stdout.splitlines() if line.startswith("Rens")]))
+        self.assertEqual(1, len(self.env.server.calls_to(f"/universe/systems/{RENS}")))
 
     def test_a_missing_census_refuses_before_any_request(self):
         """The census is what makes the planet half of this report work offline; with nothing
         installed the refusal has to name `update-data` and cost the run no ESI traffic at all."""
         os.remove(os.path.join(self.env.data_home, "eve-skills", "system_planets.json"))
         with mock.patch.object(alphadata, "PACKAGE_DATA_DIR", Path(tempfile.mkdtemp())):
-            stderr = self.refuses("system", "Rairomon")
+            stderr = self.refuses("system", "Rens")
         self.assertIn("no local planet census", stderr)
         self.assertIn("eve-skills update-data", stderr)
         self.assertEqual([], self.env.server.calls)
@@ -357,7 +361,7 @@ class ReportTests(SystemCommandTestCase):
         """`alphadata` raises ValueError for a document without `systems`; that has to arrive as the
         same one-line refusal rather than as a traceback, because it is the same user error."""
         self.write_census({"source": "synthetic", "build": 3494416})
-        stderr = self.refuses("system", "Rairomon")
+        stderr = self.refuses("system", "Rens")
         self.assertIn("not in the expected format", stderr)
         self.assertIn("eve-skills update-data", stderr)
 
@@ -365,7 +369,7 @@ class ReportTests(SystemCommandTestCase):
         """A census is only worth reading as a planet list while it tracks the SDE; four hundred days
         of drift has to be said out loud on every output mode, with the command that fixes it."""
         self.write_census({**CENSUS, "fetched": iso(-400 * 86400)})
-        doc = self.json_doc("Rairomon")
+        doc = self.json_doc("Rens")
         note = next(n for n in doc["notes"] if "days old" in n)
         self.assertIn("3494416", note)
         self.assertIn("eve-skills update-data", note)
@@ -376,27 +380,27 @@ class RouteTests(SystemCommandTestCase):
 
     def setUp(self):
         super().setUp()
-        # Jita is 3 jumps from Rairomon by `shortest` and 5 by `secure`; the same 6 jumps either way
-        # from Enderailen but along different roads; and ESI will not route from Zarzakh at all.
-        self.route(RAIROMON, SYSTEM_FORGE, shortest=[RAIROMON, 30000145, 30000146, SYSTEM_FORGE],
-                   secure=[RAIROMON, 30000150, 30000151, 30000152, 30000153, SYSTEM_FORGE])
-        self.route(ENDERAELEN, SYSTEM_FORGE,
-                   shortest=[ENDERAELEN, 30002768, 30002767, 30002766, 30002765, 30002764, SYSTEM_FORGE],
-                   secure=[ENDERAELEN, 30002760, 30002761, 30002762, 30002763, 30002759, SYSTEM_FORGE])
+        # Jita is 3 jumps from Rens by `shortest` and 5 by `secure`; the same 6 jumps either way
+        # from Akidagi but along different roads; and ESI will not route from Zarzakh at all.
+        self.route(RENS, SYSTEM_FORGE, shortest=[RENS, 30000145, 30000146, SYSTEM_FORGE],
+                   secure=[RENS, 30000150, 30000151, 30000152, 30000153, SYSTEM_FORGE])
+        self.route(AKIDAGI, SYSTEM_FORGE,
+                   shortest=[AKIDAGI, 30002768, 30002767, 30002766, 30002765, 30002764, SYSTEM_FORGE],
+                   secure=[AKIDAGI, 30002760, 30002761, 30002762, 30002763, 30002759, SYSTEM_FORGE])
 
     def test_a_route_column_names_the_hub_and_quotes_the_other_flag_beside_it(self):
         """`shortest` is what a pilot plans with and `secure` is what a hauler can actually fly, so
         the cell carries both numbers rather than the one number that flatters the candidate."""
-        code, stdout, stderr = self.run_cli("Rairomon", "--route", "jita")
+        code, stdout, stderr = self.run_cli("Rens", "--route", "jita")
         self.assertEqual(0, code, stderr)
         self.assertIn("jumps to Jita", stdout)
-        self.assertEqual("3 (secure 5)", self.cells(stdout, "Rairomon")[4])
+        self.assertEqual("3 (secure 5)", self.cells(stdout, "Rens")[4])
         self.assertIn("the secure route to Jita is 5 jumps against 3 by shortest", stdout)
 
     def test_equal_jump_counts_on_different_paths_are_still_disclosed(self):
         """Two roads of the same length are invisible in a jump count, so they surface as a note - and
-        equal counts on the same road say nothing, which is why Rairomon gets no such line."""
-        doc = self.json_doc("Enderailen", "--route", "jita")
+        equal counts on the same road say nothing, which is why Rens gets no such line."""
+        doc = self.json_doc("Akidagi", "--route", "jita")
         routes = {entry["flag"]: entry for entry in doc["systems"][0]["routes"]}
         self.assertEqual(6, routes["shortest"]["jumps"])
         self.assertEqual(6, routes["secure"]["jumps"])
@@ -406,10 +410,10 @@ class RouteTests(SystemCommandTestCase):
     def test_a_route_that_will_not_answer_costs_a_cell_and_not_the_report(self):
         """One unreachable link must not throw away the table somebody came for: the row prints a
         dash, and the note names the system, the flag and ESI's own reason."""
-        code, stdout, stderr = self.run_cli("Rairomon", "Zarzakh", "--route", "jita")
+        code, stdout, stderr = self.run_cli("Rens", "Zarzakh", "--route", "jita")
         self.assertEqual(0, code, stderr)
         self.assertEqual("-", self.cells(stdout, "Zarzakh")[4])
-        doc = self.json_doc("Rairomon", "Zarzakh", "--route", "jita")
+        doc = self.json_doc("Rens", "Zarzakh", "--route", "jita")
         failed = next(entry for entry in doc["systems"][1]["routes"] if entry["error"])
         self.assertEqual("shortest", failed["flag"])
         self.assertIsNone(failed["jumps"])
@@ -428,13 +432,13 @@ class RouteTests(SystemCommandTestCase):
         """`--route jita` resolves through the hub table, whose label is a station; what was routed to
         is a solar system, and "jumps to Jita 4-4" would be a different question."""
         self.assertEqual({"system_id": SYSTEM_FORGE, "name": "Jita"},
-                         {key: self.json_doc("Rairomon", "--route", "jita")["route_to"][key]
+                         {key: self.json_doc("Rens", "--route", "jita")["route_to"][key]
                           for key in ("system_id", "name")})
 
     def test_the_reported_flag_leads_and_its_sibling_becomes_the_comparison(self):
         """`--flag secure` is the same pair of facts read the other way round, for a hauler who wants
         the safe road's length as the headline."""
-        doc = self.json_doc("Rairomon", "--route", "jita", "--flag", "secure")
+        doc = self.json_doc("Rens", "--route", "jita", "--flag", "secure")
         self.assertEqual(("secure", "shortest"),
                          (doc["route_to"]["flag"], doc["route_to"]["compared_flag"]))
         routes = {entry["flag"]: entry for entry in doc["systems"][0]["routes"]}
@@ -443,17 +447,17 @@ class RouteTests(SystemCommandTestCase):
     def test_insecure_routes_are_reported_without_a_comparison(self):
         """`insecure` answers a different question and has no meaningful sibling, so the run fetches
         one route and compares nothing instead of paying for a number nobody asked for."""
-        self.route(RAIROMON, SYSTEM_FORGE, insecure=[RAIROMON, 30000190, SYSTEM_FORGE])
-        doc = self.json_doc("Rairomon", "--route", "jita", "--flag", "insecure")
+        self.route(RENS, SYSTEM_FORGE, insecure=[RENS, 30000190, SYSTEM_FORGE])
+        doc = self.json_doc("Rens", "--route", "jita", "--flag", "insecure")
         self.assertIsNone(doc["route_to"]["compared_flag"])
         self.assertEqual([{"flag": "insecure", "jumps": 2,
-                           "path": [RAIROMON, 30000190, SYSTEM_FORGE], "error": None}],
+                           "path": [RENS, 30000190, SYSTEM_FORGE], "error": None}],
                          doc["systems"][0]["routes"])
 
     def test_the_route_path_survives_in_json_for_every_flag(self):
         """A jump count alone cannot be checked against a planner's own route, so the systems walked
         are kept for both flags even though the table prints only the number."""
-        routes = self.json_doc("Rairomon", "--route", "jita")["systems"][0]["routes"]
+        routes = self.json_doc("Rens", "--route", "jita")["systems"][0]["routes"]
         self.assertEqual([["shortest", 3], ["secure", 5]],
                          [[entry["flag"], entry["jumps"]] for entry in routes])
         self.assertTrue(all(len(entry["path"]) == entry["jumps"] + 1 for entry in routes))
@@ -462,9 +466,9 @@ class RouteTests(SystemCommandTestCase):
         """An empty jump column reads as zero jumps to anything parsing the CSV, so a report with no
         route has no route columns at all - and a report with one names the hub, the flag and both
         counts."""
-        plain = self.csv_rows("Rairomon")["Rairomon"]
+        plain = self.csv_rows("Rens")["Rens"]
         self.assertNotIn("jumps", plain)
-        routed = self.csv_rows("Rairomon", "--route", "jita")["Rairomon"]
+        routed = self.csv_rows("Rens", "--route", "jita")["Rens"]
         self.assertEqual(("30000142", "Jita", "shortest", "3", "secure", "5"),
                          (routed["route_to_id"], routed["route_to"], routed["route_flag"],
                           routed["jumps"], routed["compared_flag"], routed["compared_jumps"]))
@@ -472,10 +476,10 @@ class RouteTests(SystemCommandTestCase):
     def test_an_unreachable_system_record_refuses_the_report_naming_it(self):
         """Security status has exactly one source, so a system that will not describe itself is not a
         row of dashes: the report cannot be made, and the id in the error has to be the one asked for."""
-        self.env.server.get(f"/universe/systems/{RAIROMON}", error=(500, {"error": "shard unavailable"}))
-        stderr = self.refuses("system", "Rairomon")
+        self.env.server.get(f"/universe/systems/{RENS}", error=(500, {"error": "shard unavailable"}))
+        stderr = self.refuses("system", "Rens")
         self.assertIn("no solar system record", stderr)
-        self.assertIn("Rairomon", stderr)
+        self.assertIn("Rens", stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -484,42 +488,42 @@ class OutputShapeTests(SystemCommandTestCase):
     def test_json_carries_the_provenance_of_every_figure(self):
         """Security and region are live ESI, planets are a local SDE build; a script comparing builds
         needs both stamps to know which of them it is looking at."""
-        doc = self.json_doc("Rairomon")
+        doc = self.json_doc("Rens")
         self.assertEqual(3494416, doc["sde_build"])
         self.assertEqual("2026-09-04", doc["census_fetched"])
         self.assertIsNone(doc["route_to"])
         row = doc["systems"][0]
-        self.assertEqual(RAIROMON, row["system_id"])
-        self.assertEqual(0.6293596029281616, row["security_status"])
-        self.assertEqual(0.6, row["displayed_security"])
+        self.assertEqual(RENS, row["system_id"])
+        self.assertEqual(0.8945818543434143, row["security_status"])
+        self.assertEqual(0.9, row["displayed_security"])
         self.assertEqual("high", row["class"])
-        self.assertEqual({"constellation": "Kantanen", "region_id": CITADEL, "region": "The Citadel"},
+        self.assertEqual({"constellation": "Ortner", "region_id": HEIMATAR, "region": "Heimatar"},
                          {key: row[key] for key in ("constellation", "region_id", "region")})
 
     def test_json_keeps_the_notes_the_table_prints(self):
         """Every footnote is data too: a machine reading this report must not be able to miss that the
         class rule came from CCP's guide or that two sources were merged."""
-        notes = "\n".join(self.json_doc("Enderailen", "Kulelen")["notes"])
+        notes = "\n".join(self.json_doc("Akidagi", "Balle")["notes"])
         self.assertIn("developers.eveonline.com/docs/guides/system-security", notes)
         self.assertIn("local SDE census (build 3494416)", notes)
 
     def test_csv_is_parseable_and_holds_every_column_the_table_shows(self):
         """The CSV is the same report for a spreadsheet: security at the table's four decimals, the
         class as its raw key, and the planet breakdown in one cell so the row count stays one."""
-        rows = self.csv_rows("Enderailen", "Kulelen")
+        rows = self.csv_rows("Akidagi", "Balle")
         self.assertEqual(2, len(rows))
-        enderailen = rows["Enderailen"]
-        self.assertEqual(("0.4488", "0.4", "low"), (enderailen["security_status"],
-                                                    enderailen["displayed_security"],
-                                                    enderailen["class"]))
-        self.assertEqual("high", rows["Kulelen"]["class"])
-        self.assertEqual("Gas x5; Storm x2; Ice x1; Lava x1", enderailen["planet_types"])
-        self.assertEqual("The Citadel", enderailen["region"])
+        akidagi = rows["Akidagi"]
+        self.assertEqual(("0.4449", "0.4", "low"), (akidagi["security_status"],
+                                                    akidagi["displayed_security"],
+                                                    akidagi["class"]))
+        self.assertEqual("high", rows["Balle"]["class"])
+        self.assertEqual("Barren x3; Temperate x3; Plasma x2; Gas x1; Oceanic x1", akidagi["planet_types"])
+        self.assertEqual("Black Rise", akidagi["region"])
 
     def test_csv_keeps_its_notes_on_stderr(self):
         """Notes are prose about the run; redirecting the rows to a file must not drag them in, or
         every consumer has to strip footnotes out of its own spreadsheet."""
-        code, stdout, stderr = self.run_cli("Enderailen", "Kulelen", "--csv")
+        code, stdout, stderr = self.run_cli("Akidagi", "Balle", "--csv")
         self.assertEqual(0, code)
         self.assertNotIn("class line", stdout)
         self.assertIn("class line", stderr)

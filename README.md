@@ -553,7 +553,7 @@ stored consent somehow lacks the skills scope gets a hint line instead of data.
 eve-skills standings --csv > standings.csv
 eve-skills jobs                       # personal jobs
 eve-skills jobs --corp --completed    # corp jobs incl. finished/cancelled
-eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Sofia --start 09:30
+eve-skills jobs --corp --times --finish-window 08-10,20-22 --tz Europe/Helsinki --start 09:30
                                       # measured hours per run, and run counts ending in those windows
 eve-skills travel                     # current location, home, jump clones + their implants
 eve-skills implants                   # implants in the active clone (one row per fitted instance)
@@ -586,7 +586,7 @@ copy). Cancelled, reverted and paused jobs are left out: their end dates are not
 `--finish-window 08-10,20-22` adds the run counts that, installed at `--start` (`HH:MM` in `--tz`, or
 an ISO time; default now), end inside a window: the most runs per window occurrence, longest first, up
 to `--max-hours` (default 60). The text shows the two longest; `--json` lists every fit. Cap the answer
-by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `Europe/Sofia`, which
+by the runs left on the blueprint yourself. `--tz` takes an IANA zone such as `Europe/Helsinki`, which
 follows daylight saving, or a fixed offset such as `+03:00` / `UTC+3`, which does not (default UTC).
 IANA names need a time zone database: Linux and macOS have one, Windows does not unless the optional
 `tzdata` package is installed (`pip install tzdata`) - without it, use the offset. `--times` has no `--group` or `--csv` form.
@@ -855,7 +855,7 @@ changed in game shows only after `expires`.
 
 ```bash
 eve-skills login --scopes assets              # once; corporation hangars also need the Director role
-eve-skills restock --at "Kulelen V - Moon 16 - Lai Dai Corporation Factory" --char Somedirector \
+eve-skills restock --at "Jita IV - Moon 4 - Caldari Navy Assembly Plant" --char Somedirector \
   --hauler Somehauler --cargo 5000 \
   "Medium Core Defense Field Extender II=90" "500MN Microwarpdrive II=37:7" \
   --invent "Small Core Defense Field Extender II=140:Augmentation" --extra "Augmentation Decryptor=500"
@@ -923,7 +923,7 @@ eve-skills operation show                                             # flags va
   structure market needs a character with docking access there who granted
   `eve-skills login --scopes structure-markets`. `reader` is tried first. A refusal is an error that
   names the fix, never an empty book.
-- **Freight** routes (`"jita->4-hwwf"`) price a courier contract: `per_m3`, `collateral_pct` and `min`.
+- **Freight** routes (`"jita->x-hub"`) price a courier contract: `per_m3`, `collateral_pct` and `min`.
   A site's `freight_in` and `freight_out` name the routes its supplies and products travel.
 
 Commands that use the file:
@@ -1148,10 +1148,10 @@ what is new since the last run:
   which includes the jobs it installed for its corporation.
 
 Settings live in `alerts.json` in the config directory, written with the defaults on first use:
-`exclude_locations` (case-insensitive parts of a station name, e.g. `"WY-9LL"`), `exclude_characters`,
+`exclude_locations` (case-insensitive parts of a station name, e.g. `"Z-EXCL"`), `exclude_characters`,
 `remind_hours` (default 4; 0 = no reminders), `job_alerts` (default `true`), `job_notice_minutes`
 (default 20; the timer runs every 20 minutes, so a shorter notice can miss straight to "done"), `quiet_hours` (default `"00:00-08:00"`; messages then arrive
-silently) and `timezone` (default `Europe/Sofia`; an IANA name needs a time zone database, which Windows only has with
+silently) and `timezone` (default `UTC`; an IANA name needs a time zone database, which Windows only has with
 `pip install tzdata`, otherwise use a fixed offset such as `+02:00`, which ignores daylight saving). Excluded orders are never checked, which also saves
 their ESI calls. The bot token and chat id are in `telegram.json` in the config directory, owner-only.
 The token is read from a file or stdin, never from the command line, and no error message contains it.
@@ -1220,7 +1220,7 @@ eve-skills market --group "Basic Commodities - Tier 1"      # every type in a ma
 eve-skills market --category "Planetary Commodities"        # every type in every group of a category
 eve-skills market --category Module --max-types 500         # raise the size guard, if you meant it
 eve-skills market Tritanium --fields type_name,min_sell,spread    # choose and order the columns
-eve-skills market Transmitter --seller "Santraginus IX"    # what that character keeps per unit, and which exit pays
+eve-skills market Transmitter --seller "Bob Inventor"    # what that character keeps per unit, and which exit pays
 ```
 
 `--group`/`--category` are resolved from the local SDE snapshot (`update-data`) — a name or an id, in any
@@ -1353,14 +1353,14 @@ minimum still clears more than dumping into the bid. The two sides are printed t
 character with Accounting IV and Broker Relations IV, against a book at 14,020 ask / 13,020 bid:
 
 ```text
-$ eve-skills market Transmitter --seller "Santraginus IX"
+$ eve-skills market Transmitter --seller "Bob Inventor"
 Transmitter (id 9840)
 scope               min sell   max buy    spread    margin %  sell vol  buy vol      sells  buys  …
 ------------------  ---------  ---------  --------  --------  --------  -----------  -----  ----  …
 Jita 4-4 (station)  14,020.00  13,020.00  1,000.00  7.68      984,889   100,659,636  41     20    …
   Jita 4-4 (station): as of 10:33:37Z (3m 05s ago; ESI refreshes the book every 5 min)
 
-Seller Santraginus IX (id 105209159): Accounting 4 -> sales tax 4.2% of the sale price; Broker Relations 4 -> broker fee 1.8% before standings.
+Seller Bob Inventor (id 2112000001): Accounting 4 -> sales tax 4.2% of the sale price; Broker Relations 4 -> broker fee 1.8% before standings.
 Jita IV - Moon 4 - Caldari Navy Assembly Plant: broker fee 1.799% (standing +0.04 with Caldari Navy).
 Selling straight into a buy order pays sales tax alone: CCP charges the broker fee on order creation, so it belongs to the listing side only.
 Not applied: the further 0.03 percentage points per standing point CCP takes for the owning faction - ESI does not say which faction owns a station.
@@ -1424,7 +1424,7 @@ eve-skills build-cost Hound --system Amarr        # bill the install in Amarr, s
 eve-skills build-cost Hound "Plasma Thruster"     # several products, off one set of order books
 eve-skills build-cost Hound --brief               # table, totals, verdict, essential warnings
 eve-skills build-cost "Small EM Shield Reinforcer II" "Medium Core Defense Field Extender II" --te 6 \
-  --system Kulelen --sell-at jita --seller Somecharacter --brief     # rank lines by ISK per job-hour
+  --system Jita --sell-at jita --seller Somecharacter --brief     # rank lines by ISK per job-hour
 ```
 
 No login and no consent: the recipe comes from the local SDE snapshot — shipped in the package and
@@ -1762,10 +1762,10 @@ keeps its summary row, loses only its own pins, and says why on stderr; the run 
 ### `system` — security, planets and jump distance for candidate systems
 
 ```bash
-eve-skills system Rairomon Outuni Enderailen Kulelen      # one row per system
-eve-skills system Rairomon Outuni Enderailen --route jita # + jumps to a hub
-eve-skills system Enderailen --route jita --flag secure   # the safe road's length instead
-eve-skills system 30002769 --json                         # machine-readable, notes included
+eve-skills system Rens Outuni Akidagi Balle      # one row per system
+eve-skills system Rens Outuni Akidagi --route jita # + jumps to a hub
+eve-skills system Akidagi --route jita --flag secure   # the safe road's length instead
+eve-skills system 30045342 --json                  # machine-readable, notes included
 ```
 
 No login: security status, constellation and region come from public ESI, the planets from the local
@@ -1774,26 +1774,26 @@ throwaway scripts — one for exact security, one for planet types, one for jump
 figure EVE prints is not the figure that decides anything.
 
 ```
-system      security  shown  class    jumps to Jita  region       planets  planet types
-----------  --------  -----  -------  -------------  -----------  -------  ---------------------------------------------------------------------
-Rairomon    0.6294    0.6    highsec  6              The Citadel  11       Barren x3, Plasma x2, Storm x2, Temperate x2, Lava x1, Oceanic x1
-Outuni      0.7342    0.7    highsec  4              The Forge    12       Gas x5, Barren x2, Lava x1, Oceanic x1, Plasma x1, Storm x1, …
-Enderailen  0.4488    0.4    lowsec   7              The Citadel  9        Gas x5, Storm x2, Ice x1, Lava x1
-Kulelen     0.4754    0.5    highsec  7              The Citadel  7        Gas x2, Lava x2, Plasma x2, Barren x1
+system   security  shown  class    jumps to Jita   region       planets  planet types
+-------  --------  -----  -------  --------------  -----------  -------  -------------------------------------------------------------------------
+Rens     0.8946    0.9    highsec  15 (secure 25)  Heimatar     9        Temperate x4, Barren x2, Gas x2, Ice x1
+Outuni   0.7342    0.7    highsec  4               The Forge    12       Gas x5, Barren x2, Lava x1, Oceanic x1, Plasma x1, Storm x1, Temperate x1
+Akidagi  0.4449    0.4    lowsec   10 (secure 12)  Black Rise   10       Barren x3, Temperate x3, Plasma x2, Gas x1, Oceanic x1
+Balle    0.4609    0.5    highsec  12 (secure 13)  Sinq Laison  8        Gas x5, Barren x2, Ice x1
 
-  Enderailen 0.4488 -> shows 0.4, Kulelen 0.4754 -> shows 0.5 sit within 0.05 of a class line, and EVE only
-  ever shows the rounded figure; these rows span 0.0266 of true security and are not all one class
+  Akidagi 0.4449 -> shows 0.4, Balle 0.4609 -> shows 0.5 sit within 0.05 of a class line, and EVE only
+  ever shows the rounded figure; these rows span 0.0160 of true security and are not all one class
 ```
 
-(Verbatim from a run on 2026-09-13 against live ESI and SDE build 3494416, notes wrapped.)
+(From a run with `--route jita` on 2026-11-11 against live ESI and SDE build 3538132; the other notes are left out, the class-line note is wrapped.)
 
 **Security is classified on the true value, not the printed one.** CCP's own guide
 ([developers.eveonline.com/docs/guides/system-security](https://developers.eveonline.com/docs/guides/system-security/))
 says the client rounds to one decimal — away from zero, with one exception: any positive status below
 `0.05` shows `0.1` rather than `0.0`, because a system that reads 0.0 is shoot-on-sight space. ESI's
 `securityClass` field is documented as having an unknown meaning and is never read here. That rule is why
-Enderailen (measured 0.4487847685813904 on 2026-09-13) is **lowsec** while Kulelen, twenty-six
-thousandths nearer the centre at 0.4753689467906952, is **highsec**: `x >= 0.45` is highsec, and both
+Akidagi (measured 0.4449388384819031 on 2026-11-11) is **lowsec** while Balle, sixteen
+thousandths higher at 0.4608891010284424, is **highsec**: `x >= 0.45` is highsec, and both
 systems print a displayed figure that hides it. Any run whose rows come within `0.05` of a class line says
 so under the table, quoting the true spread — the mistake this command was written to prevent.
 
@@ -1806,7 +1806,7 @@ the census build, and `--csv` keeps both figures as their own columns. A system 
 
 **`--route HUB`** resolves the hub name to a solar system (`jita`, `amarr`, and anything else ESI will
 resolve) and prints jump counts. `shortest` is what a pilot plans with; `secure` avoids the space a hauler
-cannot fly in, so both are fetched and the cell reads `15 (secure 44)` for Rairomon to Amarr, where the safe road is three times as long. Equal counts over
+cannot fly in, so both are fetched and the cell reads `11 (secure 20)` for Rens to Amarr, where the safe road is nearly twice as long. Equal counts over
 different paths are still disclosed — two roads of the same length are not the same road. `--flag insecure`
 has no meaningful sibling, so nothing is compared and nothing is requested for it. One link ESI will not
 route costs that cell a dash and a note quoting ESI's reason; the rest of the table still prints. Routing a

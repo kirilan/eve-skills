@@ -22,21 +22,21 @@ The file format (percentages are percent, multipliers are fractions)::
     {
       "default_site": "null",
       "sites": {
-        "kulelen": {"owner": "corp", "facility": "kulelen", "readers": ["General Fail"]},
-        "null": {"owner": "personal", "facility": "4gyv-raitaru", "hub": "4-hwwf",
-                 "characters": ["Santraginus XI", "Santraginus XII"],
-                 "freight_in": "jita->4-hwwf", "freight_out": "4-hwwf->jita"}
+        "highsec": {"owner": "corp", "facility": "highsec", "readers": ["Alice Builder"]},
+        "null": {"owner": "personal", "facility": "example-raitaru", "hub": "x-hub",
+                 "characters": ["Carol Hauler", "Dave Miner"],
+                 "freight_in": "jita->x-hub", "freight_out": "x-hub->jita"}
       },
       "facilities": {
-        "kulelen": {"location_id": 60002329, "system": "Kulelen"},
-        "4gyv-raitaru": {"location_id": 1040000000000, "system": "4GYV-Q", "tax_pct": 1.0,
+        "highsec": {"location_id": 60003760, "system": "Jita"},
+        "example-raitaru": {"location_id": 1040000000000, "system": "X-EXMPL", "tax_pct": 1.0,
                          "structure": "raitaru", "security": "null",
                          "rigs": {"manufacturing": {"me": "t1", "te": "t1"}, "invention": {"te": "t1"}}}
       },
-      "hubs": {"4-hwwf": {"location_id": 1053970513596, "region_id": 10000003,
-                          "system_id": 30000240, "reader": "Santraginus XI"}},
-      "freight": {"jita->4-hwwf": {"per_m3": 445, "collateral_pct": 0, "min": 5000000},
-                  "4-hwwf->jita": {"per_m3": 350, "collateral_pct": 1, "min": 10000000}}
+      "hubs": {"x-hub": {"location_id": 1040000000001, "region_id": 10000060,
+                          "system_id": 30004759, "reader": "Carol Hauler"}},
+      "freight": {"jita->x-hub": {"per_m3": 500, "collateral_pct": 0, "min": 5000000},
+                  "x-hub->jita": {"per_m3": 400, "collateral_pct": 1, "min": 10000000}}
     }
 """
 
@@ -319,7 +319,7 @@ def parse(document: dict, path: str | None = None) -> Operation:
         if not isinstance(raw, dict) or not isinstance(raw.get("location_id"), int):
             raise OperationError(f"{where} needs an integer location_id")
         if not isinstance(raw.get("region_id"), int):
-            raise OperationError(f"{where} needs an integer region_id (Vale of the Silent is 10000003)")
+            raise OperationError(f"{where} needs an integer region_id (Delve is 10000060)")
         system_id = raw.get("system_id")
         if system_id is not None and not isinstance(system_id, int):
             raise OperationError(f"{where}.system_id must be an integer id")
@@ -362,20 +362,20 @@ def load(path: str | None = None) -> Operation:
 
 
 TEMPLATE = {
-    "default_site": "kulelen",
+    "default_site": "highsec",
     "sites": {
-        "kulelen": {"owner": "corp", "facility": "kulelen", "readers": ["General Fail", "Santraginus IX"]},
-        "null": {"owner": "personal", "facility": "4gyv-raitaru",
-                 "characters": ["Santraginus XI", "Santraginus XII", "General Practitioner"],
-                 "hub": "4-hwwf", "freight_in": "jita->4-hwwf", "freight_out": "4-hwwf->jita"},
+        "highsec": {"owner": "corp", "facility": "highsec", "readers": ["Alice Builder", "Bob Inventor"]},
+        "null": {"owner": "personal", "facility": "example-raitaru",
+                 "characters": ["Carol Hauler", "Dave Miner", "Erin Director"],
+                 "hub": "x-hub", "freight_in": "jita->x-hub", "freight_out": "x-hub->jita"},
     },
     "facilities": {
-        "kulelen": {"location_id": 60002329, "system": "Kulelen"},
-        "4gyv-raitaru": {"system": "4GYV-Q", "structure": "raitaru", "security": "null",
+        "highsec": {"location_id": 60003760, "system": "Jita"},
+        "example-raitaru": {"system": "X-EXMPL", "structure": "raitaru", "security": "null",
                          "rigs": {"manufacturing": {"me": "t1", "te": "t1"}}},
     },
-    "hubs": {"4-hwwf": {"location_id": 1053970513596, "label": "4-HWWF WinterCo. Central Station",
-                        "region_id": 10000003, "system_id": 30000240}},
-    "freight": {"jita->4-hwwf": {"per_m3": 445, "collateral_pct": 0, "min": 5000000},
-                "4-hwwf->jita": {"per_m3": 350, "collateral_pct": 1, "min": 10000000}},
+    "hubs": {"x-hub": {"location_id": 1040000000001, "label": "X-EXMPL Example Market Hub",
+                        "region_id": 10000060, "system_id": 30004759}},
+    "freight": {"jita->x-hub": {"per_m3": 500, "collateral_pct": 0, "min": 5000000},
+                "x-hub->jita": {"per_m3": 400, "collateral_pct": 1, "min": 10000000}},
 }

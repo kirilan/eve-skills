@@ -141,7 +141,7 @@ COLONIES = {"generated": stamp(9), "warnings": [], "hints": [], "characters": [{
          {"schematic": {"inputs": [{"type_id": 2286}], "outputs": [{"type_id": 2073, "name": "Biomass"}]}},
          {"schematic": {"inputs": [{"type_id": 3683}, {"type_id": 2073}],
                         "outputs": [{"type_id": 2312, "name": "Supertensile Plastics"}]}}]},
-    {"character_name": "Farmer", "system_name": "Rairomon", "planet_id": PLANET + 1, "planet_type_name": "Barren",
+    {"character_name": "Farmer", "system_name": "Rens", "planet_id": PLANET + 1, "planet_type_name": "Barren",
      "upgrade_level": 4, "last_update": stamp(1), "stale": True,
      "extractors": [{"product_name": "Noble Metals", "heads": 10, "expiry_time": stamp(5), "expired": True}],
      "facilities": []}]}]}

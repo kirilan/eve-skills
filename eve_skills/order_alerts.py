@@ -44,7 +44,7 @@ DEFAULT_SETTINGS = {
     "exclude_characters": [],      # character names
     "remind_hours": 4,
     "quiet_hours": "00:00-08:00",  # local time below; empty string = never quiet
-    "timezone": "Europe/Sofia",
+    "timezone": "UTC",
     "job_alerts": True,            # industry jobs ending soon, then in the reminder until delivered
     "job_notice_minutes": 20,
 }
@@ -57,7 +57,7 @@ class Settings:
     remind_hours: float = 4
     quiet_start: dtime | None = None
     quiet_end: dtime | None = None
-    timezone: str = "Europe/Sofia"
+    timezone: str = "UTC"
     job_alerts: bool = True
     job_notice_minutes: float = 20
 
@@ -313,7 +313,7 @@ def _num(value) -> str:
 
 
 def _where(row: dict) -> str:
-    """The system part of a station name - `Jita`, `4-HWWF` - which is how one says where."""
+    """The system part of a station name - `Jita`, `X-EXMPL` - which is how one says where."""
     name = str(row.get("location") or "")
     return name.split(" ")[0] if name else "?"
 
