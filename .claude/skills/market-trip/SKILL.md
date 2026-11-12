@@ -44,6 +44,14 @@ eve-skills prices signal [--hub KEY] [--json]                           # dip / 
 - Also: `ledger inventory` (held vs listed), `orders --closed --char SELLER` (what filled),
   `sell-plan --seller SELLER --from SYSTEM --hub HUB --item "NAME=QTY"` (hub split).
 
+Before proposing more manufacturing, run `production replenish --site NAME --hub KEY --days N`.
+It uses own sales at this hub and combines live listed/unlisted stock, WIP, copies and expected invention.
+A sold-out listing with stock held needs `list` or `haul` first. New lines without sales need an explicit
+`--target "ITEM=QTY"` trial. Check timestamps and refresh actions before interpreting quantities.
+Each destination is a separate scenario: allocate the shared stock only once across trips. Keep the
+playbook's keep list and one-order policy when acting on its suggestions. See
+[production workflow](../../../docs/production.md) for details.
+
 ## 2. Rules
 
 - **Where to sell** (choice; default: the highest-volume hub). Most volume trades at the main hubs; list

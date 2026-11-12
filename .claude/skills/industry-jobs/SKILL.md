@@ -52,6 +52,26 @@ Is a line worth a slot? `eve-skills build-cost ITEM [ITEM ...] --site NAME --sel
 `--hours-per-run` with the builder's measured figure from the board. Judge a line at the lower of its
 current list price and its 30-day average: a price spike makes any line look good.
 
+## Save and resume the round
+
+Read [the production workflow](../../../docs/production.md) for the round JSON format. Check
+`production round list --site NAME` before making another plan. Resume with `production round check
+--site NAME`: report installed, changed, remaining, blocked and awaiting-refresh lines separately.
+Save the agreed jobs with `production round save FILE --site NAME`; close a completed or superseded
+round explicitly. Notes explain decisions; the saved round is the job checklist.
+
+The checker reserves shared inputs across every remaining job and recalculates finish estimates from
+now. For whole-stack operations, give the installer sequence and the current holder/site/hangar;
+pass all remaining blueprints and materials after each installer finishes installing. Do not allocate
+per-builder material batches. Flag scattered copies and Deliveries stock before calling a round ready.
+Record `production round handoff` only for a user-confirmed transfer; confirmation and cached ESI
+holdings are separate evidence. Do not infer a missed install while jobs are awaiting refresh.
+
+Use `production replenish --site NAME --hub KEY` before expanding a line: list or haul existing output
+first, then consider WIP, idle copies and invention. Use `production scan ITEM ... --site NAME` for a
+new product comparison; it includes invention costs and lab capacity. Own hub sales and regional-share
+scenarios are different evidence. Unknown eligibility, fees or timing need checking before installation.
+
 ## 2. Decide
 
 - **Deliver first.** A ready job holds its slot until it is delivered. Say so up front.
@@ -133,10 +153,11 @@ current list price and its 30-day average: a price spike makes any line look goo
 4. The pool check: covered, or which input is short and how many jobs that costs; expensive inputs left
    for the next round.
 5. T1 copy coverage per invented line, and a copy job for any line with a round or less left.
-6. When the next batch is due. If the installation keeps a ledger, record the plan as a note.
+6. When the next batch is due, the saved round ID, and relevant ledger notes for decisions.
 
-**"Did I miss anything?"** `jobs --since <plan time> --site NAME` lists what was installed; compare it with
-the plan and give only the remainder, in the same format.
+**"Did I miss anything?"** Use `production round check --site NAME` and give the remainder, changed
+installs and refresh blockers. With no saved round, use `jobs --since <plan time> --site NAME` to compare
+against the prior note; save the next agreed round so later checks are structured.
 
 ## Where new rules go
 

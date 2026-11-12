@@ -201,6 +201,8 @@ class JobCost:
     successes: int | None = None
     decryptor_id: int | None = None
     me: int | None = None
+    material_multiplier: float = 1.0
+    facility_observation_id: int | None = None
 
     @property
     def total(self) -> float:
@@ -219,6 +221,7 @@ class Facts:
     internal_ids: set[int]
     # Planetary holdings polls, oldest first (`ledger_db.pi_polls`).
     pi_polls: list[dict] = field(default_factory=list)
+    facility_history: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -266,6 +269,11 @@ def load(conn: sqlite3.Connection) -> Facts:
         polls = ledger_db.pi_polls(conn)
     except sqlite3.OperationalError:     # a read-only ledger from before schema 5
         polls = []
+    from . import production_store
+    try:
+        facility_history = production_store.histories(conn)
+    except sqlite3.OperationalError:  # older read-only ledger
+        facility_history = []
     return Facts(
         jobs=rows("SELECT * FROM jobs ORDER BY start_date, job_id"),
         transactions=rows("SELECT * FROM transactions ORDER BY date, transaction_id"),
@@ -275,6 +283,7 @@ def load(conn: sqlite3.Connection) -> Facts:
         opening_prices=opening,
         internal_ids=internal,
         pi_polls=polls,
+        facility_history=facility_history,
     )
 
 
@@ -672,7 +681,18 @@ class _Replay:
         runs = j["runs"]
         if j["facility_id"] is not None and j["facility_id"] not in NPC_STATIONS and \
                 activity in (MANUFACTURING, *REACTIONS):
-            self.note("structure_jobs")
+            from .production_store import profile_at
+            observation = profile_at(self.facts.facility_history, j["facility_id"], date)
+            if observation is None:
+                self.note("structure_jobs")
+            else:
+                key = "manufacturing" if activity == MANUFACTURING else "reaction"
+                profile = observation["profile"]
+                cost.material_multiplier = profile.get("material", {}).get(key, 1.0)
+                cost.facility_observation_id = observation["id"]
+                self.note("dated_structure_jobs")
+                if profile.get("unknown"):
+                    self.note("uncertain_structure_jobs")
         if activity in (MANUFACTURING, *REACTIONS):
             recipe = self.recipes.get(j["blueprint_type_id"])
             if recipe is None:
@@ -682,7 +702,7 @@ class _Replay:
             me = max(0, min(me, industry.MAX_ME))
             cost.me = me
             for material, base in recipe.materials.items():
-                total, opening = self._consume(date, material, industry.required_quantity(base, runs, me))
+                total, opening = self._consume(date, material, industry.required_quantity(base, runs, me, cost.material_multiplier))
                 cost.materials += total
                 cost.opening += opening
             if not self._is_bpo(j["blueprint_id"]):
@@ -1081,3 +1101,12 @@ def snapshot(book: Book, facts: Facts, now: str, since: str | None = None) -> di
         "stock_at_cost": round(sum(p.cost for (kind, _t), p in book.pools.items() if kind == "item" and p.qty > 0), 2),
         "work_in_progress_cost": round(sum(j["cost"] for j in work_in_progress(book)), 2),
     }
+
+
+def fee_quality(book):
+    """Observed fees are evidence, never proof that all structure charges reached the journal."""
+    fees = [e for e in book.entries if e.kind in ('broker_fee', 'sales_tax')]
+    return dict(status='unverified', matched=sum(-e.amount for e in fees if e.scope != SCOPE_OVERHEAD),
+                unmatched=sum(-e.amount for e in fees if e.scope == SCOPE_OVERHEAD),
+                rate_matched=book.notes.get('broker_fees_matched_by_rate', 0),
+                explanation='Journal matching does not prove fee completeness; structure listing fees may be missing.')

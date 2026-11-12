@@ -869,7 +869,7 @@ class AlphadataUpdateTests(XdgTestCase):
         self.assertEqual({"invention_blueprints": 1, "decryptors": 1},
                          {key: summaries[0][key] for key in ("invention_blueprints", "decryptors")})
         invention = alphadata.blueprint_invention()
-        self.assertEqual({"681": {"m": {"20171": 2}, "p": [["1163", 10, 0.3]], "t": 900}}, invention["blueprints"])
+        self.assertEqual({"681": {"m": {"20171": 2}, "p": [["1163", 10, 0.3]], "t": 900, "s": {}}}, invention["blueprints"])
         self.assertEqual({"34203": {"name": "Augmentation Decryptor", "probability": 0.6, "me": -2, "te": 2,
                                     "runs": 9}}, invention["decryptors"])
         # Planetary industry arrives with the rest, and its counts come from those same rows - including

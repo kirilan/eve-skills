@@ -12,6 +12,7 @@ import time
 
 
 from . import __version__, alphadata, doctor as doctor_mod, esi as esi_mod, exports, industry, ledger_db, market, render, sso, watchstate
+from . import cmd_production
 from . import cmd_alerts, cmd_build_cost, cmd_colonies, cmd_operation, cmd_dashboard, cmd_industry, cmd_ledger, cmd_market, cmd_orders, cmd_pi, cmd_prices, cmd_restock, cmd_sell_plan, cmd_skills, cmd_system, cmd_types, cmd_watch
 
 
@@ -812,10 +813,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_update = sub.add_parser("update-data", help="refresh alpha caps, the skill catalog and blueprint materials from the official SDE (~100 MB download)")
     p_update.add_argument("--build", type=int, help="specific SDE build number (default: latest)")
 
+    cmd_production.add_parser(sub)
     return parser
 
 
-HANDLERS = {"login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
+HANDLERS = {"production": cmd_production.cmd_production, "login": cmd_login, "logout": cmd_logout, "chars": cmd_chars,
             "summary": cmd_skills.cmd_summary, "attributes": cmd_attributes,
             "plan": cmd_skills.cmd_plan, "extract": cmd_skills.cmd_extract,
             "update-data": cmd_update_data, "standings": exports.cmd_standings,
