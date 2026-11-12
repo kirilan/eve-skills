@@ -53,6 +53,12 @@ chars.txt
 # Private agent-harness policy for this workstation: local guidance, not project documentation
 AGENTS.md
 
+# An installation's own notes and scratch work, and the agent harness's local state (worktrees,
+# settings). The agent skills under .claude/skills/ are part of the project and stay tracked.
+local/
+.claude/*
+!.claude/skills/
+
 # Editor and OS droppings
 .idea/
 .vscode/
