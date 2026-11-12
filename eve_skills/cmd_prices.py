@@ -1,7 +1,8 @@
-"""`prices`: track Jita prices of what we sell, and say whether today is a dip worth waiting out.
+"""`prices`: track the prices of what we sell, and say whether today is a dip worth waiting out.
 
 `sync` is the only subcommand that reads ESI for prices: history for watched types whose stored days end
-before yesterday, and one Jita book snapshot each (run hourly by a timer). `signal` and `backtest`
+before yesterday, and one book snapshot each, for Jita and every site hub of the operation file (run
+hourly by a timer). `signal --hub KEY` judges another hub against its region's history. `signal` and `backtest`
 work from the ledger alone - ESI is only asked for names, which come from the shared cache.
 The rule and what it was measured to be worth are in `price_watch`.
 """
@@ -9,10 +10,11 @@ The rule and what it was measured to be worth are in `price_watch`.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import cmd_ledger, ledger_db, market, price_watch as pw, render
 
@@ -25,17 +27,42 @@ def _pct(value: float | None, signed: bool = True) -> str:
     return "-" if value is None else (f"{value:+.1f}%" if signed else f"{value:.0f}%")
 
 
+def _sync_hubs(keys: list[str] | None) -> tuple[list[market.Hub], list[str]]:
+    """The hubs to poll: `--hub` as given, else Jita plus every site hub of the operation file."""
+    problems: list[str] = []
+    if not keys:
+        keys = [pw.HUB.key]
+        from . import operation
+        try:
+            keys += [site.hub for site in operation.load().sites.values() if site.hub]
+        except Exception as err:            # noqa: BLE001 - Jita is still polled
+            problems.append(f"operation file: {err}")
+    hubs = []
+    for key in dict.fromkeys(str(k).strip().lower() for k in keys):
+        try:
+            hubs.append(market.get_hub(key))
+        except RuntimeError as err:
+            problems.append(str(err))
+    return hubs, problems
+
+
 def cmd_sync(args) -> int:
+    hubs, hub_problems = _sync_hubs(getattr(args, "hub", None))
+    if not hubs:
+        raise RuntimeError("; ".join(hub_problems) or "no hub to poll")
     with contextlib.closing(ledger_db.connect()) as conn:
-        result = pw.sync(conn, cmd_ledger._client(), history=not args.no_history, book=not args.no_book)
+        result = pw.sync(conn, cmd_ledger._client(), history=not args.no_history, book=not args.no_book, hubs=hubs)
+    result.problems = hub_problems + (result.problems or [])
     if args.json:
         print(json.dumps(result.to_json(), indent=2))
     elif not args.quiet or result.problems:
         print(f"prices: {result.types} types, history read for {result.history_fetched} "
-              f"({result.history_new_days:,} new days), {result.snapshots_new} new book snapshots")
+              f"({result.history_new_days:,} new days), {result.snapshots_new} new book snapshots"
+              + ("" if result.hubs == [pw.HUB.key] else f" ({', '.join(result.hubs or [])})"))
         for line in result.problems:
             print(f"  problem: {line}", file=sys.stderr)
-    return 1 if result.problems and not (result.history_fetched or result.snapshots_new) else 0
+    # A hub that could not be read is a warning; failing outright needs every read to have failed.
+    return 1 if result.problems and not result.reads else 0
 
 
 def _types(conn, args) -> dict[int, str]:
@@ -46,13 +73,28 @@ def _types(conn, args) -> dict[int, str]:
     return watched
 
 
-def _latest_snapshot(conn, type_id: int) -> dict | None:
-    rows = ledger_db.book_snapshots(conn, pw.HUB.station_id, type_id)
+def _latest_snapshot(conn, type_id: int, location_id: int | None = None) -> dict | None:
+    rows = ledger_db.book_snapshots(conn, location_id or pw.HUB.station_id, type_id)
     return rows[-1] if rows else None
+
+
+def _thin(advice: pw.Advice, days, now: datetime, region: str) -> pw.Advice:
+    """Off Jita: a type its region traded on too few days gets no dip/high advice."""
+    end = days[-1].day if days else now.date() - timedelta(days=1)
+    traded = pw.trading_days(days, end)
+    if traded >= pw.THIN_DAYS:
+        return advice
+    return dataclasses.replace(advice, state=pw.THIN, hold_qty=0.0, sell_qty=advice.stock.qty, target=None,
+                               action="-", reason=f"thin: {traded} trading days in the last {pw.BASELINE_DAYS} "
+                                                  f"in {region} - no dip/high advice")
 
 
 def cmd_signal(args) -> int:
     now = _now()
+    hub = market.get_hub(getattr(args, "hub", None) or pw.HUB.key)
+    other = hub.key != pw.HUB.key
+    region = (cmd_ledger._names(cmd_ledger._client(), {hub.region_id}).get(hub.region_id)
+              or f"region {hub.region_id}") if other else "The Forge"
     with contextlib.closing(cmd_ledger._open()) as conn:
         book, header, _recipes, _invention = cmd_ledger._state(conn)
         # Inputs are watched for restock's buy side; holding or listing them is not a question.
@@ -61,21 +103,23 @@ def cmd_signal(args) -> int:
         fee = pw.realised_fee_pct(book.entries, now)
         advice = []
         for type_id in watched:
-            days = pw.days_from_rows(ledger_db.market_history(conn, pw.HUB.region_id, type_id))
-            advice.append(pw.advise(type_id, days, _latest_snapshot(conn, type_id), stocks[type_id], fee, now))
+            days = pw.days_from_rows(ledger_db.market_history(conn, hub.region_id, type_id))
+            one = pw.advise(type_id, days, _latest_snapshot(conn, type_id, hub.station_id), stocks[type_id], fee, now)
+            advice.append(_thin(one, days, now, region) if other else one)
         last_prices = next((s["synced_at"] for s in ledger_db.sources(conn) if s["source"] == "prices"), None)
     names = cmd_ledger._names(cmd_ledger._client(), watched)
     if not args.all:
         advice = [a for a in advice if a.stock.qty > 0 or a.state in (pw.DIP, pw.HIGH)]
-    order = {pw.DIP: 0, pw.HIGH: 1, pw.FALLING: 2, pw.NORMAL: 3, None: 4}
+    order = {pw.DIP: 0, pw.HIGH: 1, pw.FALLING: 2, pw.NORMAL: 3, pw.THIN: 4, None: 5}
     advice.sort(key=lambda a: (order[a.state], names.get(a.type_id, "")))
     assumptions = [
         "stock and unit cost are the ledger's (goods made or bought, minus goods sold), not a live asset read",
         f"hold cap = {pw.HORIZON_DAYS} days of our own sales over the last {pw.SALES_RATE_DAYS} days, every hub",
-        "normal = median daily average in The Forge over the last 30 days; the daily average mixes buy- and "
-        "sell-order fills",
-        "now = lowest Jita 4-4 ask from the newest book snapshot (under %dh old), else the newest daily average"
-        % pw.SNAPSHOT_MAX_AGE_HOURS,
+        (f"normal = median daily average in {region} over the last 30 days; the daily average mixes buy- and "
+         "sell-order fills") + (f" - regional: every trade in the region, not only at {hub.label}; under "
+                                f"{pw.THIN_DAYS} trading days is 'thin', with no dip/high advice" if other else ""),
+        "now = lowest %s ask from the newest book snapshot (under %dh old), else the newest daily average"
+        % (hub.label, pw.SNAPSHOT_MAX_AGE_HOURS),
         "fee rate = sales tax + broker fees over revenue, last 30 days of our own sales"
         + ("" if fee is not None else " - none recorded, so net prices are unknown"),
         "measured edge of holding a dip (2026-10-04, T2 rigs/modules): median +2.3%/unit, 56% of holds gained",
@@ -83,7 +127,8 @@ def cmd_signal(args) -> int:
     if args.json:
         rows = []
         for a in advice:
-            rows.append({"type_id": a.type_id, "type": names.get(a.type_id), "state": a.state, "action": a.action,
+            rows.append({"type_id": a.type_id, "type": names.get(a.type_id), "hub": hub.key,
+                         "state": a.state, "action": a.action,
                          "price": a.price, "price_source": a.price_source,
                          "normal": a.base.median if a.base else None, "spread": a.base.scale if a.base else None,
                          "z": a.z, "week_vs_normal_pct": (a.base.short_median / a.base.median - 1) * 100
@@ -93,10 +138,10 @@ def cmd_signal(args) -> int:
                          "hold_cap": a.hold_cap, "hold": a.hold_qty, "sell": a.sell_qty, "target": a.target,
                          "net_now": a.net_now, "past_dips": vars(a.evidence) | {"rate": a.evidence.rate},
                          "reason": a.reason})
-        print(json.dumps({**header, "prices_synced": last_prices, "fee_pct": fee, "items": rows,
+        print(json.dumps({**header, "hub": hub.key, "prices_synced": last_prices, "fee_pct": fee, "items": rows,
                           "assumptions": assumptions}, indent=2))
         return 0
-    lines = cmd_ledger._print_header("prices signal (Jita 4-4)", header)
+    lines = cmd_ledger._print_header(f"prices signal ({hub.label})", header)
     lines.append(f"prices synced: {last_prices or 'never - run: eve-skills prices sync'}")
     table = []
     for a in advice:
@@ -114,7 +159,7 @@ def cmd_signal(args) -> int:
                                "hold cap", "action", "net now", "unit cost"], table))
     lines.append("~ newest daily average (no fresh book snapshot); ! net below the ledger's unit cost")
     for a in advice:
-        if a.state in (pw.DIP, pw.FALLING, pw.HIGH):
+        if a.state in (pw.DIP, pw.FALLING, pw.HIGH, pw.THIN):
             lines.append(f"  {names.get(a.type_id, a.type_id)}: {a.reason}")
     header["notes"] = assumptions + header["notes"]
     cmd_ledger._print_notes(lines, header)

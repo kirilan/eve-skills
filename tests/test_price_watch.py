@@ -7,12 +7,16 @@ live ESI's row shapes, into a temporary ledger.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest import mock
 
-from eve_skills import esi, ledger_db, price_watch as pw
+from eve_skills import cmd_prices, esi, ledger_db, market, price_watch as pw
 
 START = date(2026, 1, 1)
 WOBBLE = (0.0, 1.0, -1.0, 0.5, -0.5)   # percent: a spread of about 1%, the floor
@@ -257,6 +261,92 @@ class SyncTest(unittest.TestCase):
         pw.sync(self.conn, client, types=[500], book=False)
         pw.sync(self.conn, client, types=[500], book=False)
         self.assertEqual(1, sum(1 for c in client.calls if "/history" in c))
+
+
+STRUCTURE = market.Hub("example-hub", "Example Hub", 1_040_000_000_009, 10_000_099, 30_000_099, structure=True,
+                       reader="Carol Hauler")
+
+
+class HubSyncTest(unittest.TestCase):
+    """A second hub: the operation file's structure market, read once per sync for every type."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.conn = ledger_db.connect(os.path.join(self.dir.name, "ledger.sqlite3"))
+        self.addCleanup(self.conn.close)
+        day = [{"date": "2026-02-19", "average": 10.0, "highest": 11.0, "lowest": 9.0, "volume": 4, "order_count": 2}]
+        self.client = StubClient({500: day, 600: day}, {500: [{"order_id": 1, "location_id": pw.HUB.station_id,
+                                                               "is_buy_order": False, "price": 10.4,
+                                                               "volume_remain": 3}], 600: []})
+        self.structure_rows = [
+            {"order_id": 7, "type_id": 500, "location_id": STRUCTURE.station_id, "is_buy_order": False,
+             "price": 12.0, "volume_remain": 5},
+            {"order_id": 8, "type_id": 600, "location_id": STRUCTURE.station_id, "is_buy_order": False,
+             "price": 20.0, "volume_remain": 1}]
+
+    def test_sync_stores_history_and_books_for_both_hubs(self):
+        reads = []
+
+        def book(client, structure_id, reader):
+            reads.append((structure_id, reader))
+            return self.structure_rows, esi.Meta(last_modified=NOW.timestamp() - 60)
+
+        with mock.patch.object(market, "structure_book", side_effect=book):
+            result = pw.sync(self.conn, self.client, types=[500, 600], hubs=[pw.HUB, STRUCTURE])
+        self.assertEqual([], result.problems)
+        self.assertEqual(["jita", "example-hub"], result.hubs)
+        self.assertEqual([(STRUCTURE.station_id, "Carol Hauler")], reads)          # once for every type
+        for region in (pw.HUB.region_id, STRUCTURE.region_id):
+            self.assertEqual(1, len(ledger_db.market_history(self.conn, region, 500)))
+        self.assertEqual(12.0, ledger_db.book_snapshots(self.conn, STRUCTURE.station_id, 500)[-1]["best_sell"])
+        self.assertEqual(20.0, ledger_db.book_snapshots(self.conn, STRUCTURE.station_id, 600)[-1]["best_sell"])
+        self.assertEqual(10.4, ledger_db.book_snapshots(self.conn, pw.HUB.station_id, 500)[-1]["best_sell"])
+
+    def test_a_refused_structure_read_keeps_the_jita_part(self):
+        refused = RuntimeError("ESI refused the market of structure 1040000000009 to Carol Hauler")
+        with mock.patch.object(market, "structure_book", side_effect=refused):
+            result = pw.sync(self.conn, self.client, types=[500], hubs=[pw.HUB, STRUCTURE])
+        self.assertEqual(1, len(result.problems))
+        self.assertIn("book example-hub", result.problems[0])
+        self.assertEqual(1, result.snapshots_new)
+        self.assertEqual(1, len(ledger_db.book_snapshots(self.conn, pw.HUB.station_id, 500)))
+        # the command still succeeds - a warning line, exit status 0 - even when Jita has nothing new
+        with self.conn:
+            ledger_db.set_watchlist(self.conn, 500, "add", "x")
+        args = SimpleNamespace(hub=None, no_history=False, no_book=False, json=False, quiet=True)
+        path, connect = os.path.join(self.dir.name, "ledger.sqlite3"), ledger_db.connect
+        with mock.patch.object(cmd_prices, "_sync_hubs", return_value=([pw.HUB, STRUCTURE], [])), \
+                mock.patch.object(cmd_prices.ledger_db, "connect", side_effect=lambda: connect(path)), \
+                mock.patch.object(cmd_prices.cmd_ledger, "_client", return_value=self.client), \
+                mock.patch.object(market, "structure_book", side_effect=refused), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            status = cmd_prices.cmd_sync(args)
+        self.assertEqual(0, status)
+        self.assertIn("problem: book example-hub", err.getvalue())
+
+    def test_default_hubs_are_jita_and_the_site_hubs(self):
+        op = SimpleNamespace(sites={"home": SimpleNamespace(hub="example-hub"), "corp": SimpleNamespace(hub=None)})
+        with mock.patch("eve_skills.operation.load", return_value=op), \
+                mock.patch.object(market, "configured_hubs", return_value={"example-hub": STRUCTURE}):
+            hubs, problems = cmd_prices._sync_hubs(None)
+            self.assertEqual((["jita", "example-hub"], []), ([h.key for h in hubs], problems))
+            hubs, problems = cmd_prices._sync_hubs(["amarr", "nowhere"])
+        self.assertEqual(["amarr"], [h.key for h in hubs])
+        self.assertIn("unknown hub 'nowhere'", problems[0])
+
+
+class ThinTest(unittest.TestCase):
+    def test_another_hub_with_few_trading_days_gets_no_advice(self):
+        days = series(flat(40))
+        sparse = [d for i, d in enumerate(days) if i % 5 == 0]           # 8 trading days in the last 30
+        stock = pw.Stock(qty=10, unit_cost=50.0, sold_per_day=1.0)
+        advice = pw.advise(500, sparse, None, stock, 5.0, NOW)
+        thin = cmd_prices._thin(advice, sparse, NOW, "Example Region")
+        self.assertEqual((pw.THIN, "-", 0.0, 10), (thin.state, thin.action, thin.hold_qty, thin.sell_qty))
+        self.assertIn("thin: ", thin.reason)
+        busy = pw.advise(500, days, None, stock, 5.0, NOW)
+        self.assertIs(busy, cmd_prices._thin(busy, days, NOW, "Example Region"))
 
 
 if __name__ == "__main__":

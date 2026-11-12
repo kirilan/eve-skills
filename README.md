@@ -1267,8 +1267,9 @@ systemctl --user enable --now eve-orders-alert.timer
 ### `prices` — is today's Jita price a dip worth waiting out?
 
 ```bash
-eve-skills prices sync                 # Jita history (when behind) + one book snapshot per watched type
+eve-skills prices sync                 # history (when behind) + one book snapshot per watched type and hub
 eve-skills prices signal               # now vs normal per type: dip / high / falling, hold or sell how much
+eve-skills prices signal --hub KEY     # the same at a site hub, against its region's history
 eve-skills prices backtest --sold-only # what holding each past dip earned per unit
 eve-skills prices watch list           # watched types; `watch add|exclude|reset NAME` changes the list
 ```
@@ -1278,6 +1279,10 @@ additions minus exclusions. Inputs bought at least 3 times in that time from a c
 so their asks build up for `restock`'s price check; `signal` leaves them out. `sync` stores ESI's daily Forge history (about 13 months; re-read at most
 every 4 hours while ESI has not published yesterday yet) and a reduced Jita 4-4 book per type (lowest
 ask from other sellers, highest bid, units within 1% and 5% of it, and our own units apart) in the ledger file, schema v3.
+`sync` polls Jita plus every site `hub` of the operation file (`--hub KEY`, repeatable, overrides): a
+structure hub's whole book is read once per sync through a stored character with docking access and the
+`structure-markets` consent, and its history comes from the hub's region. A structure that refuses the
+read is a problem line, not a failed sync: the exit status is 1 only when nothing at all could be read.
 It is meant to run hourly — on the operation's workstation a systemd user timer does that. The units are
 in `contrib/systemd/eve-prices.{service,timer}`; copy both and point the service's two paths at your checkout:
 
@@ -1297,6 +1302,12 @@ level; two over is **high**. Only a dip is held, and never more than 14 days of 
 days, every hub); the rest is listed. One listing per item per hub, so held stock waits in the hangar -
 or, when the whole stack is held, it may go up once at normal and fill when the price comes back. Net is after the sales tax and broker fees we actually paid over the last 30 days
 (`!` marks a net below the ledger's unit cost).
+
+`signal --hub KEY` judges another hub the same way, with two differences the assumptions block repeats:
+*normal* is the hub region's daily average (every trade in the region, not only at that structure), and
+a type the region traded on fewer than 10 of the last 30 days is **thin** - no dip or high advice, price
+it from the book. `--json` rows and the document carry `hub`; without `--hub` the output is Jita's as
+before. `backtest` stays Jita.
 
 What that is worth was measured on 2026-10-04 over a year of history for the 15 T2 rigs and modules we
 sell, holding each dip until the first day back near normal or 14 days: a median **+2.3%** per held unit

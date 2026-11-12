@@ -751,11 +751,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    help="ledger figures only: skip the live industry status and order checks")
 
     p_prices = sub.add_parser(
-        "prices", help="track Jita prices of what we sell in the ledger and flag temporary dips worth "
-                       "holding through (history and book snapshots; signal and backtest work offline)")
+        "prices", help="track the prices of what we sell (Jita and the operation file's site hubs) in the "
+                       "ledger and flag temporary dips worth holding through (history and book snapshots; "
+                       "signal and backtest work offline)")
     prices_sub = p_prices.add_subparsers(dest="prices_action")
-    p_psync = prices_sub.add_parser("sync", help="store Jita daily history (when behind) and one book snapshot "
-                                                 "per watched type; meant to run hourly")
+    p_psync = prices_sub.add_parser("sync", help="store daily history (when behind) and one book snapshot per "
+                                                 "watched type and hub; meant to run hourly")
+    p_psync.add_argument("--hub", action="append", metavar="KEY",
+                         help="poll this hub (repeat for several; default: jita plus every site hub of the "
+                              "operation file; a structure hub needs a reader with docking access)")
     p_psync.add_argument("--no-history", action="store_true", help="only the book snapshots")
     p_psync.add_argument("--no-book", action="store_true", help="only the daily history")
     p_psync.add_argument("--quiet", action="store_true", help="print only problems (for a timer)")
@@ -763,6 +767,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_psig = prices_sub.add_parser("signal", help="per watched type: now vs normal, dip/high/falling, and how "
                                                   "much stock to hold or sell (two weeks of our sales at most)")
     p_psig.add_argument("--all", action="store_true", help="also types with no stock and a normal price")
+    p_psig.add_argument("--hub", metavar="KEY", help="judge this hub's book against its region's history "
+                                                     "(default jita; thin markets get no dip/high advice)")
     p_psig.add_argument("--json", action="store_true", help="machine-readable output")
     p_pbt = prices_sub.add_parser("backtest", help="replay the dip rule over the stored history: what holding "
                                                    "each dip earned per unit, and falling starts for contrast")
