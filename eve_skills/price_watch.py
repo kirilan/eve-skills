@@ -16,7 +16,7 @@ the last BASELINE_DAYS; spread is the median absolute deviation scaled to a stan
 at MIN_SCALE_PCT, since some types trade at one price for days). A price DIP_Z spreads under normal is
 a *dip* - unless the last SHORT_DAYS have been that low too, which is a new level (*falling*), and
 waiting for a recovery that is not coming only costs time. A dip is held until the price is back near
-normal, or HORIZON_DAYS at most, and never more than HORIZON_DAYS of our own sales.
+normal, or HORIZON_DAYS at most, and never more than HORIZON_DAYS of our expected sales.
 
 What the rule is worth was measured on 2026-10-04 over a year of Jita history for the 15 T2 rigs and
 modules we sell (`prices backtest`), selling each held unit on the first day back near normal or at the
@@ -428,25 +428,180 @@ def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, history: bool = True,
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class HubRate:
+    """Our expected sales of one type at one hub, and what the figure rests on."""
+    hub: str                    # hub key, or OTHER for sales anywhere else
+    sold: float                 # units we sold there in the last SALES_RATE_DAYS
+    listed_days: float | None   # days one of our sell orders was up there in that time (None: not measured)
+    prior: float                # units/day the region's volume suggests before our own record says more
+    ceiling: float | None       # units/day the rate may not pass (a share of the region's volume)
+    rate: float                 # units/day the hold cap uses
+    basis: str                  # MEASURED | BLEND | PRIOR | FLAT
+
+
+@dataclass(frozen=True)
 class Stock:
     qty: float               # units the ledger holds (hangars and open sell orders)
     unit_cost: float | None
-    sold_per_day: float      # our own sales, last 30 days, every hub
+    sold_per_day: float      # expected sales per day, every hub (the sum of `rates`)
+    rates: tuple[HubRate, ...] = ()
+
+    @property
+    def basis(self) -> str | None:
+        """What the hold cap rests on: MEASURED when every hub with a rate has enough listed days of its
+        own, PRIOR when none has sold anything yet, BLEND in between (FLAT: only sales off the hubs)."""
+        used = [r for r in self.rates if r.rate > 0]
+        if not used:
+            return None
+        kinds = {r.basis for r in used}
+        if kinds == {FLAT}:
+            return FLAT
+        kinds.discard(FLAT)
+        return kinds.pop() if len(kinds) == 1 else BLEND
 
 
 SALES_RATE_DAYS = 30
 
+# Our sales rate per hub, for the hold cap (decided 2026-11-12). Units sold divided by 30 calendar days
+# read a line that is new, or that sold out within hours of each listing, as having almost no demand
+# (Medium Cargohold Optimization II: 10 sold in its first 8 listed hours, cap 5). So each hub's rate is
+# the units sold *while one of our orders was up*, per listed day, shrunk toward a prior from the hub's
+# regional volume that counts as RATE_PRIOR_DAYS of evidence: a new line starts at the prior, and its own
+# record takes over as listed days build up. One day-one sellout moves the rate a little, not 30-fold.
+# The main hub's prior share is about 2/3 of the median share our established Jita lines took while
+# listed (4.9-14.7%, median 9.7%, 30 days to 2026-11-12); an operation's local hub (a structure market
+# where we are one of few sellers) starts at half its region's volume (an operation that lists about
+# two weeks of the region's volume there sells it all). Ceilings keep one good day from making a runaway cap.
+# Only goods our own manufacturing jobs made in the last WATCH_SALES_DAYS get this model: minerals,
+# loot and the odd module we resell have no line behind them, and keep the flat 30-day rate.
+RATE_PRIOR_DAYS = 7.0
+MAIN_HUB_SHARE, MAIN_HUB_CEILING = 0.06, 0.10      # of the main hub's region volume
+LOCAL_HUB_SHARE, LOCAL_HUB_CEILING = 0.50, 1.00    # of a local hub's region volume
+SNAPSHOT_HOLD_HOURS = 2.0   # a snapshot that shows our order counts as listed until the next one, at most this
+OPEN_STALE_DAYS = 1.0       # an 'open' order the ledger has not seen for this long ended when it was last seen
+MEASURED, BLEND, PRIOR, FLAT = "measured", "blend", "prior", "flat"
+OTHER = "other"
 
-def stock_figures(conn: sqlite3.Connection, pools: Mapping, now: datetime, type_ids: Iterable[int]) -> dict[int, Stock]:
-    """Per type: the ledger's stock and unit cost (`ledger.Book.pools`) and our own sales rate."""
-    since = _iso(now - timedelta(days=SALES_RATE_DAYS))
-    sold = {int(r[0]): float(r[1]) for r in conn.execute(
-        "SELECT type_id, SUM(quantity) FROM transactions WHERE is_buy = 0 AND date >= ? GROUP BY type_id", (since,))}
+
+def _parse(ts: str) -> datetime:
+    return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+
+
+def _union_days(intervals: Iterable[tuple[datetime, datetime]], start: datetime, end: datetime) -> float:
+    spans = sorted((max(a, start), min(b, end)) for a, b in intervals if b > start and a < end)
+    total, cur_a, cur_b = 0.0, None, None
+    for a, b in spans:
+        if b <= a:
+            continue
+        if cur_b is None or a > cur_b:
+            if cur_b is not None:
+                total += (cur_b - cur_a).total_seconds()
+            cur_a, cur_b = a, b
+        else:
+            cur_b = max(cur_b, b)
+    if cur_b is not None:
+        total += (cur_b - cur_a).total_seconds()
+    return total / 86400
+
+
+def listed_days(conn: sqlite3.Connection, type_id: int, location_id: int, start: datetime, end: datetime) -> float:
+    """Days in [start, end] one of our sell orders for the type was up at the location: the union of
+    order lifetimes (`orders`) and the hours hourly book snapshots saw our units. Each source misses
+    something - `issued` moves forward on a reprice, and an order that sells out between two polls never
+    shows in a snapshot - so either one is enough."""
+    intervals: list[tuple[datetime, datetime]] = []
+    sales = [(_parse(d), float(q)) for d, q in conn.execute(
+        "SELECT date, quantity FROM transactions WHERE is_buy = 0 AND type_id = ? AND location_id = ? ORDER BY date",
+        (type_id, location_id))]
+    for issued, state, total, remain, last_seen, raw in conn.execute(
+            "SELECT issued, state, volume_total, volume_remain, last_seen, json_extract(raw, '$.duration') "
+            "FROM orders WHERE is_buy = 0 AND type_id = ? AND location_id = ?", (type_id, location_id)):
+        if not issued:
+            continue
+        a = _parse(issued)
+        if state == "open":
+            seen = _parse(last_seen) if last_seen else end
+            b = end if (end - seen).total_seconds() <= OPEN_STALE_DAYS * 86400 else seen
+        elif remain == 0 or state == "cancelled":
+            # Sold out: up until the sale that filled it, read from our own sales. A cancelled order's
+            # end is unknown; its last sale is the shortest it can have been up.
+            b, filled = a, 0.0
+            for when, qty in sales:
+                if when < a:
+                    continue
+                b, filled = when, filled + qty
+                if filled >= (total or 0):
+                    break
+        else:   # expired with units left: up for its whole duration
+            b = a + timedelta(days=float(raw or 90))
+        intervals.append((a, min(b, end)))
+    snaps = [(_parse(r[0]), int(r[1] or 0)) for r in conn.execute(
+        "SELECT polled_at, our_sell_units FROM book_snapshots WHERE location_id = ? AND type_id = ? "
+        "AND polled_at >= ? ORDER BY polled_at", (location_id, type_id, _iso(start - timedelta(hours=SNAPSHOT_HOLD_HOURS))))]
+    for i, (at, ours) in enumerate(snaps):
+        if ours <= 0:
+            continue
+        nxt = snaps[i + 1][0] if i + 1 < len(snaps) else end
+        intervals.append((at, min(nxt, at + timedelta(hours=SNAPSHOT_HOLD_HOURS))))
+    return _union_days(intervals, start, end)
+
+
+def region_volume_per_day(conn: sqlite3.Connection, region_id: int, type_id: int, now: datetime,
+                          days: int = SALES_RATE_DAYS) -> float:
+    """The region's traded units per calendar day over the last `days` (days without trades count as 0)."""
+    since = (now.astimezone(timezone.utc).date() - timedelta(days=days)).isoformat()
+    row = conn.execute("SELECT SUM(volume) FROM market_history WHERE region_id = ? AND type_id = ? AND day >= ?",
+                       (region_id, type_id, since)).fetchone()
+    return float(row[0] or 0) / days
+
+
+def hub_rate(hub: str, sold: float, listed: float, region_volume: float, share: float, ceiling_share: float,
+             prior_days: float = RATE_PRIOR_DAYS) -> HubRate:
+    """Units sold per listed day, shrunk toward `share` of the region's volume (worth `prior_days` listed
+    days), and never above `ceiling_share` of it."""
+    prior = share * region_volume
+    ceiling = ceiling_share * region_volume if region_volume > 0 else None
+    rate = (sold + prior_days * prior) / (listed + prior_days)
+    if ceiling is not None:
+        rate = min(rate, ceiling)
+    basis = PRIOR if sold <= 0 and listed <= 0 else MEASURED if listed >= prior_days else BLEND
+    return HubRate(hub, sold, round(listed, 2), round(prior, 2), None if ceiling is None else round(ceiling, 2),
+                   rate, basis)
+
+
+def stock_figures(conn: sqlite3.Connection, pools: Mapping, now: datetime, type_ids: Iterable[int],
+                  hubs: Sequence[market.Hub] | None = None) -> dict[int, Stock]:
+    """Per type: the ledger's stock and unit cost (`ledger.Book.pools`) and our expected sales rate.
+
+    `hubs[0]` is the main hub (default Jita), the rest are the operation's local hubs. A type our
+    manufacturing jobs made gets a rate per hub from `hub_rate`; its sales anywhere else, and every other
+    type's sales, count flat over SALES_RATE_DAYS calendar days."""
+    hubs = list(hubs) if hubs else [HUB]
+    start = now - timedelta(days=SALES_RATE_DAYS)
+    made = {int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT product_type_id FROM jobs WHERE activity_id = ? AND start_date >= ? "
+        "AND product_type_id IS NOT NULL", (MANUFACTURING, _iso(now - timedelta(days=WATCH_SALES_DAYS))))}
+    sold: dict[int, dict[int, float]] = {}
+    for type_id, location_id, qty in conn.execute(
+            "SELECT type_id, location_id, SUM(quantity) FROM transactions WHERE is_buy = 0 AND date >= ? "
+            "GROUP BY type_id, location_id", (_iso(start),)):
+        sold.setdefault(int(type_id), {})[int(location_id or 0)] = float(qty)
+    hub_locations = {h.station_id for h in hubs}
     out = {}
     for type_id in type_ids:
         pool = pools.get(("item", type_id))
+        here = sold.get(type_id, {})
+        rates = []
+        for i, hub in enumerate(hubs if type_id in made else ()):
+            share, ceiling = (MAIN_HUB_SHARE, MAIN_HUB_CEILING) if i == 0 else (LOCAL_HUB_SHARE, LOCAL_HUB_CEILING)
+            rates.append(hub_rate(hub.key, here.get(hub.station_id, 0.0),
+                                  listed_days(conn, type_id, hub.station_id, start, now),
+                                  region_volume_per_day(conn, hub.region_id, type_id, now), share, ceiling))
+        elsewhere = sum(q for loc, q in here.items() if type_id not in made or loc not in hub_locations)
+        if elsewhere > 0:
+            rates.append(HubRate(OTHER, elsewhere, None, 0.0, None, elsewhere / SALES_RATE_DAYS, FLAT))
         out[type_id] = Stock(qty=pool.qty if pool else 0.0, unit_cost=pool.unit if pool else None,
-                             sold_per_day=sold.get(type_id, 0.0) / SALES_RATE_DAYS)
+                             sold_per_day=sum(r.rate for r in rates), rates=tuple(rates))
     return out
 
 
@@ -478,7 +633,7 @@ class Advice:
     z: float | None
     evidence: Evidence
     stock: Stock
-    hold_cap: float | None       # units we may hold: HORIZON_DAYS of our own sales
+    hold_cap: float | None       # units we may hold: HORIZON_DAYS of our expected sales (`Stock.rates`)
     hold_qty: float
     sell_qty: float
     target: float | None         # where to list held stock: back at normal
@@ -490,8 +645,9 @@ class Advice:
 def advise(type_id: int, days: Sequence[Day], snapshot: Mapping | None, stock: Stock,
            fee_pct: float | None, now: datetime) -> Advice:
     """Sell or hold one type's stock, and why. Only a dip is ever held - high, normal and falling all
-    sell - and never more than HORIZON_DAYS of our own sales. With no sales rate yet the whole stock
-    may be held, and the reason says so."""
+    sell - and never more than HORIZON_DAYS of our expected sales (`stock_figures`: per hub, per listed
+    day, shrunk toward a share of the region's volume). With no rate at all the whole stock may be held,
+    and the reason says so."""
     episodes = dip_episodes(days)
     ev = evidence(episodes)
     price, source = None, "none"

@@ -1324,10 +1324,20 @@ journalctl --user -u eve-prices.service          # problems only (the timer runs
 *spread* is its median absolute deviation (×1.4826, at least 1% of normal). *Now* is the newest snapshot's
 lowest ask, or the newest daily average when no snapshot is under 3 hours old (marked `~`). Two spreads
 under normal is a **dip** — unless the last 7 days have been that low as well, which is **falling**, a new
-level; two over is **high**. Only a dip is held, and never more than 14 days of our own sales (the last 30
-days, every hub); the rest is listed. One listing per item per hub, so held stock waits in the hangar -
+level; two over is **high**. Only a dip is held, and never more than 14 days of our expected sales (the
+*hold cap*, below); the rest is listed. One listing per item per hub, so held stock waits in the hangar -
 or, when the whole stack is held, it may go up once at normal and fill when the price comes back. Net is after the sales tax and broker fees we actually paid over the last 30 days
 (`!` marks a net below the ledger's unit cost).
+
+The hold cap's sales rate is worked out per hub - Jita, then the operation file's hubs - for every good our
+manufacturing jobs made in the last 60 days: units sold there per day one of our sell orders was up (order
+lifetimes joined with the hours the hourly snapshots saw our units; last 30 days), shrunk toward a prior
+that counts as 7 listed days: 6% of the region's daily volume at Jita (at most 10%), 50% at an operation hub
+(at most 100%). A new line starts at the prior, a line that sold out within hours of each listing is no
+longer read as slow, and a hub listed for weeks without sales drifts toward zero. Sales at other stations,
+and every type we did not make, count flat over 30 days. The `cap basis` column says `prior` (nothing sold
+yet), `blend` (under a week listed) or `measured`; `signal --rates` prints each hub's rate, units sold and
+listed days, and `--json` rows carry `sales_rates` and `cap_basis`.
 
 `signal --hub KEY` judges another hub the same way, with two differences the assumptions block repeats:
 *normal* is the hub region's daily average (every trade in the region, not only at that structure), and

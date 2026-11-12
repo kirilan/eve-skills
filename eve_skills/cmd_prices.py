@@ -89,6 +89,22 @@ def _thin(advice: pw.Advice, days, now: datetime, region: str) -> pw.Advice:
                                                   f"in {region} - no dip/high advice")
 
 
+def rate_hubs() -> list[market.Hub]:
+    """Where our sales rates are measured: Jita first (the main hub), then the operation file's hubs."""
+    try:
+        local = list(market.configured_hubs().values())
+    except Exception as err:   # a broken operation file must not stop the price signal
+        print(f"warning: operation hubs not read ({err}); sales rates use Jita alone", file=sys.stderr)
+        local = []
+    return [pw.HUB, *local]
+
+
+def _rates_text(stock: pw.Stock) -> str:
+    return ", ".join(f"{r.hub} {r.rate:,.1f}/d" + (f" ({r.basis}, {r.sold:,.0f} sold in {r.listed_days:g} listed d)"
+                                                     if r.listed_days is not None else f" ({r.basis})")
+                     for r in stock.rates if r.rate > 0)
+
+
 def cmd_signal(args) -> int:
     now = _now()
     hub = market.get_hub(getattr(args, "hub", None) or pw.HUB.key)
@@ -99,7 +115,7 @@ def cmd_signal(args) -> int:
         book, header, _recipes, _invention = cmd_ledger._state(conn)
         # Inputs are watched for restock's buy side; holding or listing them is not a question.
         watched = {t: why for t, why in _types(conn, args).items() if why != "buys"}
-        stocks = pw.stock_figures(conn, book.pools, now, watched)
+        stocks = pw.stock_figures(conn, book.pools, now, watched, rate_hubs())
         fee = pw.realised_fee_pct(book.entries, now)
         advice = []
         for type_id in watched:
@@ -114,7 +130,12 @@ def cmd_signal(args) -> int:
     advice.sort(key=lambda a: (order[a.state], names.get(a.type_id, "")))
     assumptions = [
         "stock and unit cost are the ledger's (goods made or bought, minus goods sold), not a live asset read",
-        f"hold cap = {pw.HORIZON_DAYS} days of our own sales over the last {pw.SALES_RATE_DAYS} days, every hub",
+        (f"hold cap = {pw.HORIZON_DAYS} days of expected sales, summed over hubs: per hub, units sold per day one "
+         f"of our orders was up (last {pw.SALES_RATE_DAYS} days), shrunk toward a prior worth "
+         f"{pw.RATE_PRIOR_DAYS:g} listed days - {pw.MAIN_HUB_SHARE:.0%} of the region's volume at Jita (at most "
+         f"{pw.MAIN_HUB_CEILING:.0%}), {pw.LOCAL_HUB_SHARE:.0%} at an operation hub (at most "
+         f"{pw.LOCAL_HUB_CEILING:.0%}); sales elsewhere count flat over {pw.SALES_RATE_DAYS} days. "
+         "Basis: prior = nothing sold yet, blend = under a week listed, measured = a week or more"),
         (f"normal = median daily average in {region} over the last 30 days; the daily average mixes buy- and "
          "sell-order fills") + (f" - regional: every trade in the region, not only at {hub.label}; under "
                                 f"{pw.THIN_DAYS} trading days is 'thin', with no dip/high advice" if other else ""),
@@ -135,6 +156,8 @@ def cmd_signal(args) -> int:
                          if a.base else None,
                          "deviation_pct": (a.price / a.base.median - 1) * 100 if a.base and a.price else None,
                          "stock": a.stock.qty, "unit_cost": a.stock.unit_cost, "sold_per_day": a.stock.sold_per_day,
+                         "sales_rates": [dataclasses.asdict(r) for r in a.stock.rates],
+                         "cap_basis": a.stock.basis,
                          "hold_cap": a.hold_cap, "hold": a.hold_qty, "sell": a.sell_qty, "target": a.target,
                          "net_now": a.net_now, "past_dips": vars(a.evidence) | {"rate": a.evidence.rate},
                          "reason": a.reason})
@@ -152,15 +175,21 @@ def cmd_signal(args) -> int:
                       cmd_ledger._compact(a.price) + ("" if a.price_source.startswith("book") else "~"),
                       cmd_ledger._compact(a.base.median if a.base else None), _pct(dev), _pct(week),
                       f"{a.stock.qty:,.0f}", "-" if a.hold_cap is None else f"{a.hold_cap:,.0f}",
+                      a.stock.basis or "-",
                       a.action + (f" {a.hold_qty:,.0f}" if a.hold_qty else ""),
                       cmd_ledger._compact(a.net_now) + ("!" if below_cost else ""),
                       cmd_ledger._compact(a.stock.unit_cost)])
     lines.append(render.table(["type", "state", "now", "normal", "vs normal", "7d vs normal", "stock",
-                               "hold cap", "action", "net now", "unit cost"], table))
+                               "hold cap", "cap basis", "action", "net now", "unit cost"], table))
     lines.append("~ newest daily average (no fresh book snapshot); ! net below the ledger's unit cost")
     for a in advice:
         if a.state in (pw.DIP, pw.FALLING, pw.HIGH, pw.THIN):
             lines.append(f"  {names.get(a.type_id, a.type_id)}: {a.reason}")
+    if getattr(args, "rates", False):
+        lines.append("")
+        lines.append("expected sales per hub (hold cap = %d x the sum):" % pw.HORIZON_DAYS)
+        for a in advice:
+            lines.append(f"  {names.get(a.type_id, a.type_id)}: {_rates_text(a.stock) or 'no rate'}")
     header["notes"] = assumptions + header["notes"]
     cmd_ledger._print_notes(lines, header)
     print("\n".join(lines))
