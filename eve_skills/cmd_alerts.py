@@ -4,8 +4,10 @@
 cache time for order books): it reads every stored character's open orders and history, places each
 open order in its book exactly like `orders --check`, lets `order_alerts.evaluate` decide what is
 news, and sends it. With `job_alerts` on it also reads every character's industry jobs, so a job about to
-finish is announced and then kept in the reminder until it is delivered. The state is saved only after
-Telegram took the message.
+finish is announced and then kept in the reminder until it is delivered. On top of that (`jobs.enabled`),
+`job_alerts.evaluate` sends a summary when a finish window opens (reading the slots then) and holds job
+news back while more of the same site is about to finish. One message per run carries everything. Both
+states are saved only after Telegram took the message.
 
 `setup` stores the bot token and finds the chat (the user messages the bot first); `test` sends a line.
 """
@@ -17,7 +19,8 @@ import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from . import cmd_orders, esi as esi_mod, exports, market, order_alerts, orders, render, telegram
+from . import (cmd_orders, esi as esi_mod, exports, industry_status, job_alerts, market, order_alerts, orders,
+               render, telegram)
 
 JOBS_SCOPE = "esi-industry.read_character_jobs.v1"
 
@@ -153,6 +156,34 @@ def _name_jobs(client: esi_mod.Esi, jobs: list[dict], chars) -> None:
         job["location"] = names.get(job.get("facility_id")) or f"facility {job.get('facility_id')}"
 
 
+def _operation_view() -> tuple[str | None, dict[str, str]]:
+    """(the operation file's finish windows, character name -> site key). A broken operation file costs
+    the window default and the per-site batching, never the order alerts."""
+    from . import operation
+    try:
+        op = operation.load()
+    except Exception as err:            # noqa: BLE001 - reported, not this command's to fix
+        print(f"warning: operation file not used for job alerts: {err}", file=sys.stderr)
+        return None, {}
+    sites: dict[str, str] = {}
+    for key, site in op.sites.items():
+        for name in (*site.characters, *site.readers):
+            sites.setdefault(name.casefold(), key)
+    return op.planning.finish_windows, sites
+
+
+def _slot_rows(client: esi_mod.Esi, chars, sites: dict[str, str]) -> list[dict] | None:
+    """Slot rows (`industry status`'s own builder) of the operation's characters (everyone without an
+    operation file); None when they could not be read."""
+    wanted = [(tok, pub) for tok, pub in chars if JOBS_SCOPE in set(tok.get("scopes") or [])
+              and (not sites or str(pub.get("name") or tok.get("character_name") or "").casefold() in sites)]
+    try:
+        return industry_status._slots(client, wanted, [], False, False, client.now(), [])
+    except (esi_mod.EsiError, RuntimeError) as err:
+        print(f"warning: slots not read for the window summary: {err}", file=sys.stderr)
+        return None
+
+
 def cmd_run(args) -> int:
     settings = order_alerts.load_settings()
     doc = None if args.dry_run else _configured()
@@ -165,18 +196,38 @@ def cmd_run(args) -> int:
     order_chars = [(tok, pub) for tok, pub in chars if orders.CHARACTER_SCOPE in set(tok.get("scopes") or [])]
     rows, closed, read, failures = _checked_rows(client, order_chars, settings)
     jobs = job_owners = None
+    job_failures: list[str] = []
     if settings.job_alerts:
         jobs, job_owners, job_failures = _jobs(client, chars)
         failures += job_failures
     for line in failures:
         print(f"warning: {line}", file=sys.stderr)
     now = datetime.fromtimestamp(client.now().timestamp(), timezone.utc)
-    state, alert = order_alerts.evaluate(order_alerts.load_state(), rows, closed, read, settings, now,
-                                         jobs, job_owners)
-    _name_jobs(client, alert.jobs_soon + alert.jobs_waiting, chars)
-    text = None if alert.empty() else order_alerts.render(alert, settings, now)
+    order_state = order_alerts.load_state()
+    job_state = job_alerts.load_state()
+    new_job_state, news = job_state, job_alerts.JobNews()
+    if jobs is not None and settings.jobs_enabled and not job_failures:
+        # A failed jobs read skips this part for the run and keeps its state; the per-job alerts go on.
+        planning_windows, sites = _operation_view()
+        slots = (_slot_rows(client, chars, sites)
+                 if job_alerts.summary_due(job_state, settings, planning_windows, now) else None)
+        new_job_state, news = job_alerts.evaluate(
+            job_state, jobs, slots, settings, now, announced={int(k) for k in order_state.get("jobs") or {}},
+            planning_windows=planning_windows, sites=sites)
+    shown_jobs = None if jobs is None else [j for j in jobs if int(j["job_id"]) not in news.hold]
+    state, alert = order_alerts.evaluate(order_state, rows, closed, read, settings, now, shown_jobs, job_owners)
+    if news.summary:
+        alert.jobs_soon = []            # announced now (in the state), listed by the summary instead
+    summary_jobs = (news.summary["ready"] + news.summary["ending"]) if news.summary else []
+    _name_jobs(client, alert.jobs_soon + alert.jobs_waiting + summary_jobs, chars)
+    parts = [None if alert.empty() else order_alerts.render(alert, settings, now),
+             job_alerts.render_summary(news.summary, settings, now) if news.summary else None]
+    text = "\n\n".join(p for p in parts if p) or None
     if args.dry_run:
         print(text or "(nothing new)")
+        if news.hold:
+            print(f"held back: {len(news.hold)} job(s) finishing while more of their site ends within "
+                  f"{settings.batch_minutes:g} min (or quiet hours)", file=sys.stderr)
         unchecked = sorted({r["error"] for r in rows if r.get("status") == "unchecked" and r.get("error")})
         for reason in unchecked:
             print(f"unchecked: {reason}", file=sys.stderr)
@@ -184,13 +235,17 @@ def cmd_run(args) -> int:
     if text:
         telegram.send(doc["token"], doc["chat_id"], text, silent=alert.silent)
     order_alerts.save_state(state)
+    if new_job_state is not job_state:
+        job_alerts.save_state(new_job_state)
     if not args.quiet:
         stamp = market.iso_utc(now.timestamp())
         print(f"{stamp} {len(rows)} open orders; " + (
             f"sent: {len(alert.behind)} behind, {len(alert.back_on_top)} back on top, "
             f"{len(alert.filled)} filled, {len(alert.still_behind)} reminders, "
             f"{len(alert.jobs_soon)} jobs ending, {len(alert.jobs_waiting)} jobs to deliver"
-            + (" (silent)" if alert.silent else "") if text else "nothing new"))
+            + (f", window summary {news.summary['window']}" if news.summary else "")
+            + (" (silent)" if alert.silent else "") if text else "nothing new")
+            + (f"; {len(news.hold)} job(s) held back" if news.hold else ""))
     return 0
 
 
