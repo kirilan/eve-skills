@@ -13,6 +13,8 @@ and closed orders, and a watch that announces the moment one of them fills, expi
   pick one with `--char`.
 - Text output by default, with `--json` / `--csv` for scripting and `--watch` for a live terminal
   dashboard.
+- Scripting or driving it from an agent: [docs/agent-reference.md](docs/agent-reference.md) has the
+  `--json` shapes, the ledger tables and how to use the package from a script.
 
 ```console
 $ eve-skills                     # same as: eve-skills skills
