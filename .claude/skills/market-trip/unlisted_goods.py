@@ -1,7 +1,7 @@
 """Finished goods held but not listed anywhere: where each stack sits, and what it would list for.
 
 Usage (from the repo root; a source checkout runs `.venv/bin/python` instead of `python`):
-    python .claude/skills/market-trip/unlisted_goods.py [--hub jita] [--seller NAME] [--corp-char NAME]
+    python .claude/skills/market-trip/unlisted_goods.py [--hub KEY] [--seller NAME] [--corp-char NAME]
         [--from SYSTEM] [--include-t1] [--json]
 
 Reads `ledger inventory` (held > 0, class finished), locates each stack in the assets of every site of
@@ -12,8 +12,9 @@ of the operation file's `selling.keep` (materials the operation consumes) and T1
 builds; `--include-t1` shows them) are left out. For open orders against the books use the CLI:
 `orders --char NAME --check`.
 
-The seller defaults to the default site's `seller` in the operation file, the corp reader to the corp
-sites' first readers, and the origin of `sell-plan` to the first site's system; without an operation
+The hub defaults to the default site's `hub` in the operation file, else Jita. The seller defaults to
+the default site's `seller`, the corp reader to the corp sites' first readers, and the origin of
+`sell-plan` to the first site's system; without an operation
 file pass `--seller` and `--from` (`eve-skills operation template` prints a starting point).
 
 One listing per item per hub: a stack whose item already has a sell order in the hub is flagged HOLD,
@@ -22,7 +23,8 @@ sold out (several orders of one item only undercut each other). An open order wi
 original quantity left is nearly sold out, and a second listing beside it keeps the sales going: such
 stacks are flagged TOP-UP and counted.
 
-Price state (`prices signal`, Jita): each stack carries its state against the 30-day normal. On a DIP
+Price state (`prices signal --hub`): each stack carries its state at the hub against the 30-day normal
+(off Jita the region's normal; THIN when the region trades it too rarely to judge). On a DIP
 only the signal's sell share is brought (the rest stays in the hangar, capped at two weeks of sales),
 unless the whole stack is held - then it may be listed once at normal. HIGH: list it all now. FALLING:
 a new level, sell. The totals count what to bring, not everything held.
@@ -64,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="reader for corp orders and assets (default: the corp sites' first readers)")
     ap.add_argument("--from", dest="origin", help="system the goods leave from for sell-plan "
                                                  "(default: the first site's system)")
-    ap.add_argument("--hub", default="jita", help="hub to price unlisted goods for")
+    ap.add_argument("--hub", help="hub to price unlisted goods for (default: the default site's hub, else jita)")
     ap.add_argument("--include-t1", action="store_true",
                     help="also list held T1 modules (left out by default: T2 module builds consume them)")
     ap.add_argument("--json", action="store_true")
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
                                   ("an origin system (--from, or a site in the operation file)", origin)) if not ok)
             + "; `eve-skills operation template` prints a starting point")
     keep = tuple(k.casefold() for k in (op.get("selling") or {}).get("keep") or ())
+    args.hub = args.hub or default.get("hub") or "jita"
 
     ours: set[int] = set()
     open_here: dict[str, list[tuple[int, int]]] = collections.defaultdict(list)  # type -> (left, total) per open sell order in the hub
@@ -99,9 +102,9 @@ def main(argv: list[str] | None = None) -> None:
             ours.add(o["order_id"])
             if not o["is_buy"] and o["location_name"].lower().startswith(args.hub.lower()):
                 open_here[o["type_name"]].append((o["volume_remain"], o["volume_total"]))
-    signal = cli("prices", "signal", "--all") or {}
+    signal = cli("prices", "signal", "--all", "--hub", args.hub) or {}
     states = {r["type"]: r for r in signal.get("items", []) if r.get("type")}
-    report = {"unlisted": [], "prices_synced": signal.get("prices_synced"), "seller": seller,
+    report = {"unlisted": [], "hub": args.hub, "prices_synced": signal.get("prices_synced"), "seller": seller,
               "keep": list((op.get("selling") or {}).get("keep") or [])}
     if True:
         inv = cli("ledger", "inventory", "--all")
@@ -160,6 +163,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.json:
         print(json.dumps(report, indent=1))
         return
+    print(f"priced at: {args.hub}" + ("" if args.hub == "jita" else
+                                       " (outside Jita the MultiSell default can be a lowball buy order)"))
     print("kept back (selling.keep): " + (", ".join(report["keep"]) or
                                           "nothing - selling.keep is not set in the operation file"))
     if report["unlisted"]:

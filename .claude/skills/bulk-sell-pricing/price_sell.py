@@ -11,10 +11,12 @@ choose the decimal-point notation when importing. The reasoning goes to stderr. 
 from `eve-skills market --depth`. The seller (whose own orders are left out of the book) defaults to the
 default site's `seller` in the operation file; without one, pass `--seller`.
 
-Each item also gets its Jita price state from `prices signal` (Jita only): DIP (the stack would go up
-under normal - say how much of it the signal holds back), HIGH (list it all now) or FALLING (a new
-level). `--dip-at-normal` prices a DIP item at its 30-day normal instead of under the floor - for a
-whole stack that is being held but listed once, to fill when the price comes back.
+Each item also gets its price state at that hub from `prices signal --hub HUB`: DIP (the stack would go
+up under normal - say how much of it the signal holds back), HIGH (list it all now), FALLING (a new
+level) or THIN (off Jita: too few trading days in the region to judge). `--dip-at-normal` prices a DIP
+item at its 30-day normal instead of under the floor - for a whole stack that is being held but listed
+once, to fill when the price comes back. Off Jita the client's default price can be a lowball buy order:
+the script says so, and every row must be checked before Sell.
 """
 from __future__ import annotations
 
@@ -47,14 +49,12 @@ def default_seller() -> str | None:
 
 
 def price_states(hub: str) -> dict[str, dict]:
-    """`prices signal` rows by type name; empty off Jita or when the signal cannot be read."""
-    if hub.lower() != "jita":
-        return {}
-    doc = cli("prices", "signal", "--all")
+    """`prices signal --hub HUB` rows by type name; empty when the signal cannot be read."""
+    doc = cli("prices", "signal", "--all", "--hub", hub)
     if doc is None:
-        print("warning: prices signal unavailable; no dip/high check", file=sys.stderr)
+        print(f"warning: prices signal unavailable for {hub}; no dip/high check", file=sys.stderr)
         return {}
-    print(f"price states: prices synced {doc.get('prices_synced') or 'never'}", file=sys.stderr)
+    print(f"price states ({hub}): prices synced {doc.get('prices_synced') or 'never'}", file=sys.stderr)
     return {r["type"]: r for r in doc.get("items", []) if r.get("type")}
 
 
@@ -141,6 +141,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit("eve-skills market failed (check the exact type names)")
     ours = own_order_ids(seller)
     states = price_states(args.hub)
+    if args.hub.lower() != "jita":
+        print(f"NOTE {args.hub}: outside Jita the MultiSell default can be a lowball buy order - a row the "
+              "import misses sells into it at once. Check every row's price against this paste before Sell.",
+              file=sys.stderr)
 
     paste = []
     for t in data["types"]:
@@ -195,6 +199,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  HIGH{dev}: list it all now", file=sys.stderr)
         elif state == "falling":
             print(f"  FALLING{dev}: low for a week, a new level - waiting is unlikely to pay", file=sys.stderr)
+        elif state == "thin":
+            print(f"  THIN: {sig.get('reason') or 'too few trading days to judge'}", file=sys.stderr)
         if avg and price < avg * 0.85:
             print("  WARNING: more than 15% under the 30-day average; check the book by hand",
                   file=sys.stderr)

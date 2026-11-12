@@ -412,8 +412,7 @@ def selling_routes(op: dict) -> dict:
         ("market",): lambda args: {"types": [
             book(name, [(500, 900_000.0, 9), (501, 1_000_000.0, 40)] if name.startswith("Small")
                  else [(502, 2_200_000.0, 30)])
-            for name in args[1:] if not name.startswith("--") and not name.replace(".", "").isdigit()
-            and name not in ("jita", "30")]},
+            for name in args[1:next(i for i, a in enumerate(args) if a.startswith("--"))]]},
     }
 
 
@@ -460,6 +459,43 @@ class UnlistedGoodsTests(unittest.TestCase):
         self.script.cli = FakeCli(selling_routes(NO_OP))
         out, _ = run(self.script, ["--seller", "Carol Hauler", "--from", "Jita", "--json"])
         self.assertEqual(json.loads(out)["seller"], "Carol Hauler")
+
+
+class HubTests(unittest.TestCase):
+    """The selling scripts at Jita and at a site's own hub."""
+
+    def hub_op(self) -> dict:
+        op = json.loads(json.dumps(PERSONAL_OP))
+        op["sites"]["home"]["hub"] = "example-hub"
+        return op
+
+    def test_unlisted_goods_defaults_to_the_sites_hub(self):
+        script = load("market-trip/unlisted_goods.py")
+        script.cli = cli = FakeCli(selling_routes(self.hub_op()))
+        out, _ = run(script, ["--json"])
+        self.assertEqual(json.loads(out)["hub"], "example-hub")
+        self.assertEqual(cli.called("prices", "signal")[0][-2:], ("--hub", "example-hub"))
+        self.assertEqual(cli.called("market")[0][cli.called("market")[0].index("--hub") + 1], "example-hub")
+        script.cli = cli = FakeCli(selling_routes(PERSONAL_OP))           # no hub on the site: Jita
+        out, _ = run(script, [])
+        self.assertIn("priced at: jita", out)
+        self.assertEqual(cli.called("prices", "signal")[0][-2:], ("--hub", "jita"))
+
+    def test_price_sell_reads_the_hubs_price_state_and_warns_off_jita(self):
+        script = load("bulk-sell-pricing/price_sell.py")
+        routes = selling_routes(PERSONAL_OP)
+        routes[("prices", "signal")] = {"prices_synced": iso(-1), "items": [
+            {"type": "Small Auxiliary Thrusters II", "state": "thin", "reason": "thin: 3 trading days"}]}
+        script.cli = cli = FakeCli(routes)
+        out, err = run(script, ["Small Auxiliary Thrusters II=20", "--hub", "example-hub"])
+        self.assertTrue(out.startswith("Small Auxiliary Thrusters II\t"))
+        self.assertEqual(cli.called("prices", "signal")[0][-2:], ("--hub", "example-hub"))
+        self.assertIn("price states (example-hub)", err)
+        self.assertIn("NOTE example-hub: outside Jita the MultiSell default can be a lowball buy order", err)
+        self.assertIn("THIN: thin: 3 trading days", err)
+        script.cli = FakeCli(selling_routes(PERSONAL_OP))
+        _, err = run(script, ["Small Auxiliary Thrusters II=20"])
+        self.assertNotIn("lowball", err)
 
 
 class PriceSellTests(unittest.TestCase):
