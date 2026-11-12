@@ -25,7 +25,7 @@ for sale are `selling.keep`.
 eve-skills orders --char SELLER --check [--json]                       # every open order in its book
 eve-skills ledger sync                                                  # the next script reads the ledger
 python .claude/skills/market-trip/unlisted_goods.py [--hub jita] [--include-t1]
-eve-skills prices signal [--json]                                       # dip / high / falling per type
+eve-skills prices signal [--hub KEY] [--json]                           # dip / high / falling / thin per type
 ```
 
 - `orders --check` places each open order in its station's book, ours left out: status (`cheapest`,
@@ -36,8 +36,11 @@ eve-skills prices signal [--json]                                       # dip / 
   sits, m3, unit cost, the suggested price and a `LOSS` flag when the net listing is under cost. It reads
   every site of the operation file; its header says what `selling.keep` keeps back.
 - `prices signal`: per watched type, the lowest competing ask against its 30-day normal and how many units
-  to hold vs list. `unlisted_goods.py` tags each stack `DIP` / `HIGH` / `FALLING` and, on a dip, says
-  `bring N, keep M`. Check `prices synced` is recent (the installation's hourly `prices sync`).
+  to hold vs list. `--hub KEY` judges another hub (a site's own structure market, polled by `prices sync`
+  for every site hub) against its region's normal; a type the region trades too rarely reads `THIN`.
+  `unlisted_goods.py` prices for the default site's hub (`--hub` to choose), tags each stack `DIP` /
+  `HIGH` / `FALLING` / `THIN` and, on a dip, says `bring N, keep M`. Check `prices synced` is recent (the
+  installation's hourly `prices sync`).
 - Also: `ledger inventory` (held vs listed), `orders --closed --char SELLER` (what filled),
   `sell-plan --seller SELLER --from SYSTEM --hub HUB --item "NAME=QTY"` (hub split).
 

@@ -38,7 +38,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from . import esi as esi_mod, ledger_db, market
 
-HUB = market.HUBS["jita"]
+HUB = market.HUBS["jita"]   # the default hub; `sync` and `signal` take others (the operation file's hubs)
+THIN_DAYS = 10              # another hub: fewer trading days than this in BASELINE_DAYS is "thin"
 
 BASELINE_DAYS = 30      # what "normal" is measured over
 SHORT_DAYS = 7          # a low lasting this long is a new level, not a dip
@@ -116,8 +117,15 @@ def baseline(days: Sequence[Day], end: date, window: int = BASELINE_DAYS) -> Bas
                     rows=len(picked), volume_per_day=sum(d.volume for d in picked) / window)
 
 
-# What a price is, against its baseline.
-HIGH, NORMAL, DIP, FALLING = "high", "normal", "dip", "falling"
+# What a price is, against its baseline. THIN: a hub other than Jita whose region traded the type on too
+# few days for a normal to mean anything - no dip/high advice there.
+HIGH, NORMAL, DIP, FALLING, THIN = "high", "normal", "dip", "falling", "thin"
+
+
+def trading_days(days: Sequence[Day], end: date, window: int = BASELINE_DAYS) -> int:
+    """Days with trades in the `window` calendar days ending on `end`."""
+    start = end - timedelta(days=window - 1)
+    return sum(1 for d in days if start <= d.day <= end and d.volume > 0)
 
 
 def classify(price: float, base: Baseline) -> tuple[str, float]:
@@ -338,46 +346,77 @@ class SyncResult:
     history_new_days: int = 0
     snapshots_new: int = 0
     problems: list[str] | None = None
+    hubs: list[str] | None = None
+    reads: int = 0           # ESI documents read, new rows or not: zero with problems = a failed sync
 
     def to_json(self) -> dict:
         return asdict(self)
 
 
+def _history_key(hub: market.Hub, type_id: int) -> str:
+    # Jita keeps the key it always had; another hub's region gets its own.
+    return f"prices:history_read:{type_id}" if hub.region_id == HUB.region_id else \
+        f"prices:history_read:{hub.region_id}:{type_id}"
+
+
 def sync(conn: sqlite3.Connection, client: esi_mod.Esi, *, history: bool = True, book: bool = True,
-         types: Iterable[int] | None = None) -> SyncResult:
-    """Refresh history (only types whose stored history is older than yesterday) and store one Jita
-    book snapshot per watched type. Never raises for one type: a failed document is a problem line,
-    and the next run reads it again."""
+         types: Iterable[int] | None = None, hubs: Sequence[market.Hub] | None = None) -> SyncResult:
+    """Refresh history (only types whose stored history is older than yesterday) and store one book
+    snapshot per watched type and hub (default: Jita alone). A structure hub's book is read once, through
+    a character with docking access, and split per type. Never raises for one type or one hub: a failed
+    document is a problem line, and the next run reads it again."""
     now = client.now()
     polled_at = _iso(now)
     wanted = sorted(types) if types is not None else sorted(watchlist(conn, now))
-    result = SyncResult(types=len(wanted), problems=[])
+    hubs = list(hubs) if hubs else [HUB]
+    result = SyncResult(types=len(wanted), problems=[], hubs=[h.key for h in hubs])
     yesterday = (now.astimezone(timezone.utc).date() - timedelta(days=1)).isoformat()
     ours = our_open_sell_orders(conn)
     retry_after = _iso(now - timedelta(hours=HISTORY_RETRY_HOURS))
+    regions = list(dict.fromkeys(h.region_id for h in hubs))
     for type_id in wanted:
-        read_key = f"prices:history_read:{type_id}"
-        behind = (ledger_db.newest_history_day(conn, HUB.region_id, type_id) or "") < yesterday
-        if history and behind and (ledger_db.get_meta(conn, read_key) or "") <= retry_after:
-            try:
-                rows = client.get(f"/markets/{HUB.region_id}/history?type_id={type_id}")
-            except esi_mod.EsiError as err:
-                result.problems.append(f"history {type_id}: {err}")
-            else:
+        for region_id in regions:
+            hub = next(h for h in hubs if h.region_id == region_id)
+            read_key = _history_key(hub, type_id)
+            behind = (ledger_db.newest_history_day(conn, region_id, type_id) or "") < yesterday
+            if history and behind and (ledger_db.get_meta(conn, read_key) or "") <= retry_after:
+                try:
+                    rows = client.get(f"/markets/{region_id}/history?type_id={type_id}")
+                except esi_mod.EsiError as err:
+                    result.problems.append(f"history {type_id}" + ("" if hub is hubs[0] else f" ({hub.key})")
+                                           + f": {err}")
+                else:
+                    with conn:
+                        result.history_new_days += ledger_db.upsert_market_history(conn, region_id, type_id, rows)
+                        ledger_db.set_meta(conn, read_key, polled_at)
+                    result.history_fetched += 1
+                    result.reads += 1
+    if book:
+        for hub in hubs:
+            structure_rows = None
+            if hub.structure:
+                try:
+                    structure_rows, structure_meta = market.structure_book(client, hub.station_id, hub.reader)
+                except (esi_mod.EsiError, RuntimeError) as err:
+                    result.problems.append(f"book {hub.key}: {err}")
+                    continue
+                result.reads += 1
+            for type_id in wanted:
+                if structure_rows is not None:
+                    rows = [r for r in structure_rows if int(r.get("type_id") or 0) == type_id]
+                    meta = structure_meta
+                else:
+                    try:
+                        rows, meta = client.get_meta(market.book_path(hub.region_id, type_id))
+                    except esi_mod.EsiError as err:
+                        result.problems.append(f"book {type_id}" + ("" if hub.key == HUB.key else f" ({hub.key})")
+                                               + f": {err}")
+                        continue
+                    result.reads += 1
+                ts = market.iso_utc(meta.last_modified) or polled_at
                 with conn:
-                    result.history_new_days += ledger_db.upsert_market_history(conn, HUB.region_id, type_id, rows)
-                    ledger_db.set_meta(conn, read_key, polled_at)
-                result.history_fetched += 1
-        if book:
-            try:
-                rows, meta = client.get_meta(market.book_path(HUB.region_id, type_id))
-            except esi_mod.EsiError as err:
-                result.problems.append(f"book {type_id}: {err}")
-                continue
-            ts = market.iso_utc(meta.last_modified) or polled_at
-            with conn:
-                result.snapshots_new += ledger_db.insert_book_snapshot(
-                    conn, reduce_book(rows, HUB.station_id, type_id, ts, polled_at, ours))
+                    result.snapshots_new += ledger_db.insert_book_snapshot(
+                        conn, reduce_book(rows, hub.station_id, type_id, ts, polled_at, ours))
     with conn:
         ledger_db.log_sync(conn, "prices", polled_at, result.types, result.history_new_days + result.snapshots_new,
                            None, None)

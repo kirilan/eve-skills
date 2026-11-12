@@ -41,11 +41,12 @@ is the default site's `seller` in the operation file, or `--seller NAME`.
      cost (`ledger inventory` / `ledger products`). Flag any loss.
    - The script notes a price more than 25% over or 15% under the 30-day average, and a stack worth more
      than 3 days of regional volume. Mention these; they don't change the price.
-   - **Price state** (Jita, from `prices signal`; the script prints it per item): `HIGH` - list it all
-     now; `FALLING` - a new level, list at the floor anyway; `DIP` - the script says how many to keep in
-     the hangar (up to about two weeks of sales) and how many to list now (tell the user to lower the
-     MultiSell quantity), or `--dip-at-normal` prices a whole held stack once at its normal price so it
-     fills on the recovery. One order per item per hub either way.
+   - **Price state** at the hub (`prices signal --hub HUB`; the script prints it per item): `HIGH` - list
+     it all now; `FALLING` - a new level, list at the floor anyway; `DIP` - the script says how many to
+     keep in the hangar (up to about two weeks of sales) and how many to list now (tell the user to lower
+     the MultiSell quantity), or `--dip-at-normal` prices a whole held stack once at its normal price so
+     it fills on the recovery; `THIN` (off Jita) - the region trades it too rarely to judge, so price by
+     the book alone. One order per item per hub either way.
    - Don't sell what the operation consumes (`selling.keep`): take those home instead.
 
 Worked example: the book is 1 @ 2,214,000, then 20 @ 2,926,000, 48 @ 2,927,000, 159 @ 2,929,000, at 138 a
