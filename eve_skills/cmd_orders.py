@@ -177,7 +177,7 @@ def check_orders(client: esi_mod.Esi, shown, own_ids) -> dict[int, dict]:
             rows, meta = _order_book(client, order, books)
         except (esi_mod.EsiError, RuntimeError) as err:
             out[order.order_id] = {"status": "unchecked", "error": str(err), "best_other": None,
-                                   "units_ahead": 0, "days_ahead": None, "suggest": None,
+                                   "orders_ahead": 0, "units_ahead": 0, "days_ahead": None, "suggest": None,
                                    "ignored": [], "volume_per_day": None, "book_as_of": None}
             continue
         key = (order.region_id, order.type_id)

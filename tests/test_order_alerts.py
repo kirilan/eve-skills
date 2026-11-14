@@ -25,7 +25,7 @@ def row(order_id=1, status="undercut", price=100.0, **over):
     base = {"order_id": order_id, "owner": "Seller", "owner_key": "char:1", "type_name": "Widget II",
             "side": "sell", "location": "Jita IV - Moon 4 - Caldari Navy Assembly Plant", "price": price,
             "volume_total": 10, "volume_remain": 10, "status": status, "best_other": 99.0,
-            "units_ahead": 5, "days_ahead": 0.5, "suggest": 98.9}
+            "orders_ahead": 2, "units_ahead": 5, "days_ahead": 0.5, "suggest": 98.9}
     return {**base, **over}
 
 
@@ -153,8 +153,9 @@ class EvaluateTests(unittest.TestCase):
                                          [job(left_min=-1, at=NOON + timedelta(hours=2))], READ)
         self.assertEqual((1, 1), (len(alert.still_behind), len(alert.jobs_waiting)))
         text = order_alerts.render(alert, SETTINGS, NOON + timedelta(hours=4))
-        self.assertTrue(text.startswith("EVE: 1 still behind, 1 jobs to deliver"))
-        self.assertIn("Jobs to deliver (reminder every 4 h):", text)
+        self.assertEqual("EVE: 1 still behind, 1 job to deliver\n\n"
+                         "⚙ X-EXMPL\n   Builder: 1 invention\n\n"
+                         "Seller · Jita\n▼ Widget II\n   undercut by 2 orders · 5 units ahead (0.5 d)", text)
 
     def test_unread_installers_and_paused_jobs_keep_their_jobs(self):
         state, _ = jrun(order_alerts.empty_state(), [job(left_min=5)])
@@ -167,26 +168,75 @@ class EvaluateTests(unittest.TestCase):
         state, _ = order_alerts.evaluate(state, [], {}, READ, SETTINGS, NOON)   # jobs not read: kept
         self.assertIn("7", state["jobs"])
 
-    def test_job_messages_group_one_product(self):
+    def test_job_messages_count_per_character_facility_and_activity(self):
         jobs = [job(i, left_min=10 + i, product="Small EM Shield Reinforcer II Blueprint") for i in range(3)]
+        jobs.append(job(9, left_min=-5, activity="copying"))
+        jobs.append(job(10, left_min=5, installer="Other", location="Y-EXMPL - Example Factory",
+                        activity="manufacturing"))
         _, alert = jrun(order_alerts.empty_state(), jobs)
         text = order_alerts.render(alert, SETTINGS, NOON)
-        self.assertTrue(text.startswith("EVE jobs: 3 jobs ending"))
-        self.assertIn("⚙ Job ending: Small EM Shield Reinforcer II Blueprint\n"
-                      "   Builder · invention · 3 jobs · X-EXMPL · 10 min–12 min left", text)
-        settings = order_alerts.parse_settings({"job_alerts": False, "exclude_characters": ["builder"], "timezone": "+02:00"})
+        self.assertEqual("EVE jobs: 5 jobs ending\n\n"
+                         "⚙ X-EXMPL\n   Builder: 3 invention, 1 copying · 1 ready, rest in 12 min\n"
+                         "⚙ Y-EXMPL\n   Other: 1 manufacturing · in 5 min", text)
+        self.assertNotIn("Blueprint", text)                     # the products are not listed
+        settings = order_alerts.parse_settings({"job_alerts": False, "exclude_characters": ["builder", "other"],
+                                                 "timezone": "+02:00"})
         self.assertFalse(settings.job_alerts)
         _, alert = jrun(order_alerts.empty_state(), jobs, settings=settings)
         self.assertTrue(alert.empty())
 
-    def test_the_message_uses_full_names_and_the_suggested_price(self):
-        _, alert = run(order_alerts.empty_state(), [row(), row(2, status="outbid", side="buy", suggest=None)])
+    def test_waiting_jobs_are_labelled_only_next_to_jobs_just_ending(self):
+        state, _ = jrun(order_alerts.empty_state(), [job(left_min=5)])
+        later = NOON + timedelta(hours=4)
+        _, alert = jrun(state, [job(left_min=5), job(8, left_min=10, at=later)], later)
+        text = order_alerts.render(alert, SETTINGS, later)
+        self.assertEqual("EVE jobs: 1 job ending, 1 job to deliver\n\n"
+                         "⚙ X-EXMPL\n   Builder: 1 invention · in 10 min\n\n"
+                         "Still to deliver:\n⚙ X-EXMPL\n   Builder: 1 invention", text)
+
+    def test_orders_are_grouped_by_character_and_place_without_prices(self):
+        rows = [row(), row(2, status="outbid", side="buy", suggest=None, orders_ahead=1, units_ahead=1, days_ahead=None),
+                row(3, type_name="Gadget II", units_ahead=900, days_ahead=3.0, orders_ahead=7),
+                row(4, owner="Other", owner_key="char:1", location="X-EXMPL - Example Market")]
+        _, alert = run(order_alerts.empty_state(), rows)
         text = order_alerts.render(alert, SETTINGS)
-        self.assertTrue(text.startswith("EVE orders: 2 behind"))
-        self.assertIn("▼ Undercut: Widget II", text)
-        self.assertIn("ours 100 · best 99 · 5 ahead (0.5 d) · set 98.90", text)
-        self.assertIn("▲ Outbid: Widget II", text)
-        self.assertIn("Seller · sell · Jita", text)
+        self.assertEqual("EVE orders: 4 behind\n\n"
+                         "Other · X-EXMPL\n"
+                         "▼ Widget II\n   undercut by 2 orders · 5 units ahead (0.5 d)\n\n"
+                         "Seller · Jita\n"                           # deepest first
+                         "▼ Gadget II\n   undercut by 7 orders · 900 units ahead (3.0 d)\n"
+                         "▼ Widget II\n   undercut by 2 orders · 5 units ahead (0.5 d)\n"
+                         "▲ Widget II\n   outbid by 1 order · 1 unit ahead", text)
+        for price in ("100", "99", "98.9"):
+            self.assertNotIn(price, text)
+
+    def test_back_on_top_filled_and_the_reminder_label(self):
+        alert = order_alerts.Alert(behind=[row(4, type_name="Gadget II")],
+                                   back_on_top=[row(2, status="cheapest"), row(5, status="top", side="buy")],
+                                   filled=[row(3, side="buy")], still_behind=[row()])
+        text = order_alerts.render(alert, SETTINGS, NOON)
+        self.assertEqual("EVE orders: 1 behind, 2 back on top, 1 filled, 1 still behind\n\n"
+                         "Seller · Jita\n"
+                         "▼ Gadget II\n   undercut by 2 orders · 5 units ahead (0.5 d)\n"
+                         "✓ Widget II\n   cheapest again\n"
+                         "✓ Widget II\n   top bid again\n"
+                         "● Widget II\n   bought all 10\n\n"
+                         "Still behind:\n"                           # only next to other order news
+                         "Seller · Jita\n"
+                         "▼ Widget II\n   undercut by 2 orders · 5 units ahead (0.5 d)", text)
+
+    def test_where_is_the_system_of_a_station_or_structure(self):
+        for name, system in (("Jita IV - Moon 4 - Caldari Navy Assembly Plant", "Jita"),
+                             ("X-EXMPL - Example Labs", "X-EXMPL"), ("Old Man Star VI - Some Station", "Old Man Star"),
+                             ("facility 123", "facility 123"), ("", "")):
+            self.assertEqual(system, order_alerts._where({"location": name}))
+        self.assertEqual(["⚙ Jobs", "   Builder: 1 invention"], order_alerts.job_lines([job(location=None)]))
+
+    def test_time_left_of_a_group(self):
+        ts = NOON.timestamp()
+        for lefts, text in (((-5, 0), "ready"), ((12, 12), "in 12 min"), ((5, 12), "in 5–12 min"),
+                            ((50, 70), "in 50 min–1 h 10 min"), ((-1, -1, 12), "2 ready, rest in 12 min")):
+            self.assertEqual(text, order_alerts.time_left([job(i, left_min=m) for i, m in enumerate(lefts)], ts))
 
 
 class _Response(io.BytesIO):

@@ -1243,18 +1243,16 @@ eve-skills alerts run                            # what eve-orders-alert.timer r
 exactly like `orders --check` (player structures from their own book). One Telegram message then lists
 what is new since the last run:
 
-- **Undercut / Outbid**, once per price of ours: the item's full name, who, where, our price, the best
-  competitor, the units ahead and the price to set. Repricing and falling behind again is a new alert.
+- **Undercut / Outbid**, once per price of ours. Repricing and falling behind again is a new alert.
 - **Still behind**, a reminder of every order still behind at the announced price, at most every
   `remind_hours`. It is never sent in quiet hours; it waits for the morning.
 - **Back on top**, when an announced order is cheapest or top bid again at the same price, because the
   competition left. When you repriced the order yourself, nothing is sent.
 - **Filled**, when an order left the book and ESI's history shows it filled. History is cached for up to
   an hour, so this can come one or two runs after the sale.
-- **Job ending / Job done**, once per industry job, when it has at most `job_notice_minutes` (default 20)
-  left or has already finished. Jobs of one character, activity, product and facility are one line. Until
-  it is delivered, the job is listed under **Jobs to deliver** in the same reminder as the orders still
-  behind, on the same `remind_hours` clock. A delivered job leaves the character's job list and is
+- **Jobs ending**, once per industry job, when it has at most `job_notice_minutes` (default 20) left or
+  has already finished. Until it is delivered, the job is listed again in the same reminder as the orders
+  still behind, on the same `remind_hours` clock. A delivered job leaves the character's job list and is
   dropped without a message; a paused job is not news. Jobs come from each character's own job list,
   which includes the jobs it installed for its corporation.
 - **Window summary**, once per finish window, on the first run inside it: the jobs ready to deliver per
@@ -1262,12 +1260,35 @@ what is new since the last run:
   the window. It is sent only when something is ready or a slot is free, and the jobs it lists count as
   announced. The windows are `jobs.windows` in `alerts.json`, else the operation file's
   `planning.finish_windows`; with neither there are no summaries. Slots are read only on that run.
-- **Batching:** jobs finish one by one over an hour or two, so a job due for its "Job ending / Job done"
-  line is held back while another job of the same site (the operation file's sites; everyone is one site
+- **Batching:** jobs finish one by one over an hour or two, so a job due for its "jobs ending" line is
+  held back while another job of the same site (the operation file's sites; everyone is one site
   without one) ends within `jobs.batch_minutes` (default 45), unless the oldest held job has waited
   `jobs.max_wait_minutes` (default 90). Then the whole site goes out in one message. In quiet hours no
   job news is sent at all; the next window summary covers the night. A failed jobs read skips the
   summary and the batching for that run (the per-job lines work as before).
+
+The message is laid out for a phone: a title with the counts, then short lines. Orders are grouped by
+character and place, two lines each: the full item name (pasteable into EVE search), then where the order
+stands, deepest first. It gives the competing orders priced ahead, their units and how many days of
+regional volume those are, never prices (`orders --check` has our price, the best competitor and the price
+to set). Jobs are counted per facility, character and activity, with the time left; the products are not
+listed.
+
+```
+EVE: 2 behind, 1 filled, 7 jobs ending
+
+Seller One · X-EXMPL
+▼ Small Example Rig II
+   undercut by 3 orders · 120 units ahead (0.4 d)
+▲ Example Datacore
+   outbid by 1 order · 306 units ahead (6.6 d)
+● Medium Example Rig II
+   sold all 10
+
+⚙ Y-EXMPL
+   Builder One: 4 manufacturing · ready
+   Builder Two: 2 manufacturing, 1 copying · in 5–12 min
+```
 
 Settings live in `alerts.json` in the config directory, written with the defaults on first use:
 `exclude_locations` (case-insensitive parts of a station name, e.g. `"Z-EXCL"`), `exclude_characters`,

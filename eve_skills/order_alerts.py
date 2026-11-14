@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime, timezone
 
@@ -339,16 +340,26 @@ def evaluate(state: dict, rows: list[dict], closed: dict[int, str], read_owners:
     return new_state, alert
 
 
-def _num(value) -> str:
-    if value is None:
-        return "-"
-    return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
+def _plural(count: int, word: str) -> str:
+    return f"{count:,} {word}{'' if count == 1 else 's'}"
+
+
+_NUMERAL = re.compile(r"\s+[IVXLC]+$")
 
 
 def _where(row: dict) -> str:
-    """The system part of a station name - `Jita`, `X-EXMPL` - which is how one says where."""
+    """The system part of a station or structure name - `Jita`, `X-EXMPL` - which is how one says where.
+
+    A station is `System Planet - Moon - Name`, a structure `System - Name`: the first part without the
+    planet's numeral. A place nobody could name (`facility 123`) stays whole; no name at all is empty."""
     name = str(row.get("location") or "")
-    return name.split(" ")[0] if name else "?"
+    return _NUMERAL.sub("", name.split(" - ")[0].strip())
+
+
+def _place(who, row: dict) -> str:
+    """`Who · Where`: the character to log in and the place, which is the unit one acts on."""
+    where = _where(row)
+    return f"{who or '?'} · {where}" if where else str(who or "?")
 
 
 def _left(job: dict, ts: float) -> float | None:
@@ -356,49 +367,100 @@ def _left(job: dict, ts: float) -> float | None:
     return None if end is None else end - ts
 
 
-def _job_groups(jobs: list[dict], ts: float) -> list[dict]:
-    """Jobs of one installer, activity, product and facility as one line: ten inventions of the same
-    blueprint finishing together are one thing to collect."""
-    groups: dict[tuple, dict] = {}
-    for job in jobs:
-        key = (job.get("installer"), job.get("activity"), job.get("product"), job.get("location"))
-        group = groups.setdefault(key, {"installer": key[0], "activity": key[1], "product": key[2],
-                                        "location": key[3], "count": 0, "runs": 0, "left": []})
-        group["count"] += 1
-        group["runs"] += int(job.get("runs") or 0)
-        left = _left(job, ts)
-        if left is not None:
-            group["left"].append(left)
-    return sorted(groups.values(), key=lambda g: (min(g["left"], default=0), str(g["installer"])))
-
-
 def _minutes(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60:02d} min"
 
 
-def _group_text(group: dict) -> tuple[str, str]:
-    """(what, when) for a job group: `invention · 10 jobs` and `ready` / `12 min left`."""
-    count, runs = group["count"], group["runs"]
-    what = f"{group['activity']} · {count} job{'s' if count != 1 else ''}"
-    if runs and runs != count:
-        what += f", {runs:,} runs"
-    lefts = [x for x in group["left"] if x > 0]
-    if not lefts:
-        when = "ready"
-    elif len(lefts) < len(group["left"]):
-        when = f"some ready, rest in {_minutes(max(lefts))}"
-    elif _minutes(min(lefts)) == _minutes(max(lefts)):
-        when = f"{_minutes(max(lefts))} left"
-    else:
-        when = f"{_minutes(min(lefts))}–{_minutes(max(lefts))} left"
-    return what, when
+def _span(low: float, high: float) -> str:
+    """`12 min`, `5–12 min` or `50 min–1 h 10 min` for the shortest and longest time left."""
+    first, last = _minutes(low), _minutes(high)
+    if first == last:
+        return last
+    return f"{first.removesuffix(' min')}–{last}" if round(high / 60) < 60 else f"{first}–{last}"
+
+
+def time_left(jobs: list[dict], ts: float) -> str:
+    """`ready`, `in 12 min`, `in 5–12 min` or `2 ready, rest in 12 min` for a group of jobs."""
+    left = [x for x in (_left(job, ts) for job in jobs) if x is not None]
+    later = [x for x in left if x > 0]
+    if not later:
+        return "ready"
+    if len(later) < len(left):
+        return f"{len(left) - len(later)} ready, rest in {_minutes(max(later))}"
+    return f"in {_span(min(later), max(later))}"
+
+
+def job_lines(jobs: list[dict], when=None) -> list[str]:
+    """`⚙ Where`, then one line per installer: `   Who: 10 invention, 2 copying · when`.
+
+    The products are left out on purpose: one delivers per character and facility, and the industry
+    window lists the items. `when(jobs)` is the text after the counts of one line (None: nothing).
+    Facilities and installers come in the order of their first job to finish."""
+    def first_end(members: list[dict]) -> float:
+        return min((end for end in (_end_ts(job) for job in members) if end is not None), default=0.0)
+
+    places: dict[str, dict[str, list[dict]]] = {}
+    for job in jobs:
+        places.setdefault(_where(job), {}).setdefault(str(job.get("installer") or "?"), []).append(job)
+    lines = []
+    for where, people in sorted(places.items(), key=lambda kv: (first_end(sum(kv[1].values(), [])), kv[0])):
+        lines.append(f"⚙ {where or 'Jobs'}")
+        for who, members in sorted(people.items(), key=lambda kv: (first_end(kv[1]), kv[0])):
+            counts: dict[str, int] = {}
+            for job in members:
+                activity = str(job.get("activity") or "industry")
+                counts[activity] = counts.get(activity, 0) + 1
+            what = ", ".join(f"{n} {activity}"
+                             for activity, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+            tail = when(members) if when else None
+            lines.append(f"   {who}: {what}" + (f" · {tail}" if tail else ""))
+    return lines
+
+
+def _behind_text(row: dict) -> str:
+    """`undercut by 3 orders · 120 units ahead (0.4 d)`: how deep the order sits, without the prices."""
+    verb = "outbid" if row.get("status") == "outbid" else "undercut"
+    count = row.get("orders_ahead")
+    text = f"{verb} by {_plural(int(count), 'order')}" if count else verb
+    units = row.get("units_ahead")
+    if units:
+        days = row.get("days_ahead")
+        text += f" · {_plural(int(units), 'unit')} ahead" + (f" ({days:.1f} d)" if days is not None else "")
+    return text
+
+
+def _depth(row: dict) -> tuple:
+    """Deepest first: days of volume ahead, then units (an unknown volume sorts by its units)."""
+    return (-(row.get("days_ahead") or 0.0), -(row.get("units_ahead") or 0), str(row.get("type_name")))
+
+
+def _order_blocks(items: list[tuple[str, dict, str]]) -> list[str]:
+    """One block per character and place: `Who · Where`, then two lines per order - the mark and the
+    full item name (pasteable into EVE search), and what happened to it."""
+    groups: dict[tuple[str, str], list[tuple[str, dict, str]]] = {}
+    for item in items:
+        groups.setdefault((str(item[1].get("owner") or "?"), _where(item[1])), []).append(item)
+    blocks = []
+    for (who, _), members in sorted(groups.items(), key=lambda kv: kv[0]):
+        lines = [_place(who, members[0][1])]
+        for mark, row, text in members:
+            lines += [f"{mark} {row.get('type_name')}", f"   {text}"]
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def _behind_items(rows: list[dict]) -> list[tuple[str, dict, str]]:
+    return [("▲" if row.get("status") == "outbid" else "▼", row, _behind_text(row))
+            for row in sorted(rows, key=_depth)]
 
 
 def render(alert: Alert, settings: Settings, now: datetime | None = None) -> str:
-    """The message: one block per kind, each line the full item name (pasteable into EVE search)."""
+    """The message: a title with the counts, then short lines for a phone.
+
+    Orders are grouped by character and place, with the standing instead of prices (the client shows
+    those when one opens the order). Jobs are counted per character, facility and activity."""
     ts = (now or datetime.now(timezone.utc)).timestamp()
-    parts = []
     head = []
     if alert.behind:
         head.append(f"{len(alert.behind)} behind")
@@ -407,52 +469,36 @@ def render(alert: Alert, settings: Settings, now: datetime | None = None) -> str
     if alert.filled:
         head.append(f"{len(alert.filled)} filled")
     if alert.jobs_soon:
-        head.append(f"{len(alert.jobs_soon)} job{'s' if len(alert.jobs_soon) != 1 else ''} ending")
-    if not head:
-        if alert.still_behind:
-            head.append(f"{len(alert.still_behind)} still behind")
-        if alert.jobs_waiting:
-            head.append(f"{len(alert.jobs_waiting)} jobs to deliver")
-    order_news = alert.behind or alert.back_on_top or alert.filled or alert.still_behind
-    job_news = alert.jobs_soon or alert.jobs_waiting
-    title = "EVE orders" if order_news and not job_news else "EVE jobs" if job_news and not order_news else "EVE"
-    parts.append(f"{title}: " + ", ".join(head))
-
-    def behind_line(row: dict) -> str:
-        verb = "Outbid" if row.get("status") == "outbid" else "Undercut"
-        ahead = row.get("units_ahead") or 0
-        days = row.get("days_ahead")
-        ahead_text = f"{ahead:,} ahead" + (f" ({days:.1f} d)" if days is not None else "")
-        return (f"{'▲' if verb == 'Outbid' else '▼'} {verb}: {row.get('type_name')}\n"
-                f"   {row.get('owner')} · {row.get('side')} · {_where(row)}\n"
-                f"   ours {_num(row.get('price'))} · best {_num(row.get('best_other'))} · {ahead_text}"
-                + (f" · set {_num(row.get('suggest'))}" if row.get("suggest") is not None else ""))
-
-    for row in alert.behind:
-        parts.append(behind_line(row))
-    for row in alert.back_on_top:
-        parts.append(f"✓ Back on top: {row.get('type_name')}\n"
-                     f"   {row.get('owner')} · {row.get('side')} · {_where(row)} at {_num(row.get('price'))}")
-    for row in alert.filled:
-        verb = "bought" if row.get("side") == "buy" else "sold"
-        parts.append(f"● Filled: {row.get('type_name')}\n"
-                     f"   {row.get('owner')} {verb} {row.get('volume_total') or 0:,} at "
-                     f"{_num(row.get('price'))} · {_where(row)}")
-    for group in _job_groups(alert.jobs_soon, ts):
-        what, when = _group_text(group)
-        parts.append(f"⚙ Job {'done' if when == 'ready' else 'ending'}: {group['product']}\n"
-                     f"   {group['installer']} · {what} · {_where(group)} · {when}")
+        head.append(f"{_plural(len(alert.jobs_soon), 'job')} ending")
+    if alert.still_behind:          # the reminders after the news: the title names every block below
+        head.append(f"{len(alert.still_behind)} still behind")
     if alert.jobs_waiting:
-        lines = [f"Jobs to deliver (reminder every {settings.remind_hours:g} h):"]
-        for group in _job_groups(alert.jobs_waiting, ts):
-            what, when = _group_text(group)
-            lines.append(f"   {group['product']} · {group['installer']} · {what} · {_where(group)} · {when}")
-        parts.append("\n".join(lines))
+        head.append(f"{_plural(len(alert.jobs_waiting), 'job')} to deliver")
+    order_news = alert.behind or alert.back_on_top or alert.filled
+    job_news = alert.jobs_soon or alert.jobs_waiting
+    any_orders = order_news or alert.still_behind
+    title = "EVE orders" if any_orders and not job_news else "EVE jobs" if job_news and not any_orders else "EVE"
+    parts = [f"{title}: " + ", ".join(head)]
+
+    items = _behind_items(alert.behind)
+    items += [("✓", row, "top bid again" if row.get("side") == "buy" else "cheapest again")
+              for row in alert.back_on_top]
+    items += [("●", row, f"{'bought' if row.get('side') == 'buy' else 'sold'} all {row.get('volume_total') or 0:,}")
+              for row in alert.filled]
+    parts += _order_blocks(items)
+
+    if alert.jobs_soon:
+        parts.append("\n".join(job_lines(alert.jobs_soon, lambda jobs: time_left(jobs, ts))))
+    if alert.jobs_waiting:
+        def waiting(jobs: list[dict]) -> str | None:
+            text = time_left(jobs, ts)
+            return None if text == "ready" else text
+        # The label only when the message also has jobs just ending: alone, the title says it.
+        label = ["Still to deliver:"] if alert.jobs_soon else []
+        parts.append("\n".join(label + job_lines(alert.jobs_waiting, waiting)))
     if alert.still_behind:
-        lines = [f"Still behind (reminder every {settings.remind_hours:g} h):"]
-        for row in alert.still_behind:
-            lines.append(f"   {row.get('type_name')} · {row.get('owner')} · {_where(row)} · ours "
-                         f"{_num(row.get('price'))}, best {_num(row.get('best_other'))}"
-                         + (f", set {_num(row.get('suggest'))}" if row.get("suggest") is not None else ""))
-        parts.append("\n".join(lines))
+        blocks = _order_blocks(_behind_items(alert.still_behind))
+        if order_news:
+            blocks[0] = "Still behind:\n" + blocks[0]
+        parts += blocks
     return "\n\n".join(parts)
