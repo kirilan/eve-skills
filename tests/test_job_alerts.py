@@ -74,18 +74,21 @@ class WindowSummaryTests(unittest.TestCase):
         self.assertFalse(job_alerts.summary_due(job_alerts.empty_state(), SETTINGS, WINDOWS, at(12)))
         self.assertFalse(job_alerts.summary_due(job_alerts.empty_state(), SETTINGS, WINDOWS, at(6)))   # quiet
 
-    def test_render_lists_full_names_and_groups(self):
+    def test_render_counts_jobs_per_character_and_facility(self):
+        here = {"location": "X-EXMPL - Example Factory"}
         summary = {"window": "08:00-10:00", "slots_read": True,
-                   "ready": [job(1, at(7)), job(2, at(7, 10))],
+                   "ready": [job(1, at(7), **here), job(2, at(7, 10), **here)],
                    "free": [{"character": "Bob Inventor", "science": 3}],
-                   "ending": [job(3, at(9)), job(4, at(9, 20)), job(5, at(9, 40), installer="Bob Inventor",
-                                                                activity="invention", product="Hobgoblin II Blueprint")]}
+                   "ending": [job(3, at(9), **here), job(4, at(9, 20), **here),
+                              job(5, at(9, 40), installer="Bob Inventor", activity="invention",
+                                  product="Hobgoblin II Blueprint", location="Z-EXMPL - Example Labs")]}
         text = job_alerts.render_summary(summary, SETTINGS, at(8))
-        self.assertIn("EVE jobs: 08:00-10:00 window, 2 ready, 3 free slots", text)
-        self.assertIn("Alice Builder · manufacturing · 2× Hobgoblin II", text)
-        self.assertIn("Bob Inventor: 3 science", text)
-        self.assertIn("09:00-09:20 Alice Builder · manufacturing · 2× Hobgoblin II", text)
-        self.assertIn("09:40 Bob Inventor · invention · 1× Hobgoblin II Blueprint", text)
+        self.assertEqual("EVE jobs: 08:00-10:00 window, 2 ready, 3 free slots\n\n"
+                         "Ready to deliver:\n⚙ X-EXMPL\n   Alice Builder: 2 manufacturing\n\n"
+                         "Free slots:\n   Bob Inventor: 3 science\n\n"
+                         "Ending in the window:\n⚙ X-EXMPL\n   Alice Builder: 2 manufacturing · 09:00-09:20\n"
+                         "⚙ Z-EXMPL\n   Bob Inventor: 1 invention · 09:40", text)
+        self.assertNotIn("Hobgoblin", text)                         # the products are not listed
 
 
 class BatchTests(unittest.TestCase):
@@ -189,7 +192,7 @@ class RunTests(unittest.TestCase):
         saved, sent, _ = self.run_alerts((jobs, {"char:Alice Builder"}, []), at(8, 5))
         self.assertEqual(len(sent), 1)
         self.assertIn("EVE jobs: 08:00-10:00 window", sent[0])
-        self.assertNotIn("Job done", sent[0])                       # the summary lists it instead
+        self.assertNotIn("jobs ending", sent[0])                    # the summary lists them instead
         self.assertEqual(set(saved["orders"]["jobs"]), {"1", "2"})  # announced: no per-job repeat later
         self.assertEqual(saved["jobs"]["last_window"], "2030-01-02 08:00-10:00")
 

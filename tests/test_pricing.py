@@ -65,6 +65,15 @@ class StandingTests(unittest.TestCase):
         self.assertEqual(("undercut", 300, 3.0, 3.99),
                          (doc["status"], doc["units_ahead"], doc["days_ahead"], doc["suggest"]))
 
+    def test_orders_ahead_counts_the_competing_orders_priced_better(self):
+        sells = book((3.0, 5), (4.0, 300), (4.5, 20), (5.0, 10), (5.0, 7), (6.0, 1))
+        doc = pricing.standing(False, 5.0, 10, sells, {903, 904}, 100)      # ours and its sibling at 5.0
+        self.assertEqual((3, 325), (doc["orders_ahead"], doc["units_ahead"]))
+        self.assertEqual(0, pricing.standing(False, 2.0, 10, sells, {903}, 100)["orders_ahead"])
+        self.assertEqual(0, pricing.standing(False, 5.0, 10, [], set(), 100)["orders_ahead"])
+        buys = book((3.3, 10), (3.2, 1000), (3.1, 500))
+        self.assertEqual(2, pricing.standing(True, 3.1, 500, buys, {902}, 50)["orders_ahead"])
+
     def test_only_a_sliver_ahead_leaves_the_order_alone(self):
         sells = book((3.0, 1), (5.0, 100), (5.5, 500))
         doc = pricing.standing(False, 5.0, 100, sells, {901}, None)

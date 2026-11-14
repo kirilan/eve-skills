@@ -71,18 +71,18 @@ def standing(is_buy: bool, price: float, remain: int, book: Sequence[dict],
     """Where one of our orders stands in its station's book (that side only, best first).
 
     Returns `status` - sell: cheapest / undercut / behind sliver / alone; buy: top / outbid / alone -
-    plus the best competing price, the competing units priced ahead of ours and how many days of
-    regional volume they are, and `suggest`: a new price when a reprice would move us to the front
+    plus the best competing price, the competing orders and units priced ahead of ours, how many days
+    of regional volume those units are, and `suggest`: a new price when a reprice would move us to the front
     (None when we are already there, or only a sliver is ahead of a sell order)."""
     own = set(own_ids)
     others = [row for row in book if row.get("order_id") not in own]
     per_day = per_day or 0.0
     if not others:
-        return {"status": "alone", "best_other": None, "units_ahead": 0, "days_ahead": 0.0 if per_day else None,
-                "suggest": None, "ignored": []}
+        return {"status": "alone", "best_other": None, "orders_ahead": 0, "units_ahead": 0,
+                "days_ahead": 0.0 if per_day else None, "suggest": None, "ignored": []}
     ahead = [row for row in others if (row["price"] > price if is_buy else row["price"] < price)]
     units = sum(row["volume"] for row in ahead)
-    doc = {"best_other": others[0]["price"], "units_ahead": units,
+    doc = {"best_other": others[0]["price"], "orders_ahead": len(ahead), "units_ahead": units,
            "days_ahead": units / per_day if per_day else None, "ignored": []}
     if is_buy:
         doc.update(status="outbid" if ahead else "top",

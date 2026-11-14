@@ -26,7 +26,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import job_times, paths, storage
+from . import job_times, order_alerts, paths, storage
 
 STATE_NAME = "job-alerts.json"
 
@@ -168,46 +168,27 @@ def evaluate(state: dict, jobs: list[dict], slots: list[dict] | None, settings, 
     return new_state, JobNews(hold=hold)
 
 
-def _groups(jobs: list[dict]) -> list[tuple[str, str, str, int]]:
-    """(installer, activity, product, count) lines, in a stable order."""
-    counts: dict[tuple[str, str, str], int] = {}
-    for job in jobs:
-        key = (str(job.get("installer") or "?"), str(job.get("activity") or "industry"),
-               str(job.get("product") or job.get("product_id") or "?"))
-        counts[key] = counts.get(key, 0) + 1
-    return [(*key, n) for key, n in sorted(counts.items())]
-
-
 def render_summary(summary: dict, settings, now: datetime) -> str:
-    """The window message: ready jobs per character, free slots, jobs still ending in the window."""
+    """The window message: ready jobs per character and facility, free slots, jobs still ending in the
+    window. Job lines are `order_alerts.job_lines`: counts per activity, no products."""
     tz = job_times.zone(settings.timezone)
     free_total = sum(row.get("manufacturing", 0) + row.get("science", 0) for row in summary["free"])
-    head = [f"{len(summary['ready'])} ready"] + ([f"{free_total} free slots"] if free_total else [])
+    head = [f"{len(summary['ready'])} ready"] + ([f"{free_total} free slot{'' if free_total == 1 else 's'}"]
+                                                 if free_total else [])
     parts = [f"EVE jobs: {summary['window']} window, " + ", ".join(head)]
     if summary["ready"]:
-        lines = ["Ready to deliver:"]
-        lines += [f"   {who} · {activity} · {n}× {product}" for who, activity, product, n in _groups(summary["ready"])]
-        parts.append("\n".join(lines))
+        parts.append("\n".join(["Ready to deliver:"] + order_alerts.job_lines(summary["ready"])))
     if summary["free"]:
         lines = ["Free slots:"]
         for row in summary["free"]:
-            cells = [f"{row[kind]} {label}" for kind, label in (("manufacturing", "manufacturing"),
-                                                                 ("science", "science")) if row.get(kind)]
+            cells = [f"{row[kind]} {kind}" for kind in ("manufacturing", "science") if row.get(kind)]
             lines.append(f"   {row['character']}: {', '.join(cells)}")
         parts.append("\n".join(lines))
     elif not summary.get("slots_read", True):
         parts.append("Free slots: not read this run")
     if summary["ending"]:
-        lines = ["Ending in the window:"]
-        spans: dict[tuple[str, str, str], list] = {}
-        for job in summary["ending"]:
-            key = (str(job.get("installer") or "?"), str(job.get("activity") or "industry"),
-                   str(job.get("product") or job.get("product_id") or "?"))
-            spans.setdefault(key, []).append(_end(job))
-        for (who, activity, product), ends in sorted(spans.items(),
-                                                     key=lambda kv: (min(e or now for e in kv[1]), kv[0])):
-            known = [e.astimezone(tz).strftime("%H:%M") for e in ends if e]
-            when = "?" if not known else known[0] if min(known) == max(known) else f"{min(known)}-{max(known)}"
-            lines.append(f"   {when} {who} · {activity} · {len(ends)}× {product}")
-        parts.append("\n".join(lines))
+        def clock(jobs: list[dict]) -> str:
+            known = sorted(end.astimezone(tz).strftime("%H:%M") for end in map(_end, jobs) if end)
+            return "?" if not known else known[0] if known[0] == known[-1] else f"{known[0]}-{known[-1]}"
+        parts.append("\n".join(["Ending in the window:"] + order_alerts.job_lines(summary["ending"], clock)))
     return "\n\n".join(parts)

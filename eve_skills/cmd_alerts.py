@@ -103,7 +103,7 @@ def _checked_rows(client: esi_mod.Esi, chars, settings) -> tuple[list[dict], dic
     checks = cmd_orders.check_orders(client, wanted, {o.order_id for o in book})
     for row in rows:
         row.update({k: v for k, v in (checks.get(row["order_id"]) or {}).items()
-                    if k in ("status", "best_other", "units_ahead", "days_ahead", "suggest", "error")})
+                    if k in ("status", "best_other", "orders_ahead", "units_ahead", "days_ahead", "suggest", "error")})
     closed = {o.order_id: o.state for owner in owners if owner.history_ok for o in owner.history}
     # An owner without readable history cannot prove an order closed; treat it as unread.
     read = {owner.owner_key for owner in owners if owner.history_ok}

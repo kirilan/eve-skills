@@ -186,8 +186,8 @@ orders: [{order_id: int, owner_key, owner_name: str, is_buy, is_corporation: boo
           volume_remain, filled: int, state, issued: str, duration: int, expires: str, escrow: float|null,
           min_volume: int|null, range: str, wallet_division: int|null, issued_by: int|null,
           issued_by_name: str|null,
-          check: {best_other: float|null, units_ahead: int, days_ahead: float|null, ignored: [...], status: str,
-                  suggest: float|null, volume_per_day: float, book_as_of: str}}]
+          check: {best_other: float|null, orders_ahead, units_ahead: int, days_ahead: float|null, ignored: [...],
+                  status: str, suggest: float|null, volume_per_day: float, book_as_of: str}}]
 totals: {sell_orders: int, sell_isk: float, buy_orders: int, buy_escrow_isk: float, buy_escrow_missing: int}
 ```
 
