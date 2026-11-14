@@ -182,7 +182,7 @@ def build_document(*, since: str | None, live: bool = True, refresh_minutes: int
     stock["error"] = inventory_error
     stock["as_of"] = (inventory or {}).get("prices_as_of")
     return dashboard.document(book, header, since=start, now=_iso(now), today=now.date(),
-                              names=lambda ids: cmd_ledger._names(client, ids),
+                              names=lambda ids: cmd_ledger.place_names(client, ids),
                               status=status, status_error=status_error, orders=orders, orders_error=orders_error,
                               stock=stock, refresh_minutes=refresh_minutes, planetary=planetary,
                               colonies=colonies, colonies_error=colonies_error, planet_names=planet_names)

@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import alphadata, esi as esi_mod, exports, industry, ledger, ledger_db, ledger_query, ledger_sync, market, sso
+from . import operation, universe
 from . import render
 
 NOTES = {
@@ -100,6 +101,64 @@ def _names(client: esi_mod.Esi | None, ids) -> dict[int, str]:
         return esi_mod.resolve_names(client, wanted)
     except esi_mod.EsiError:
         return {}     # names are decoration; an outage must not cost the report
+
+
+_STRUCTURE_NAMES: dict[int, str | None] = {}   # per process, refusals too: a dashboard asks once per structure
+
+
+def _operation_places() -> dict[int, str]:
+    """Location id -> label from the operation file's hubs and facilities (no ESI call)."""
+    try:
+        op = operation.load()
+    except operation.OperationError:
+        return {}
+    out = {f.location_id: f.label or f.name for f in op.facilities.values() if f.location_id}
+    out.update({h.location_id: h.label for h in op.hubs.values() if h.location_id})
+    return out
+
+
+def _structure_names(client: esi_mod.Esi | None, ids) -> dict[int, str]:
+    """Names of player structures by `/universe/structures/{id}`, asking each stored character with
+    the structures consent until one may look. What nobody may look at stays unnamed."""
+    wanted = {int(i) for i in ids if i is not None and int(i) > market.STRUCTURE_ID_FLOOR}
+    found = {i: _STRUCTURE_NAMES[i] for i in wanted if _STRUCTURE_NAMES.get(i)}
+    missing = sorted(i for i in wanted if i not in _STRUCTURE_NAMES)
+    if not missing or client is None:
+        return found
+    tokens = []
+    try:
+        for rec in sso.list_characters():
+            tok = sso.get_access_token(int(rec["character_id"]))
+            if universe.STRUCTURE_SCOPE in set(tok.get("scopes") or []):
+                tokens.append(tok["access_token"])
+    except Exception:  # noqa: BLE001 - names are decoration; a login problem must not cost the report
+        pass
+    for structure_id in missing:
+        for token in tokens:
+            try:
+                doc = client.get(f"/universe/structures/{structure_id}", token=token)
+            except esi_mod.EsiError:
+                continue
+            if isinstance(doc, dict) and doc.get("name"):
+                found[structure_id] = doc["name"]
+                break
+        if tokens:   # with no usable token nothing was asked: try again next time
+            _STRUCTURE_NAMES[structure_id] = found.get(structure_id)
+    return found
+
+
+def place_names(client: esi_mod.Esi | None, ids) -> dict[int, str]:
+    """Station names, player structures included: `/universe/names` for NPC stations, then
+    `/universe/structures` with a stored character's token, then the operation file's hub and
+    facility labels for a structure nobody may look at."""
+    wanted = {int(i) for i in ids if i is not None}
+    names = _names(client, wanted)
+    rest = wanted - set(names)
+    if rest:
+        names.update(_structure_names(client, rest))
+        known = _operation_places()
+        names.update({i: known[i] for i in rest - set(names) if i in known})
+    return names
 
 
 def _name(names: dict[int, str], ident) -> str:
@@ -298,7 +357,7 @@ def cmd_markets(args) -> int:
         book, header, _recipes, _inv = _state(conn)
         args.since = args.since or header["cutover"]
         rows = ledger.markets(book, since=args.since, until=args.until)
-        names = _names(_client(), [r["location_id"] for r in rows])
+        names = place_names(_client(), [r["location_id"] for r in rows])
         for r in rows:
             r["location_name"] = names.get(r["location_id"]) if r["location_id"] is not None else None
         if args.json:
